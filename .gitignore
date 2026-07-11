@@ -1,0 +1,27 @@
+.env
+.env.production
+.venv/
+__pycache__/
+*.pyc
+.idea/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.env.local
+.pnpm-store/
+
+# Backend runtime data
+backend/data/*.db
+backend/data/*.sqlite3
+knowledge_base/uploads/*
+knowledge_base/chroma/*
+!knowledge_base/uploads/.gitkeep
+!knowledge_base/chroma/.gitkeep
+
+# Tooling
+.pytest_cache/
+.ruff_cache/
+.coverage
+.DS_Store
+*.tsbuildinfo

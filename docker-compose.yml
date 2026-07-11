@@ -1,0 +1,51 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    restart: unless-stopped
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      DATABASE_URL: sqlite:////app/data/app.db
+      CORS_ORIGINS: '["http://localhost"]'
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:?请在 .env.production 中配置 JWT_SECRET_KEY}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?请配置初始管理员密码}
+      AI_MOCK_MODE: ${AI_MOCK_MODE:-true}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      CHROMA_PERSIST_DIRECTORY: /app/knowledge/chroma
+      KNOWLEDGE_UPLOAD_DIRECTORY: /app/knowledge/uploads
+      LOG_LEVEL: INFO
+    volumes:
+      - app_data:/app/data
+      - knowledge_uploads:/app/knowledge/uploads
+      - chroma_data:/app/knowledge/chroma
+    expose:
+      - "8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "80:80"
+
+volumes:
+  app_data:
+  knowledge_uploads:
+  chroma_data:
