@@ -134,11 +134,6 @@ cd backend
 python -m scripts.seed_demo
 ```
 
-验收账号：
-
-- 管理员：`admin` / `Admin@123456`
-- 学生：`student_demo` / `Student@123456`
-
 示例数据包含一门课程、两个章节和一份已向量化的 Markdown 课程资料。上述账号和密码仅用于本地 MVP 验收，部署前必须修改。
 
 ## 当前 MVP 边界
