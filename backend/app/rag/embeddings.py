@@ -2,7 +2,7 @@ import hashlib
 import math
 
 from langchain_core.embeddings import Embeddings
-from langchain_openai import OpenAIEmbeddings
+from openai import OpenAI
 
 from app.core.config import settings
 
@@ -30,15 +30,36 @@ class DeterministicEmbeddings(Embeddings):
         return self._embed(text)
 
 
+class OpenAICompatibleEmbeddings(Embeddings):
+    """直接调用 /embeddings，兼容 DashScope 等 OpenAI 风格服务。"""
+
+    def __init__(self, *, api_key: str, base_url: str, model: str) -> None:
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+        self.model = model
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        response = self.client.embeddings.create(model=self.model, input=texts)
+        ordered = sorted(response.data, key=lambda item: item.index)
+        return [item.embedding for item in ordered]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+
 def get_embeddings() -> Embeddings:
     if settings.embedding_provider == "mock":
         return DeterministicEmbeddings()
-    if settings.embedding_provider == "openai_compatible":
+    if settings.embedding_provider in {"openai_compatible", "dashscope"}:
         if not settings.embedding_api_key:
-            raise RuntimeError("EMBEDDING_API_KEY 未配置")
-        return OpenAIEmbeddings(
-            api_key=settings.embedding_api_key,
-            base_url=settings.embedding_base_url,
-            model=settings.embedding_model,
-        )
+            raise RuntimeError("EMBEDDING_API_KEY 或 DASHSCOPE_API_KEY 未配置")
+        base_url = settings.embedding_base_url
+        model = settings.embedding_model
+        if settings.embedding_provider == "dashscope":
+            base_url = base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+            model = model if model != "text-embedding-3-small" else "text-embedding-v2"
+        if not base_url:
+            raise RuntimeError("EMBEDDING_BASE_URL 未配置")
+        return OpenAICompatibleEmbeddings(api_key=settings.embedding_api_key, base_url=base_url, model=model)
     raise RuntimeError(f"不支持的 EMBEDDING_PROVIDER：{settings.embedding_provider}")

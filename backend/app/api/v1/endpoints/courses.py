@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
 from app.db.session import get_db
 from app.models.user import User
 from app.repositories.course_repository import ChapterRepository, CourseRepository
+from app.repositories.knowledge_repository import KnowledgeRepository
 from app.schemas.common import ApiResponse
 from app.schemas.course import (
     ChapterCreate,
@@ -16,6 +17,9 @@ from app.schemas.course import (
     CourseUpdate,
 )
 from app.services.course_service import CourseService
+from app.services.chapter_extractor import extract_chapters
+from app.rag.document_loader import extract_text
+from app.services.knowledge_service import KnowledgeService
 
 
 router = APIRouter(tags=["courses"])
@@ -28,6 +32,39 @@ def list_courses(
 ) -> ApiResponse[list[CourseRead]]:
     courses = CourseRepository(db).list()
     return ApiResponse(data=[CourseRead.model_validate(course) for course in courses])
+
+
+@router.post("/courses/import", response_model=ApiResponse[CourseRead], status_code=status.HTTP_201_CREATED)
+async def import_course(
+    name: str = Form(..., min_length=1, max_length=100),
+    description: str | None = Form(None, max_length=2000),
+    file: UploadFile | None = File(None),
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[CourseRead]:
+    """创建教材课程，并可在同一次导入中建立第一份知识库资料。"""
+    course = CourseService(db).create_course(CourseCreate(name=name, description=description))
+    if file is not None:
+        content = await file.read()
+        filename = file.filename or "教材资料.txt"
+        text = extract_text(filename, content)
+        source_title = (file.filename or "教材资料").rsplit(".", 1)[0]
+        KnowledgeService(db).ingest(
+            filename=filename,
+            content=content,
+            source_title=source_title,
+            course_id=course.id,
+            chapter_id=None,
+            knowledge_point=None,
+        )
+        course_service = CourseService(db)
+        for sort_order, (title, chapter_content) in enumerate(extract_chapters(text), start=1):
+            course_service.create_chapter(
+                course.id,
+                ChapterCreate(title=title, content=chapter_content, sort_order=sort_order),
+            )
+    message = "教材、专题和知识库已自动建立" if file else "教材创建成功"
+    return ApiResponse(message=message, data=CourseRead.model_validate(course))
 
 
 @router.get("/courses/{course_id}", response_model=ApiResponse[CourseDetail])
@@ -63,8 +100,12 @@ def delete_course(
 ) -> ApiResponse[dict[str, int]]:
     service = CourseService(db)
     course = service.require_course(course_id)
+    # 清理该教材的原始资料与 Chroma 向量，避免删除课程后留下孤立知识库数据。
+    knowledge_service = KnowledgeService(db)
+    for document in KnowledgeRepository(db).list(course_id=course_id):
+        knowledge_service.delete(document.id)
     service.courses.delete(course)
-    return ApiResponse(message="课程删除成功", data={"id": course_id})
+    return ApiResponse(message="教材及其知识库资料删除成功", data={"id": course_id})
 
 
 @router.get("/courses/{course_id}/chapters", response_model=ApiResponse[list[ChapterRead]])

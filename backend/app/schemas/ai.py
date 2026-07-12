@@ -28,6 +28,7 @@ class AiSource(BaseModel):
     course_id: int
     chapter_id: int
     excerpt: str
+    position: str = "当前专题正文"
 
 
 class AiAssistData(BaseModel):

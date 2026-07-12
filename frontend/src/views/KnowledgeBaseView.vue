@@ -30,7 +30,7 @@ function chooseFile(event: Event) {
   if (selectedFile.value && !form.source_title) form.source_title = selectedFile.value.name.replace(/\.[^.]+$/, '')
 }
 async function upload() {
-  if (!selectedFile.value || !form.source_title.trim() || !form.course_id) return ElMessage.warning('请选择文件、课程并填写资料标题')
+  if (!selectedFile.value || !form.source_title.trim() || !form.course_id) return ElMessage.warning('请选择文件、教材并填写资料标题')
   const payload = new FormData()
   payload.append('file', selectedFile.value)
   payload.append('source_title', form.source_title.trim())
@@ -59,21 +59,21 @@ async function reindex(document: KnowledgeDocument) {
   ElMessage.success('重新索引成功')
   documents.value = (await knowledgeApi.list()).data.data
 }
-function courseName(id: number) { return courses.value.find((item) => item.id === id)?.name || `课程 ${id}` }
-function chapterName(courseId: number, chapterId: number | null) { return chapterId ? courses.value.find((item) => item.id === courseId)?.chapters.find((item) => item.id === chapterId)?.title || `章节 ${chapterId}` : '全课程' }
+function courseName(id: number) { return courses.value.find((item) => item.id === id)?.name || `教材 ${id}` }
+function chapterName(courseId: number, chapterId: number | null) { return chapterId ? courses.value.find((item) => item.id === courseId)?.chapters.find((item) => item.id === chapterId)?.title || `专题 ${chapterId}` : '全教材' }
 onMounted(loadData)
 </script>
 
 <template>
   <div>
-    <header class="page-header"><div><p class="eyebrow">Knowledge Base</p><h1>课程知识库</h1><p>上传教材与权威资料，让 AI 回答有据可依。</p></div></header>
+    <header class="page-header"><div><p class="eyebrow">Knowledge Base</p><h1>教材知识库</h1><p>上传教材、讲义与权威资料，让 AI 回答始终围绕本课程内容。</p></div></header>
     <el-card shadow="never" class="upload-panel">
-      <div class="upload-title"><el-icon :size="28"><UploadFilled /></el-icon><div><h2>上传课程资料</h2><p>支持可复制文本的 PDF、TXT、Markdown，单个文件不超过 20 MB。</p></div></div>
+      <div class="upload-title"><el-icon :size="28"><UploadFilled /></el-icon><div><h2>上传教材资料</h2><p>支持可复制文本的 PDF、TXT、Markdown，单个文件不超过 100 MB。</p></div></div>
       <el-form label-position="top" class="upload-form">
         <el-form-item label="资料文件" required><input ref="fileInput" class="file-input" type="file" accept=".pdf,.txt,.md,.markdown" @change="chooseFile" /></el-form-item>
         <el-form-item label="资料标题" required><el-input v-model="form.source_title" maxlength="255" /></el-form-item>
-        <el-form-item label="所属课程" required><el-select v-model="form.course_id" placeholder="请选择课程" filterable @change="form.chapter_id = undefined"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item>
-        <el-form-item label="关联章节"><el-select v-model="form.chapter_id" placeholder="不选择则属于全课程" clearable><el-option v-for="chapter in selectedCourse?.chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item>
+        <el-form-item label="所属教材" required><el-select v-model="form.course_id" placeholder="请选择教材" filterable @change="form.chapter_id = undefined"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item>
+        <el-form-item label="关联专题"><el-select v-model="form.chapter_id" placeholder="不选择则属于全教材" clearable><el-option v-for="chapter in selectedCourse?.chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item>
         <el-form-item label="知识点"><el-input v-model="form.knowledge_point" placeholder="可选，如：马克思主义中国化时代化" /></el-form-item>
       </el-form>
       <el-button type="primary" :loading="uploading" @click="upload">上传并建立索引</el-button>
@@ -81,12 +81,12 @@ onMounted(loadData)
     <div class="section-heading"><div><p class="eyebrow">已入库资料</p><h2>文档列表</h2></div></div>
     <el-table v-loading="loading" :data="documents" class="knowledge-table">
       <el-table-column label="资料"><template #default="scope"><strong>{{ scope.row.source_title }}</strong><div class="table-subtitle">{{ scope.row.original_filename }}</div></template></el-table-column>
-      <el-table-column label="课程 / 章节" min-width="220"><template #default="scope"><span>{{ courseName(scope.row.course_id) }}</span><div class="table-subtitle">{{ chapterName(scope.row.course_id, scope.row.chapter_id) }}</div></template></el-table-column>
+      <el-table-column label="教材 / 专题" min-width="220"><template #default="scope"><span>{{ courseName(scope.row.course_id) }}</span><div class="table-subtitle">{{ chapterName(scope.row.course_id, scope.row.chapter_id) }}</div></template></el-table-column>
       <el-table-column prop="source_type" label="类型" width="90" />
       <el-table-column label="状态" width="110"><template #default="scope"><el-tag :type="scope.row.status === 'ready' ? 'success' : scope.row.status === 'failed' ? 'danger' : 'warning'">{{ scope.row.status }}</el-tag></template></el-table-column>
       <el-table-column prop="chunk_count" label="分块" width="80" />
       <el-table-column label="操作" width="180" fixed="right"><template #default="scope"><el-button link type="primary" @click="reindex(scope.row)">重建索引</el-button><el-button link type="danger" @click="remove(scope.row)">删除</el-button></template></el-table-column>
-      <template #empty><el-empty description="尚未上传课程资料" /></template>
+      <template #empty><el-empty description="尚未上传教材资料" /></template>
     </el-table>
   </div>
 </template>

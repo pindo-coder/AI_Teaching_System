@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,15 +24,15 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: str | None = None
     ai_mock_mode: bool = True
-    llm_api_key: str | None = None
-    llm_base_url: str | None = None
-    llm_model: str = "gpt-4o-mini"
+    llm_api_key: str | None = Field(default=None, validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY"))
+    llm_base_url: str | None = Field(default=None, validation_alias=AliasChoices("LLM_BASE_URL", "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL"))
+    llm_model: str = Field(default="gpt-4o-mini", validation_alias=AliasChoices("LLM_MODEL", "OPENAI_MODEL", "DEEPSEEK_MODEL"))
     llm_temperature: float = 0.2
     llm_timeout_seconds: int = 60
     embedding_provider: str = "mock"
-    embedding_api_key: str | None = None
-    embedding_base_url: str | None = None
-    embedding_model: str = "text-embedding-3-small"
+    embedding_api_key: str | None = Field(default=None, validation_alias=AliasChoices("EMBEDDING_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"))
+    embedding_base_url: str | None = Field(default=None, validation_alias=AliasChoices("EMBEDDING_BASE_URL", "DASHSCOPE_BASE_URL", "OPENAI_BASE_URL"))
+    embedding_model: str = Field(default="text-embedding-3-small", validation_alias=AliasChoices("EMBEDDING_MODEL", "DASHSCOPE_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"))
     chroma_persist_directory: str = "../knowledge_base/chroma"
     knowledge_upload_directory: str = "../knowledge_base/uploads"
     rag_collection_name: str = "ideology_course_kb"
@@ -39,7 +40,7 @@ class Settings(BaseSettings):
     rag_score_threshold: float = 0.15
     text_chunk_size: int = 800
     text_chunk_overlap: int = 120
-    max_upload_size_mb: int = 20
+    max_upload_size_mb: int = 100
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

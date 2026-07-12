@@ -35,6 +35,8 @@ app.dependency_overrides[get_db] = override_get_db
 
 @pytest.fixture(autouse=True)
 def reset_database(tmp_path, monkeypatch):
+    # 测试默认使用确定性向量，避免单元测试依赖外部 Embedding 服务。
+    monkeypatch.setattr(settings, "embedding_provider", "mock")
     monkeypatch.setattr(settings, "chroma_persist_directory", str(tmp_path / "chroma"))
     monkeypatch.setattr(settings, "knowledge_upload_directory", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "rag_collection_name", "test_knowledge_base")

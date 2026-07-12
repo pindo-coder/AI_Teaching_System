@@ -22,5 +22,8 @@ class Course(TimestampMixin, Base):
     chapters: Mapped[list["Chapter"]] = relationship(
         back_populates="course", cascade="all, delete-orphan", order_by="Chapter.sort_order"
     )
-    learning_progress: Mapped[list["LearningProgress"]] = relationship(back_populates="course")
+    learning_progress: Mapped[list["LearningProgress"]] = relationship(
+        back_populates="course",
+        cascade="all, delete-orphan",
+    )
     documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="course")

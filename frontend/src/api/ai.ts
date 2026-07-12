@@ -14,6 +14,7 @@ export interface AiSource {
   course_id: number
   chapter_id: number
   excerpt: string
+  position: string
 }
 
 export interface AiAssistData {

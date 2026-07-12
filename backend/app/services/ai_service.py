@@ -8,7 +8,14 @@ from langchain_openai import ChatOpenAI
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.core.prompts import AI_SYSTEM_PROMPT, AI_USER_PROMPT, STAGE_LABELS, TASK_LABELS
+from app.core.prompts import (
+    AI_SYSTEM_PROMPT,
+    AI_USER_PROMPT,
+    STAGE_INSTRUCTIONS,
+    STAGE_LABELS,
+    TASK_INSTRUCTIONS,
+    TASK_LABELS,
+)
 from app.repositories.course_repository import ChapterRepository, CourseRepository
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.rag.retriever import retrieve
@@ -16,6 +23,17 @@ from app.schemas.ai import AiAssistData, AiAssistRequest, AiSource
 
 
 logger = logging.getLogger(__name__)
+
+
+def source_position(metadata: dict[str, object]) -> str:
+    label = metadata.get("position_label")
+    if label:
+        return str(label)
+    index = metadata.get("chunk_index")
+    count = metadata.get("chunk_count")
+    if isinstance(index, int) and isinstance(count, int):
+        return f"教材文本第 {index + 1} / {count} 段"
+    return "教材文本片段"
 
 
 class AiGenerator(Protocol):
@@ -63,7 +81,23 @@ class MockGenerator:
         stage = variables["learning_stage_label"]
         title = variables["chapter_title"]
         content = variables["chapter_content"].strip()
-        excerpt = content[:240] + ("……" if len(content) > 240 else "")
+        excerpt = content[:800] + ("……" if len(content) > 800 else "")
+        if task == "生成预习问题":
+            return (
+                f"【{stage}·{task}】\n\n"
+                f"以下问题均围绕当前专题《{title}》设计：\n\n"
+                "1. 本专题试图回答的核心问题是什么？\n提问意图：明确章节主旨。\n\n"
+                "2. 本专题涉及哪些核心概念，它们之间有什么关系？\n提问意图：梳理概念结构。\n\n"
+                "3. 本专题的主要观点和论证依据是什么？\n提问意图：理解教材论述。\n\n"
+                "4. 本专题观点可以联系哪些现实问题？\n提问意图：建立理论与实践联系。\n\n"
+                "5. 学习本专题后还可以进一步思考什么问题？\n提问意图：形成拓展思考。"
+            )
+        if task == "章节重点总结":
+            return (
+                f"【{stage}·{task}】\n\n本章主旨：围绕“{title}”理解教材核心论述。\n\n"
+                f"核心内容：\n{excerpt}\n\n"
+                "学习提示：建议结合章节原文，按照“概念—观点—逻辑—现实意义”的顺序复习。"
+            )
         return (
             f"【{stage}·{task}】\n\n"
             f"本次学习围绕“{title}”展开。根据当前章节资料，可重点关注以下内容：\n\n"
@@ -89,15 +123,20 @@ class AiService:
         if chapter.course_id != course.id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节与课程不匹配")
         ready_documents = self.documents.list_ready_for_course(course.id)
-        retrieval_query = f"{chapter.title} {payload.question}"
-        retrieved_chunks = (
-            retrieve(retrieval_query, course_id=course.id, chapter_id=chapter.id)
-            if ready_documents
-            else []
-        )
-        if ready_documents and not retrieved_chunks:
+        # 导入教材自动生成的专题正文是当前章节的首要依据，不能在章节检索
+        # 不到时回退到整本教材的 Top-K，否则容易把导论内容带入其他章节。
+        chapter_content = (chapter.content or "").strip()
+        retrieved_chunks = []
+        if ready_documents:
+            retrieved_chunks = retrieve(
+                f"{chapter.title} {payload.question}",
+                course_id=course.id,
+                chapter_id=chapter.id,
+                fallback_to_course=False,
+            )
+        if not chapter_content and ready_documents and not retrieved_chunks:
             return AiAssistData(
-                answer="当前知识库中没有检索到足以回答该问题的相关资料。建议补充资料或调整问题表述。",
+                answer="当前专题没有可用的教材原文或知识库片段，暂时无法生成有依据的内容。",
                 grounded=False,
                 model="none",
             )
@@ -108,7 +147,7 @@ class AiService:
                 for index, item in enumerate(retrieved_chunks)
             )
             if retrieved_chunks
-            else (chapter.content or "").strip()
+            else chapter_content
         )
         if not content:
             return AiAssistData(
@@ -124,6 +163,8 @@ class AiService:
             "task_type_label": TASK_LABELS[payload.task_type],
             "chapter_content": content,
             "question": payload.question,
+            "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],
+            "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
         answer = self.generator.generate(variables)
         logger.info(
@@ -143,6 +184,7 @@ class AiService:
                     course_id=course.id,
                     chapter_id=chapter.id,
                     excerpt=item.content[:180] + ("……" if len(item.content) > 180 else ""),
+                    position=source_position(item.metadata),
                 )
                 for item in retrieved_chunks
             ]
@@ -154,6 +196,7 @@ class AiService:
                     course_id=course.id,
                     chapter_id=chapter.id,
                     excerpt=content[:180] + ("……" if len(content) > 180 else ""),
+                    position="当前专题正文",
                 )
             ]
         )

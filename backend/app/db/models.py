@@ -5,5 +5,6 @@ from app.models.course import Course
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.learning_progress import LearningProgress
 from app.models.user import User
+from app.models.news_item import NewsItem
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem"]

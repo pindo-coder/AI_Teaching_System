@@ -13,4 +13,5 @@ def test_all_mvp_tables_are_registered() -> None:
         "chapters",
         "learning_progress",
         "knowledge_documents",
+        "news_items",
     }

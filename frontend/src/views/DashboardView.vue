@@ -26,14 +26,14 @@ onMounted(async () => {
 
 <template>
   <div v-loading="loading">
-    <header class="page-header"><div><p class="eyebrow">学习工作台</p><h1>你好，{{ auth.user?.username }}</h1><p>今天也从一节课程、一个知识点开始。</p></div><el-button type="primary" @click="router.push('/courses')">浏览课程</el-button></header>
+    <header class="dashboard-hero"><div class="dashboard-hero-copy"><p class="eyebrow">高校思政课 · AI 学习工作台</p><h1>你好，{{ auth.user?.username }}</h1><p>从一本教材出发，把专题学习、时政关联和课堂互动串成一条学习路径。</p><el-button type="warning" size="large" @click="router.push('/courses')">进入教材空间</el-button></div><div class="dashboard-hero-art"><div class="dashboard-glow"></div><div class="dashboard-orbit"></div><div class="dashboard-core">思政<br>AI</div></div></header>
     <section class="dashboard-grid">
       <el-card shadow="never" class="progress-card">
         <div><span class="muted">综合学习进度</span><strong>{{ dashboard?.overall_progress || 0 }}%</strong></div>
         <el-progress :percentage="dashboard?.overall_progress || 0" :stroke-width="10" :show-text="false" />
       </el-card>
       <el-card shadow="never" class="current-card">
-        <span class="muted">当前课程</span><h2>{{ dashboard?.current_course?.name || '尚未开始课程' }}</h2><p>{{ dashboard?.current_chapter?.title || '选择一门课程开启学习' }}</p>
+        <span class="muted">当前教材</span><h2>{{ dashboard?.current_course?.name || '尚未开始课程' }}</h2><p>{{ dashboard?.current_chapter?.title || '选择一个专题开启学习' }}</p>
       </el-card>
     </section>
     <div class="section-heading"><div><p class="eyebrow">学习阶段</p><h2>选择你的学习任务</h2></div></div>

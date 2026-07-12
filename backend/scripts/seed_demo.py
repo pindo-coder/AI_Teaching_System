@@ -1,4 +1,4 @@
-"""创建本地验收账号、课程、章节和示例知识库资料。"""
+"""创建本地验收账号、教材专题和示例知识库资料。"""
 
 from sqlalchemy import select
 
@@ -25,11 +25,11 @@ def seed() -> None:
                 )
             )
 
-        course = db.scalar(select(Course).where(Course.name == "思想道德与法治（验收示例）"))
+        course = db.scalar(select(Course).where(Course.name == "习近平新时代中国特色社会主义思想概论"))
         if course is None:
             course = Course(
-                name="思想道德与法治（验收示例）",
-                description="用于验证课程、学习阶段、AI 助手与 RAG 知识库完整流程。",
+                name="习近平新时代中国特色社会主义思想概论",
+                description="围绕一本教材建设专题化学习、时政关联、课堂互动与 RAG 知识库。",
             )
             db.add(course)
             db.flush()
@@ -37,15 +37,21 @@ def seed() -> None:
                 [
                     Chapter(
                         course_id=course.id,
-                        title="第一章 担当复兴大任 成就时代新人",
-                        content="新时代大学生应坚定理想信念、提升思想道德素质和法治素养，努力成为担当民族复兴大任的时代新人。",
+                        title="专题一 新时代坚持和发展中国特色社会主义",
+                        content="本专题围绕新时代坚持和发展中国特色社会主义的主题，帮助学生理解新时代的历史方位、实践基础和理论创新。",
                         sort_order=1,
                     ),
                     Chapter(
                         course_id=course.id,
-                        title="第二章 领悟人生真谛 把握人生方向",
-                        content="正确的人生观强调服务人民、奉献社会，在实践中创造有意义的人生。",
+                        title="专题二 以中国式现代化全面推进中华民族伟大复兴",
+                        content="本专题聚焦中国式现代化的中国特色、本质要求和重大原则，引导学生把握强国建设、民族复兴的战略安排。",
                         sort_order=2,
+                    ),
+                    Chapter(
+                        course_id=course.id,
+                        title="专题三 坚持党的全面领导",
+                        content="本专题阐释中国共产党领导是中国特色社会主义最本质的特征和最大制度优势，理解党的领导贯穿治国理政全过程。",
+                        sort_order=3,
                     ),
                 ]
             )
@@ -59,15 +65,15 @@ def seed() -> None:
             KnowledgeService(db).ingest(
                 filename="acceptance_material.md",
                 content=(
-                    "# 担当复兴大任 成就时代新人\n\n"
-                    "理想信念是精神之钙。新时代青年要坚定马克思主义信仰、中国特色社会主义信念、"
-                    "中华民族伟大复兴信心，把个人理想融入国家和民族事业之中。\n\n"
-                    "大学生应提高思想道德素质和法治素养，在学习与社会实践中锤炼本领、担当责任。"
+                    "# 新时代坚持和发展中国特色社会主义\n\n"
+                    "习近平新时代中国特色社会主义思想围绕新时代坚持和发展什么样的中国特色社会主义、"
+                    "怎样坚持和发展中国特色社会主义等重大时代课题展开，体现了理论创新与实践创新的统一。\n\n"
+                    "高校思政课教学应引导学生把教材知识、时代发展和个人成长联系起来，形成结构化、历史化、现实化的理解。"
                 ).encode("utf-8"),
-                source_title="验收示例课程资料",
+                source_title="教材专题示例资料",
                 course_id=course.id,
                 chapter_id=chapter.id,
-                knowledge_point="理想信念与时代担当",
+                knowledge_point="新时代中国特色社会主义",
             )
         else:
             service = KnowledgeService(db)

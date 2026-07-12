@@ -11,7 +11,14 @@ class RetrievedChunk:
     score: float
 
 
-def retrieve(question: str, *, course_id: int, chapter_id: int | None, top_k: int | None = None) -> list[RetrievedChunk]:
+def retrieve(
+    question: str,
+    *,
+    course_id: int,
+    chapter_id: int | None,
+    top_k: int | None = None,
+    fallback_to_course: bool = True,
+) -> list[RetrievedChunk]:
     store = get_vector_store()
     limit = top_k or settings.rag_top_k
     filters: dict[str, object] = {"course_id": course_id}
@@ -23,7 +30,7 @@ def retrieve(question: str, *, course_id: int, chapter_id: int | None, top_k: in
         for document, score in results
         if score >= settings.rag_score_threshold
     ]
-    if not chunks and chapter_id is not None:
+    if not chunks and chapter_id is not None and fallback_to_course:
         results = store.similarity_search_with_relevance_scores(
             question, k=limit, filter={"course_id": course_id}
         )

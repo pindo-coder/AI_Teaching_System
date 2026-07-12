@@ -5,6 +5,7 @@ import { MagicStick, Promotion } from '@element-plus/icons-vue'
 import { aiApi, type AiAssistData, type AiTaskType } from '@/api/ai'
 import type { LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
+import { renderTeachingDocument } from '@/utils/richText'
 
 const props = defineProps<{
   courseId: number
@@ -46,6 +47,7 @@ const question = ref('')
 const taskType = ref<AiTaskType>('question_answer')
 const loading = ref(false)
 const result = ref<AiAssistData | null>(null)
+const renderedAnswer = computed(() => renderTeachingDocument(result.value?.answer || ''))
 
 function choosePrompt(label: string, task: AiTaskType) {
   question.value = label
@@ -85,8 +87,8 @@ async function submit() {
     </div>
     <section v-if="result" class="ai-result">
       <div class="answer-meta"><el-tag :type="result.grounded ? 'success' : 'warning'" effect="light">{{ result.grounded ? '依据课程资料生成' : '课程资料不足' }}</el-tag><span>模型：{{ result.model }}</span></div>
-      <div class="answer-content">{{ result.answer }}</div>
-      <div v-if="result.sources.length" class="answer-sources"><strong>参考资料</strong><div v-for="source in result.sources" :key="source.source_title" class="source-item"><span>{{ source.source_title }}</span><p>{{ source.excerpt }}</p></div></div>
+      <article class="answer-content teaching-document" v-html="renderedAnswer"></article>
+      <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>回答仅依据以下课程资料</span></div><div v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" class="source-item"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" type="info">{{ source.position }}</el-tag></div><p>{{ source.excerpt }}</p></div></div>
     </section>
   </el-card>
 </template>

@@ -26,7 +26,13 @@ def add_chunks(*, document_id: int, chunks: list[str], metadata: dict[str, str |
     documents = [
         Document(
             page_content=chunk,
-            metadata={**metadata, "document_id": document_id, "chunk_index": index},
+            metadata={
+                **metadata,
+                "document_id": document_id,
+                "chunk_index": index,
+                "chunk_count": len(chunks),
+                "position_label": f"教材文本第 {index + 1} / {len(chunks)} 段",
+            },
         )
         for index, chunk in enumerate(chunks)
     ]
