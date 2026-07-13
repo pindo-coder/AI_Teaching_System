@@ -14,7 +14,12 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/register", response_model=ApiResponse[UserRead], status_code=status.HTTP_201_CREATED)
 def register(payload: UserCreate, db: Session = Depends(get_db)) -> ApiResponse[UserRead]:
-    user = AuthService(db).register(username=payload.username, password=payload.password)
+    user = AuthService(db).register(
+        username=payload.username,
+        password=payload.password,
+        role=payload.role,
+        identity_no=payload.identity_no,
+    )
     return ApiResponse(message="注册成功", data=UserRead.model_validate(user))
 
 

@@ -8,7 +8,7 @@ interface TokenData {
 }
 
 export const authApi = {
-  register: (payload: { username: string; password: string }) =>
+  register: (payload: { username: string; password: string; role: 'student' | 'teacher'; identity_no: string }) =>
     http.post<ApiResponse<User>>('/auth/register', payload),
   login: (payload: { username: string; password: string }) =>
     http.post<ApiResponse<TokenData>>('/auth/login', payload),

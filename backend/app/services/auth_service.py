@@ -12,19 +12,23 @@ class AuthService:
         self.db = db
         self.users = UserRepository(db)
 
-    def register(self, *, username: str, password: str) -> User:
+    def register(self, *, username: str, password: str, role: str = "student", identity_no: str = "") -> User:
         normalized_username = username.strip()
+        normalized_identity = identity_no.strip().upper()
         if self.users.get_by_username(normalized_username):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在")
+        if self.db.query(User).filter(User.identity_no == normalized_identity).first():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="学号或工号已注册")
         try:
             return self.users.create(
                 username=normalized_username,
                 password_hash=hash_password(password),
-                role="student",
+                role=role,
+                identity_no=normalized_identity,
             )
         except IntegrityError:
             self.db.rollback()
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名已存在") from None
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名、学号或工号已存在") from None
 
     def login(self, *, username: str, password: str) -> tuple[str, User]:
         user = self.users.get_by_username(username.strip())

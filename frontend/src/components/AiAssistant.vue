@@ -6,6 +6,7 @@ import { aiApi, type AiAssistData, type AiTaskType } from '@/api/ai'
 import type { LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
 import { renderTeachingDocument } from '@/utils/richText'
+import { learningApi } from '@/api/learning'
 
 const props = defineProps<{
   courseId: number
@@ -58,14 +59,25 @@ async function submit() {
   if (!question.value.trim()) return ElMessage.warning('请输入需要 AI 辅助的问题')
   loading.value = true
   try {
-    const { data } = await aiApi.assist({
+    result.value = { answer: '', grounded: true, model: '', sources: [] }
+    await aiApi.assistStream({
       course_id: props.courseId,
       chapter_id: props.chapterId,
       learning_stage: props.learningStage,
       task_type: taskType.value,
       question: question.value.trim(),
+    }, {
+      onMeta: (meta) => { if (result.value) { result.value.grounded = meta.grounded; result.value.model = meta.model } },
+      onChunk: (text) => { if (result.value) result.value.answer += text },
+      onSources: (sources) => { if (result.value) result.value.sources = sources },
     })
-    result.value = data.data
+    await learningApi.recordEvent({
+      course_id: props.courseId,
+      chapter_id: props.chapterId,
+      learning_stage: props.learningStage,
+      event_type: 'ai_assist_used',
+      event_data: { task_type: taskType.value },
+    })
   } catch (error: unknown) {
     ElMessage.error(getErrorMessage(error, 'AI 服务暂时不可用，请稍后重试'))
   } finally { loading.value = false }
@@ -87,7 +99,7 @@ async function submit() {
     </div>
     <section v-if="result" class="ai-result">
       <div class="answer-meta"><el-tag :type="result.grounded ? 'success' : 'warning'" effect="light">{{ result.grounded ? '依据课程资料生成' : '课程资料不足' }}</el-tag><span>模型：{{ result.model }}</span></div>
-      <article class="answer-content teaching-document" v-html="renderedAnswer"></article>
+      <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="loading" class="stream-cursor" aria-label="正在生成"></span>
       <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>回答仅依据以下课程资料</span></div><div v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" class="source-item"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" type="info">{{ source.position }}</el-tag></div><p>{{ source.excerpt }}</p></div></div>
     </section>
   </el-card>

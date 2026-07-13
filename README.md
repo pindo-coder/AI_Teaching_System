@@ -4,6 +4,8 @@
 
 MVP 阶段 0～5 已完成：用户与课程系统、阶段化 AI 助手、RAG 知识库、统一错误处理、请求日志、安全校验和验收数据均已具备。
 
+当前版本还包含专题个人笔记、1/2/4/7/15/30 天间隔复习，以及基于 SSE 的 AI 流式输出。相关设计参考与许可说明见 [`THIRD_PARTY_NOTICES.md`](./THIRD_PARTY_NOTICES.md)。
+
 ## 项目结构
 
 - `frontend/`：Vue 3、Vite、TypeScript、Vue Router、Pinia、Element Plus

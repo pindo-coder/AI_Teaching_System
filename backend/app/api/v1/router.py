@@ -6,6 +6,9 @@ from app.api.v1.endpoints.courses import router as courses_router
 from app.api.v1.endpoints.learning import router as learning_router
 from app.api.v1.endpoints.knowledge import router as knowledge_router
 from app.api.v1.endpoints.news import router as news_router
+from app.api.v1.endpoints.classroom import router as classroom_router
+from app.api.v1.endpoints.study import router as study_router
+from app.api.v1.endpoints.tasks import router as tasks_router
 from app.core.config import settings
 from app.schemas.common import ApiResponse, HealthData
 
@@ -17,6 +20,9 @@ router.include_router(courses_router)
 router.include_router(learning_router)
 router.include_router(knowledge_router)
 router.include_router(news_router)
+router.include_router(classroom_router)
+router.include_router(study_router)
+router.include_router(tasks_router)
 
 
 @router.get("/health", response_model=ApiResponse[HealthData], tags=["system"])

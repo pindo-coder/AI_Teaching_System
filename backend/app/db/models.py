@@ -6,5 +6,10 @@ from app.models.knowledge_document import KnowledgeDocument
 from app.models.learning_progress import LearningProgress
 from app.models.user import User
 from app.models.news_item import NewsItem
+from app.models.classroom import ClassroomActivity, ClassroomResponse
+from app.models.study_note import StudyNote
+from app.models.review_schedule import ReviewSchedule
+from app.models.learning_task import LearningTaskPoint, UserTaskProgress, LearningEvent
+from app.models.study_chat_message import StudyChatMessage
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage"]

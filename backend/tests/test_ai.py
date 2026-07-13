@@ -60,3 +60,22 @@ def test_ai_assist_refuses_when_chapter_has_no_content(client: TestClient, db: S
     assert response.status_code == 200
     assert response.json()["data"]["grounded"] is False
     assert response.json()["data"]["sources"] == []
+
+
+def test_ai_assist_streams_sse_chunks(client: TestClient, db: Session) -> None:
+    headers, course_id, chapter_id = prepare_context(db)
+    response = client.post(
+        "/api/v1/ai/assist/stream",
+        headers=headers,
+        json={
+            "course_id": course_id,
+            "chapter_id": chapter_id,
+            "learning_stage": "preview",
+            "task_type": "preview_questions",
+            "question": "生成预习问题",
+        },
+    )
+    assert response.status_code == 200
+    assert "event: chunk" in response.text
+    assert "event: sources" in response.text
+    assert "event: done" in response.text

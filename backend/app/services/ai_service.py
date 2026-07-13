@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from typing import Protocol
 import logging
 
@@ -38,6 +39,7 @@ def source_position(metadata: dict[str, object]) -> str:
 
 class AiGenerator(Protocol):
     def generate(self, variables: dict[str, str]) -> str: ...
+    def stream(self, variables: dict[str, str]) -> Iterator[str]: ...
 
 
 class LangChainGenerator:
@@ -72,6 +74,12 @@ class LangChainGenerator:
                 detail="大模型服务暂时不可用，请稍后重试",
             ) from exc
 
+    def stream(self, variables: dict[str, str]) -> Iterator[str]:
+        try:
+            yield from self.chain.stream(variables)
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="大模型服务暂时不可用，请稍后重试") from exc
+
 
 class MockGenerator:
     """供本地开发和自动化测试使用，不调用外部模型。"""
@@ -105,6 +113,11 @@ class MockGenerator:
             "以上内容由本地模拟模式生成，用于验证业务流程；接入模型 API 后将生成更完整的教材化回答。"
         )
 
+    def stream(self, variables: dict[str, str]) -> Iterator[str]:
+        answer = self.generate(variables)
+        for index in range(0, len(answer), 24):
+            yield answer[index : index + 24]
+
 
 class AiService:
     def __init__(self, db: Session, generator: AiGenerator | None = None) -> None:
@@ -113,7 +126,7 @@ class AiService:
         self.documents = KnowledgeRepository(db)
         self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator())
 
-    def assist(self, payload: AiAssistRequest) -> AiAssistData:
+    def _prepare(self, payload: AiAssistRequest) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
         course = self.courses.get(payload.course_id)
         chapter = self.chapters.get(payload.chapter_id)
         if course is None:
@@ -166,16 +179,6 @@ class AiService:
             "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],
             "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
-        answer = self.generator.generate(variables)
-        logger.info(
-            "ai_assist course_id=%s chapter_id=%s stage=%s task=%s rag_chunks=%s model=%s",
-            course.id,
-            chapter.id,
-            payload.learning_stage,
-            payload.task_type,
-            len(retrieved_chunks),
-            "mock" if settings.ai_mock_mode else settings.llm_model,
-        )
         sources = (
             [
                 AiSource(
@@ -200,9 +203,20 @@ class AiService:
                 )
             ]
         )
-        return AiAssistData(
-            answer=answer,
-            grounded=True,
-            model="mock" if settings.ai_mock_mode else settings.llm_model,
-            sources=sources,
-        )
+        return variables, sources, len(retrieved_chunks)
+
+    def assist(self, payload: AiAssistRequest) -> AiAssistData:
+        prepared = self._prepare(payload)
+        if isinstance(prepared, AiAssistData):
+            return prepared
+        variables, sources, rag_chunks = prepared
+        answer = self.generator.generate(variables)
+        logger.info("ai_assist chapter_id=%s stage=%s task=%s rag_chunks=%s", payload.chapter_id, payload.learning_stage, payload.task_type, rag_chunks)
+        return AiAssistData(answer=answer, grounded=True, model="mock" if settings.ai_mock_mode else settings.llm_model, sources=sources)
+
+    def stream(self, payload: AiAssistRequest) -> tuple[Iterator[str], list[AiSource], bool, str]:
+        prepared = self._prepare(payload)
+        if isinstance(prepared, AiAssistData):
+            return iter([prepared.answer]), prepared.sources, prepared.grounded, prepared.model
+        variables, sources, _ = prepared
+        return self.generator.stream(variables), sources, True, "mock" if settings.ai_mock_mode else settings.llm_model

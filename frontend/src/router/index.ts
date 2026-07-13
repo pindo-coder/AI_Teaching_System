@@ -14,6 +14,8 @@ const router = createRouter({
         { path: 'courses/:id', name: 'course-detail', component: () => import('@/views/CourseDetailView.vue') },
         { path: 'current-affairs', name: 'current-affairs', component: () => import('@/views/CurrentAffairsView.vue') },
         { path: 'interaction', name: 'interaction', component: () => import('@/views/ClassroomInteractionView.vue') },
+        { path: 'reviews', name: 'reviews', component: () => import('@/views/ReviewsView.vue') },
+        { path: 'notes', name: 'notes', component: () => import('@/views/NotesView.vue') },
         { path: 'knowledge', name: 'knowledge', component: () => import('@/views/KnowledgeBaseView.vue'), meta: { roles: ['teacher', 'admin'] } },
         {
           path: 'courses/:courseId/chapters/:chapterId/:stage(preview|review|exam)',

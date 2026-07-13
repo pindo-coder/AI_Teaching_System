@@ -5,8 +5,13 @@ import { ElMessage } from 'element-plus'
 import { ChatDotRound, Connection, Finished, Histogram, QuestionFilled } from '@element-plus/icons-vue'
 import { courseApi } from '@/api/courses'
 import type { CourseDetail } from '@/types'
+import { useAuthStore } from '@/stores/auth'
+import { classroomApi, type ClassroomActivity } from '@/api/classroom'
 
 const loading = ref(true)
+const auth = useAuthStore()
+const activities = ref<ClassroomActivity[]>([])
+const responseText = ref<Record<number, string>>({})
 const route = useRoute()
 const textbook = ref<CourseDetail | null>(null)
 const selectedChapterId = ref<number>()
@@ -26,12 +31,23 @@ onMounted(async () => {
     selectedChapterId.value = textbook.value?.chapters[0]?.id
     const newsTitle = typeof route.query.news_title === 'string' ? route.query.news_title : ''
     if (newsTitle) activity.question = `围绕时政“${newsTitle}”，联系教材专题开展课堂讨论。`
+    activities.value = (await classroomApi.list()).data.data
   } finally { loading.value = false }
 })
 
-function launchActivity() {
+async function launchActivity() {
   if (!activity.question.trim()) return ElMessage.warning('请输入互动主题')
-  ElMessage.success('课堂互动任务已生成，可继续用右侧 AI 完善话术')
+  if (!auth.isTeacher) return ElMessage.warning('只有教师可以发布课堂互动')
+  await classroomApi.publish({ course_id: textbook.value!.id, chapter_id: firstChapter.value!.id, question: activity.question.trim(), minutes: activity.minutes })
+  activities.value = (await classroomApi.list()).data.data
+  ElMessage.success('课堂互动已发布，学生可以参与')
+}
+async function submitResponse(item: ClassroomActivity) {
+  const answer = responseText.value[item.id]?.trim()
+  if (!answer) return ElMessage.warning('请先填写你的观点')
+  await classroomApi.respond(item.id, answer)
+  responseText.value[item.id] = ''
+  ElMessage.success('观点提交成功')
 }
 </script>
 
@@ -55,7 +71,7 @@ function launchActivity() {
           </el-card>
         </section>
 
-        <el-card shadow="never" class="interaction-builder">
+        <el-card v-if="auth.isTeacher" shadow="never" class="interaction-builder">
           <template #header><div class="content-heading"><span>互动任务生成</span><el-tag type="success">MVP</el-tag></div></template>
           <el-form label-position="top">
             <el-form-item label="关联专题">
@@ -71,14 +87,15 @@ function launchActivity() {
               <span class="form-hint">分钟</span>
             </el-form-item>
           </el-form>
-          <el-button type="primary" :icon="Finished" @click="launchActivity">生成课堂活动</el-button>
+          <el-button v-if="auth.isTeacher" type="primary" :icon="Finished" @click="launchActivity">发布课堂活动</el-button>
           <div class="activity-preview">
             <strong>活动预览</strong>
             <p>围绕“{{ activity.question }}”进行 {{ activity.minutes }} 分钟讨论：先独立思考，再小组交流，最后由教师引导回到教材专题“{{ firstChapter?.title || '未选择专题' }}”。</p>
           </div>
         </el-card>
+        <el-card v-else shadow="never" class="interaction-builder student-interaction-hint"><el-result icon="info" title="学生参与区" sub-title="教师发布课堂互动后，你可以在右侧选择活动并提交自己的观点。" /></el-card>
       </div>
-
+      <el-card shadow="never" class="interaction-activities"><template #header><div class="content-heading"><span>已发布的课堂互动</span><el-tag>{{ activities.length }} 项</el-tag></div></template><div v-if="activities.length" class="published-activities"><article v-for="item in activities" :key="item.id" class="published-activity"><span class="activity-label">{{ item.minutes }} 分钟讨论</span><h3>{{ item.question }}</h3><p v-if="auth.isTeacher" class="muted">教师可继续组织课堂讨论，学生将提交观点。</p><template v-else><el-input v-model="responseText[item.id]" type="textarea" :rows="3" placeholder="写下你的观点或问题……" /><el-button type="primary" size="small" @click="submitResponse(item)">提交观点</el-button></template></article></div><el-empty v-else description="教师发布互动后会显示在这里" /></el-card>
     </section>
   </div>
 </template>

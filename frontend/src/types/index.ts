@@ -5,6 +5,7 @@ export interface User {
   id: number
   username: string
   role: UserRole
+  identity_no: string | null
   created_time: string
 }
 
@@ -36,6 +37,32 @@ export interface LearningProgress {
   learning_stage: LearningStage
   progress: number
   last_study_time: string
+}
+
+export interface TaskPoint {
+  id: number
+  course_id: number
+  chapter_id: number
+  learning_stage: LearningStage
+  task_type: string
+  title: string
+  description: string
+  weight: number
+  sort_order: number
+  status: 'not_started' | 'in_progress' | 'completed'
+  progress_value: number
+  evidence_summary: string
+  completed_time: string | null
+}
+
+export interface TaskProgressSummary {
+  course_id: number
+  chapter_id: number
+  learning_stage: LearningStage
+  completed_count: number
+  total_count: number
+  progress: number
+  tasks: TaskPoint[]
 }
 
 export interface DashboardData {
