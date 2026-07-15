@@ -36,6 +36,24 @@ export interface StudyChatMessage {
   created_time: string
 }
 
+export interface NoteSearchItem {
+  id: number
+  course_id: number
+  chapter_id: number
+  course_name: string
+  chapter_title: string
+  excerpt: string
+  score: number
+}
+
+export interface NoteRelatedData {
+  related_notes: NoteSearchItem[]
+  textbook_chunks: Array<{ source_title: string; excerpt: string; position: string; score: number }>
+}
+
+export interface ReviewQuestion { id: number; question: string; source_position: string }
+export interface ReviewAnswerResult { id: number; is_correct: boolean; feedback: string; reference_answer: string; source_position: string; completed: boolean; next_interval_days: number | null }
+
 export const studyApi = {
   notes: () => http.get<ApiResponse<StudyNote[]>>('/study/notes'),
   note: (chapterId: number) => http.get<ApiResponse<StudyNote | null>>(`/study/notes/${chapterId}`),
@@ -47,4 +65,10 @@ export const studyApi = {
   chatHistory: (chapterId: number) => http.get<ApiResponse<StudyChatMessage[]>>(`/study/chat-history/${chapterId}`),
   saveChatHistory: (payload: { course_id: number; chapter_id: number; question: string; answer: string; model: string | null; sources: StudyChatMessage['sources'] }) =>
     http.post<ApiResponse<StudyChatMessage[]>>('/study/chat-history', payload),
+  clearChatHistory: (chapterId: number) => http.delete<ApiResponse<{ chapter_id: number }>>(`/study/chat-history/${chapterId}`),
+  semanticSearch: (q: string, courseId?: number) => http.get<ApiResponse<NoteSearchItem[]>>('/study/notes/semantic-search', { params: { q, course_id: courseId } }),
+  related: (chapterId: number) => http.get<ApiResponse<NoteRelatedData>>(`/study/notes/${chapterId}/related`),
+  exportNote: (chapterId: number, format: 'markdown' | 'docx') => http.get(`/study/notes/${chapterId}/export`, { params: { format }, responseType: 'blob' }),
+  reviewQuestions: (chapterId: number) => http.post<ApiResponse<ReviewQuestion[]>>(`/study/reviews/${chapterId}/questions`),
+  submitReviewAnswer: (practiceId: number, answer: string) => http.post<ApiResponse<ReviewAnswerResult>>(`/study/reviews/questions/${practiceId}/answer`, { answer }),
 }

@@ -11,5 +11,6 @@ from app.models.study_note import StudyNote
 from app.models.review_schedule import ReviewSchedule
 from app.models.learning_task import LearningTaskPoint, UserTaskProgress, LearningEvent
 from app.models.study_chat_message import StudyChatMessage
+from app.models.review_practice import ReviewPractice
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage"]

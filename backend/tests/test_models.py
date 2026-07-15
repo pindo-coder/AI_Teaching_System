@@ -18,6 +18,7 @@ def test_all_mvp_tables_are_registered() -> None:
         "classroom_responses",
         "study_notes",
         "review_schedules",
+        "review_practices",
         "learning_task_points",
         "user_task_progress",
         "learning_events",

@@ -22,6 +22,17 @@ def get_vector_store() -> Chroma:
     )
 
 
+def get_study_note_vector_store() -> Chroma:
+    """个人笔记与教材库分集合存放，避免检索结果相互污染。"""
+    persist_directory = resolve_backend_path(settings.chroma_persist_directory)
+    persist_directory.mkdir(parents=True, exist_ok=True)
+    return Chroma(
+        collection_name=f"{settings.rag_collection_name}_study_notes",
+        embedding_function=get_embeddings(),
+        persist_directory=str(persist_directory),
+    )
+
+
 def add_chunks(*, document_id: int, chunks: list[str], metadata: dict[str, str | int]) -> None:
     documents = [
         Document(
@@ -43,5 +54,27 @@ def add_chunks(*, document_id: int, chunks: list[str], metadata: dict[str, str |
 def delete_document_vectors(document_id: int) -> None:
     store = get_vector_store()
     result = store.get(where={"document_id": document_id}, include=[])
+    if result["ids"]:
+        store.delete(ids=result["ids"])
+
+
+def upsert_study_note_vector(*, note_id: int, content: str, metadata: dict[str, str | int]) -> None:
+    """以小段写入笔记，支持长笔记的语义检索与定位。"""
+    delete_study_note_vectors(note_id)
+    text = content.strip()
+    if not text:
+        return
+    size = 900
+    chunks = [text[index:index + size] for index in range(0, len(text), size)]
+    documents = [
+        Document(page_content=chunk, metadata={**metadata, "note_id": note_id, "chunk_index": index})
+        for index, chunk in enumerate(chunks)
+    ]
+    get_study_note_vector_store().add_documents(documents, ids=[f"study-note-{note_id}-{index}" for index in range(len(chunks))])
+
+
+def delete_study_note_vectors(note_id: int) -> None:
+    store = get_study_note_vector_store()
+    result = store.get(where={"note_id": note_id}, include=[])
     if result["ids"]:
         store.delete(ids=result["ids"])

@@ -4,7 +4,7 @@ from sqlalchemy import inspect, text
 
 from app.core.config import settings
 from app.db.base import Base
-from app.db.models import ClassroomActivity, ClassroomResponse  # noqa: F401
+from app.db.models import ClassroomActivity, ClassroomResponse, ReviewPractice  # noqa: F401
 from app.db.session import engine
 
 

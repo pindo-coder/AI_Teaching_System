@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta
+import logging
+import re
 
 from fastapi import HTTPException, status
 from sqlalchemy import select
@@ -9,10 +11,14 @@ from app.models.course import Course
 from app.models.review_schedule import ReviewSchedule
 from app.models.study_note import StudyNote
 from app.models.study_chat_message import StudyChatMessage
+from app.models.review_practice import ReviewPractice
+from app.rag.retriever import retrieve
+from app.rag.vector_store import delete_study_note_vectors, get_study_note_vector_store, upsert_study_note_vector
 from app.schemas.study import StudyChatHistorySave
 
 
 REVIEW_INTERVALS = [1, 2, 4, 7, 15, 30]
+logger = logging.getLogger(__name__)
 
 
 class StudyService:
@@ -59,6 +65,7 @@ class StudyService:
         schedule = self.db.scalar(select(ReviewSchedule).where(ReviewSchedule.user_id == user_id, ReviewSchedule.chapter_id == note.chapter_id))
         if schedule is not None:
             self.db.delete(schedule)
+        delete_study_note_vectors(note_id)
         self.db.delete(note)
         self.db.commit()
 
@@ -83,6 +90,15 @@ class StudyService:
         self.db.commit()
         return self.list_chat_history(user_id, payload.chapter_id)
 
+    def clear_chat_history(self, user_id: int, chapter_id: int) -> None:
+        self.require_chapter(chapter_id)
+        messages = self.db.scalars(select(StudyChatMessage).where(
+            StudyChatMessage.user_id == user_id, StudyChatMessage.chapter_id == chapter_id
+        )).all()
+        for message in messages:
+            self.db.delete(message)
+        self.db.commit()
+
     def save_note(self, user_id: int, chapter_id: int, content: str) -> StudyNote:
         chapter = self.require_chapter(chapter_id)
         note = self.db.scalar(select(StudyNote).where(StudyNote.user_id == user_id, StudyNote.chapter_id == chapter_id))
@@ -93,7 +109,158 @@ class StudyService:
             note.content = content.strip()
         self.db.commit()
         self.db.refresh(note)
+        # 向量索引失败不影响笔记保存，避免外部 Embedding 服务短暂不可用时丢失用户内容。
+        try:
+            upsert_study_note_vector(
+                note_id=note.id,
+                content=note.content,
+                metadata={"user_id": user_id, "course_id": note.course_id, "chapter_id": note.chapter_id},
+            )
+        except Exception:
+            logger.exception("study_note_vector_upsert_failed note_id=%s", note.id)
         return note
+
+    def search_notes(self, user_id: int, query: str, course_id: int | None = None) -> list[dict[str, object]]:
+        query = query.strip()
+        if not query:
+            return []
+        filters: list[dict[str, object]] = [{"user_id": user_id}]
+        if course_id is not None:
+            filters.append({"course_id": course_id})
+        where: dict[str, object] = filters[0] if len(filters) == 1 else {"$and": filters}
+        try:
+            results = get_study_note_vector_store().similarity_search_with_relevance_scores(query, k=8, filter=where)
+        except Exception:
+            logger.exception("study_note_semantic_search_failed")
+            return []
+        note_ids = list(dict.fromkeys(int(item.metadata["note_id"]) for item, _ in results if item.metadata.get("note_id")))
+        if not note_ids:
+            return []
+        rows = self.db.execute(
+            select(StudyNote, Course.name, Chapter.title)
+            .join(Course, Course.id == StudyNote.course_id)
+            .join(Chapter, Chapter.id == StudyNote.chapter_id)
+            .where(StudyNote.id.in_(note_ids), StudyNote.user_id == user_id)
+        ).all()
+        indexed = {note.id: (note, course_name, chapter_title) for note, course_name, chapter_title in rows}
+        output: list[dict[str, object]] = []
+        seen: set[int] = set()
+        for item, score in results:
+            note_id = int(item.metadata["note_id"])
+            if note_id in seen or note_id not in indexed:
+                continue
+            seen.add(note_id)
+            note, course_name, chapter_title = indexed[note_id]
+            output.append({"id": note.id, "course_id": note.course_id, "chapter_id": note.chapter_id,
+                           "course_name": course_name, "chapter_title": chapter_title,
+                           "excerpt": item.page_content[:240], "score": round(float(score), 3)})
+        return output
+
+    def related_note_content(self, user_id: int, chapter_id: int) -> dict[str, object]:
+        note = self.get_note(user_id, chapter_id)
+        chapter = self.require_chapter(chapter_id)
+        if note is None or not note.content.strip():
+            return {"related_notes": [], "textbook_chunks": []}
+        note_results = [item for item in self.search_notes(user_id, note.content[:800], chapter.course_id) if item["id"] != note.id][:3]
+        try:
+            chunks = retrieve(note.content[:1200], course_id=chapter.course_id, chapter_id=chapter.id, top_k=3, fallback_to_course=False)
+        except Exception:
+            logger.exception("related_textbook_retrieve_failed chapter_id=%s", chapter.id)
+            chunks = []
+        return {
+            "related_notes": note_results,
+            "textbook_chunks": [{"source_title": str(chunk.metadata.get("source_title", chapter.title)),
+                                  "excerpt": chunk.content[:280],
+                                  "position": str(chunk.metadata.get("position_label", "当前专题正文")),
+                                  "score": round(chunk.score, 3)} for chunk in chunks],
+        }
+
+    def build_export_markdown(self, user_id: int, chapter_id: int) -> tuple[str, str]:
+        note = self.get_note(user_id, chapter_id)
+        chapter = self.require_chapter(chapter_id)
+        if note is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前专题尚未保存笔记")
+        history = self.list_chat_history(user_id, chapter_id)
+        lines = [f"# {chapter.title}｜学习笔记", "", "## 我的笔记", "", note.content.strip() or "（暂无正文）", "", "## 本章 AI 问答"]
+        if history:
+            for item in history:
+                speaker = "学生" if item.role == "user" else "AI 助教"
+                lines.extend(["", f"### {speaker}", "", item.content])
+        else:
+            lines.extend(["", "（暂无本章问答记录）"])
+        return "\n".join(lines), chapter.title
+
+    @staticmethod
+    def _keywords(text: str) -> set[str]:
+        return {word for word in re.findall(r"[\u4e00-\u9fff]{2,}", text) if len(word) >= 2}
+
+    def create_review_questions(self, user_id: int, chapter_id: int) -> list[ReviewPractice]:
+        """由模型优先生成开放题；服务不可用时保留教材化兜底题。"""
+        chapter = self.require_chapter(chapter_id)
+        note = self.get_note(user_id, chapter_id)
+        existing = self.db.scalars(select(ReviewPractice).where(
+            ReviewPractice.user_id == user_id, ReviewPractice.chapter_id == chapter_id,
+            ReviewPractice.answered_at.is_(None),
+        ).order_by(ReviewPractice.id)).all()
+        if existing:
+            return list(existing)
+        base = (note.content if note and note.content.strip() else chapter.content or "").strip()
+        excerpt = base[:650] or f"围绕《{chapter.title}》的教材核心内容进行复习。"
+        questions = [
+            (f"请概括“{chapter.title}”的核心主旨，并说明其要解决的主要问题。", excerpt),
+            (f"结合本专题教材，说明其中一个核心概念或主要观点的内涵及其逻辑作用。", excerpt),
+            (f"根据本专题学习内容，如何理解相关理论的现实意义？请写出你的分析依据。", excerpt),
+        ]
+        try:
+            # 题干由当前章节 AI 生成；参考依据仍从笔记/教材截取，确保反馈可追溯。
+            from app.schemas.ai import AiAssistRequest
+            from app.services.ai_service import AiService
+
+            generated = AiService(self.db).assist(AiAssistRequest(
+                course_id=chapter.course_id, chapter_id=chapter.id, learning_stage="review", task_type="mock_questions",
+                question=("请只生成 3 道适合本章间隔复习的简答题，每题独立成行，以“1.、2.、3.”开头。"
+                          "题目必须围绕章节教材与学生笔记的已有表述，不要给答案、不要选择题。"
+                          f"\n\n学生笔记：\n{(note.content if note else '')[:3000]}"),
+            )).answer
+            parsed = [re.sub(r"^\s*\d+[.、]\s*", "", line).strip() for line in generated.splitlines()
+                      if re.match(r"^\s*\d+[.、]\s*.+", line)]
+            if len(parsed) >= 3:
+                questions = [(item, excerpt) for item in parsed[:3]]
+        except Exception:
+            logger.info("review_question_ai_fallback chapter_id=%s", chapter_id)
+        records = [ReviewPractice(user_id=user_id, course_id=chapter.course_id, chapter_id=chapter.id,
+                                  question=question, choices=[], answer_index=-1, explanation=reference,
+                                  source_position="当前专题教材与个人笔记") for question, reference in questions]
+        self.db.add_all(records)
+        self.db.commit()
+        return records
+
+    def submit_review_answer(self, user_id: int, practice_id: int, answer: str) -> dict[str, object]:
+        practice = self.db.scalar(select(ReviewPractice).where(ReviewPractice.id == practice_id, ReviewPractice.user_id == user_id))
+        if practice is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="复习题不存在")
+        if practice.answered_at is not None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该题已提交")
+        answer_words = self._keywords(answer)
+        reference_words = self._keywords(practice.explanation)
+        overlap = len(answer_words & reference_words)
+        is_correct = len(answer.strip()) >= 40 and overlap >= 1
+        practice.selected_index = 0
+        practice.is_correct = is_correct
+        practice.answered_at = datetime.now()
+        self.db.commit()
+        outstanding = self.db.scalar(select(ReviewPractice.id).where(
+            ReviewPractice.user_id == user_id, ReviewPractice.chapter_id == practice.chapter_id,
+            ReviewPractice.answered_at.is_(None),
+        ))
+        completed = outstanding is None
+        next_interval: int | None = None
+        if completed:
+            next_interval = self.complete_review(user_id, practice.chapter_id).interval_days
+        feedback = "回答已覆盖教材中的关键表述，可继续结合概念之间的逻辑关系完善。" if is_correct else "回答与教材依据的对应还不够充分。请围绕下方参考依据补充核心概念、主要观点和论证逻辑。"
+        return {"id": practice.id, "is_correct": is_correct, "feedback": feedback,
+                "reference_answer": practice.explanation, "source_position": practice.source_position,
+                "completed": completed, "next_interval_days": next_interval}
 
     def activate_review(self, user_id: int, chapter_id: int) -> ReviewSchedule:
         chapter = self.require_chapter(chapter_id)
