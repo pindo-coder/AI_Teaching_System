@@ -14,6 +14,8 @@ from app.schemas.study import (
     ReviewRead, StudyChatHistorySave, StudyChatMessageRead, StudyNoteListItem, StudyNoteRead, StudyNoteUpdate,
 )
 from app.services.study_service import StudyService
+from app.services.task_service import TaskService
+from app.schemas.task import LearningEventCreate
 
 
 router = APIRouter(prefix="/study", tags=["study"])
@@ -82,7 +84,16 @@ def get_note(chapter_id: int, user: User = Depends(get_current_user), db: Sessio
 
 @router.put("/notes/{chapter_id}", response_model=ApiResponse[StudyNoteRead])
 def save_note(chapter_id: int, payload: StudyNoteUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[StudyNoteRead]:
-    return ApiResponse(message="学习笔记已保存", data=StudyService(db).save_note(user.id, chapter_id, payload.content))
+    service = StudyService(db)
+    note = service.save_note(user.id, chapter_id, payload.content)
+    TaskService(db).record(user.id, LearningEventCreate(
+        course_id=note.course_id,
+        chapter_id=note.chapter_id,
+        learning_stage="review",
+        event_type="note_saved",
+        event_data={"content": service.plain_note_content(note.content)},
+    ))
+    return ApiResponse(message="学习笔记已保存", data=note)
 
 
 @router.delete("/notes/{note_id}", response_model=ApiResponse[dict[str, int]])

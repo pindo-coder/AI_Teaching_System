@@ -8,7 +8,7 @@ export const courseApi = {
     http.post<ApiResponse<Course>>('/courses', payload),
   importCourse: (formData: FormData) =>
     http.post<ApiResponse<Course>>('/courses/import', formData, { timeout: 600_000 }),
-  update: (id: number, payload: { name?: string; description?: string }) =>
+  update: (id: number, payload: { name?: string; description?: string | null }) =>
     http.put<ApiResponse<Course>>(`/courses/${id}`, payload),
   remove: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/courses/${id}`),
   createChapter: (

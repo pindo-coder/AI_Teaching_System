@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from html import unescape
 import logging
 import re
 
@@ -30,6 +31,14 @@ class StudyService:
         if chapter is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="专题不存在")
         return chapter
+
+    @staticmethod
+    def plain_note_content(content: str) -> str:
+        """富文本仅负责显示，Embedding、AI 和导出统一使用无标签正文。"""
+        text = re.sub(r"<br\s*/?>", "\n", content, flags=re.IGNORECASE)
+        text = re.sub(r"</(?:p|h[1-6]|li|div)>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"<[^>]+>", "", text)
+        return re.sub(r"\n{3,}", "\n\n", unescape(text)).strip()
 
     def get_note(self, user_id: int, chapter_id: int) -> StudyNote | None:
         self.require_chapter(chapter_id)
@@ -113,7 +122,7 @@ class StudyService:
         try:
             upsert_study_note_vector(
                 note_id=note.id,
-                content=note.content,
+                content=self.plain_note_content(note.content),
                 metadata={"user_id": user_id, "course_id": note.course_id, "chapter_id": note.chapter_id},
             )
         except Exception:
@@ -159,20 +168,49 @@ class StudyService:
     def related_note_content(self, user_id: int, chapter_id: int) -> dict[str, object]:
         note = self.get_note(user_id, chapter_id)
         chapter = self.require_chapter(chapter_id)
-        if note is None or not note.content.strip():
-            return {"related_notes": [], "textbook_chunks": []}
-        note_results = [item for item in self.search_notes(user_id, note.content[:800], chapter.course_id) if item["id"] != note.id][:3]
+        if note is None or not self.plain_note_content(note.content):
+            return {"related_notes": [], "textbook_chunks": [], "status": "note_empty",
+                    "message": "请先填写并保存笔记，系统将依据笔记内容关联教材。"}
+        query = self.plain_note_content(note.content)
+        note_results = [item for item in self.search_notes(user_id, query[:800], chapter.course_id) if item["id"] != note.id][:3]
+        retrieval_failed = False
         try:
-            chunks = retrieve(note.content[:1200], course_id=chapter.course_id, chapter_id=chapter.id, top_k=3, fallback_to_course=False)
+            chunks = retrieve(query[:1200], course_id=chapter.course_id, chapter_id=chapter.id, top_k=3, fallback_to_course=False)
         except Exception:
             logger.exception("related_textbook_retrieve_failed chapter_id=%s", chapter.id)
             chunks = []
+            retrieval_failed = True
+        textbook_chunks = [{"source_title": str(chunk.metadata.get("source_title", chapter.title)),
+                            "excerpt": chunk.content[:280],
+                            "position": str(chunk.metadata.get("position_label", "当前专题正文")),
+                            "score": round(chunk.score, 3)} for chunk in chunks]
+        if textbook_chunks:
+            return {"related_notes": note_results, "textbook_chunks": textbook_chunks,
+                    "status": "vector", "message": f"已从章节知识库找到 {len(textbook_chunks)} 个相关教材段落。"}
+
+        # 整本教材导入时，旧数据可能没有为向量块写入 chapter_id。
+        # 此时直接从当前章节正文中做本地相关度筛选，保证教材关联始终可用且不会串章。
+        paragraphs = [item.strip() for item in re.split(r"\n\s*\n|(?<=[。！？；])", chapter.content or "") if len(item.strip()) >= 20]
+        query_grams = {query[index:index + 2] for index in range(max(0, len(query) - 1))}
+        ranked: list[tuple[float, int, str]] = []
+        for index, paragraph in enumerate(paragraphs):
+            grams = {paragraph[pos:pos + 2] for pos in range(max(0, len(paragraph) - 1))}
+            score = len(query_grams & grams) / max(1, min(len(query_grams), 80))
+            if score > 0:
+                ranked.append((score, index, paragraph))
+        ranked.sort(reverse=True)
+        fallback_chunks = [{"source_title": chapter.title, "excerpt": paragraph[:280],
+                            "position": f"当前专题正文第 {index + 1} 段", "score": round(score, 3)}
+                           for score, index, paragraph in ranked[:3]]
+        if fallback_chunks:
+            return {"related_notes": note_results, "textbook_chunks": fallback_chunks,
+                    "status": "chapter_fallback",
+                    "message": f"章节向量索引暂无匹配，已直接从当前专题正文找到 {len(fallback_chunks)} 个相关段落。"}
         return {
             "related_notes": note_results,
-            "textbook_chunks": [{"source_title": str(chunk.metadata.get("source_title", chapter.title)),
-                                  "excerpt": chunk.content[:280],
-                                  "position": str(chunk.metadata.get("position_label", "当前专题正文")),
-                                  "score": round(chunk.score, 3)} for chunk in chunks],
+            "textbook_chunks": [],
+            "status": "error" if retrieval_failed else "no_match",
+            "message": "Embedding 服务暂时不可用，且当前专题没有可用于兜底的正文。" if retrieval_failed else "未找到与当前笔记相关的教材段落，请补充更具体的概念或观点后重试。",
         }
 
     def build_export_markdown(self, user_id: int, chapter_id: int) -> tuple[str, str]:
@@ -181,7 +219,7 @@ class StudyService:
         if note is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="当前专题尚未保存笔记")
         history = self.list_chat_history(user_id, chapter_id)
-        lines = [f"# {chapter.title}｜学习笔记", "", "## 我的笔记", "", note.content.strip() or "（暂无正文）", "", "## 本章 AI 问答"]
+        lines = [f"# {chapter.title}｜学习笔记", "", "## 我的笔记", "", self.plain_note_content(note.content) or "（暂无正文）", "", "## 本章 AI 问答"]
         if history:
             for item in history:
                 speaker = "学生" if item.role == "user" else "AI 助教"
@@ -204,7 +242,7 @@ class StudyService:
         ).order_by(ReviewPractice.id)).all()
         if existing:
             return list(existing)
-        base = (note.content if note and note.content.strip() else chapter.content or "").strip()
+        base = (self.plain_note_content(note.content) if note and note.content.strip() else chapter.content or "").strip()
         excerpt = base[:650] or f"围绕《{chapter.title}》的教材核心内容进行复习。"
         questions = [
             (f"请概括“{chapter.title}”的核心主旨，并说明其要解决的主要问题。", excerpt),
@@ -220,7 +258,7 @@ class StudyService:
                 course_id=chapter.course_id, chapter_id=chapter.id, learning_stage="review", task_type="mock_questions",
                 question=("请只生成 3 道适合本章间隔复习的简答题，每题独立成行，以“1.、2.、3.”开头。"
                           "题目必须围绕章节教材与学生笔记的已有表述，不要给答案、不要选择题。"
-                          f"\n\n学生笔记：\n{(note.content if note else '')[:3000]}"),
+                          f"\n\n学生笔记：\n{(self.plain_note_content(note.content) if note else '')[:3000]}"),
             )).answer
             parsed = [re.sub(r"^\s*\d+[.、]\s*", "", line).strip() for line in generated.splitlines()
                       if re.match(r"^\s*\d+[.、]\s*.+", line)]

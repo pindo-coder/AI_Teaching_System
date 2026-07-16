@@ -12,5 +12,7 @@ from app.models.review_schedule import ReviewSchedule
 from app.models.learning_task import LearningTaskPoint, UserTaskProgress, LearningEvent
 from app.models.study_chat_message import StudyChatMessage
 from app.models.review_practice import ReviewPractice
+from app.models.news_study_note import NewsStudyNote
+from app.models.teacher_assignment import AssignmentRecipient, TeacherAssignment
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient"]

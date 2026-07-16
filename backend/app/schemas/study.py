@@ -4,7 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class StudyNoteUpdate(BaseModel):
-    content: str = Field(max_length=10000)
+    content: str = Field(max_length=30000)
 
 
 class StudyNoteRead(BaseModel):
@@ -79,6 +79,8 @@ class RelatedTextbookItem(BaseModel):
 class NoteRelatedData(BaseModel):
     related_notes: list[NoteSearchItem] = Field(default_factory=list)
     textbook_chunks: list[RelatedTextbookItem] = Field(default_factory=list)
+    status: str = "ready"
+    message: str = ""
 
 
 class ReviewQuestionRead(BaseModel):

@@ -34,6 +34,21 @@ def test_admin_course_chapter_and_student_learning_flow(client: TestClient, db: 
     )
     assert forbidden.status_code == 403
 
+    updated = client.put(
+        f"/api/v1/courses/{course_id}",
+        headers=admin_headers,
+        json={"description": "围绕教材内容组织专题学习与实践教学。"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["description"] == "围绕教材内容组织专题学习与实践教学。"
+
+    forbidden_update = client.put(
+        f"/api/v1/courses/{course_id}",
+        headers=student_headers,
+        json={"description": "学生不能修改教材简介"},
+    )
+    assert forbidden_update.status_code == 403
+
     chapter_response = client.post(
         f"/api/v1/courses/{course_id}/chapters",
         headers=admin_headers,

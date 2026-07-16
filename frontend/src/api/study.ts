@@ -49,6 +49,8 @@ export interface NoteSearchItem {
 export interface NoteRelatedData {
   related_notes: NoteSearchItem[]
   textbook_chunks: Array<{ source_title: string; excerpt: string; position: string; score: number }>
+  status: 'ready' | 'note_empty' | 'vector' | 'chapter_fallback' | 'no_match' | 'error'
+  message: string
 }
 
 export interface ReviewQuestion { id: number; question: string; source_position: string }

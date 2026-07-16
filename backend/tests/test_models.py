@@ -23,4 +23,7 @@ def test_all_mvp_tables_are_registered() -> None:
         "user_task_progress",
         "learning_events",
         "study_chat_messages",
+        "news_study_notes",
+        "teacher_assignments",
+        "assignment_recipients",
     }

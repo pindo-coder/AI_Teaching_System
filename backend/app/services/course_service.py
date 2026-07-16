@@ -30,7 +30,11 @@ class CourseService:
     def update_course(self, course_id: int, payload: CourseUpdate) -> Course:
         course = self.require_course(course_id)
         for field, value in payload.model_dump(exclude_unset=True).items():
-            setattr(course, field, value.strip() if field == "name" and value else value)
+            if field == "name" and value:
+                value = value.strip()
+            elif field == "description" and value is not None:
+                value = value.strip() or None
+            setattr(course, field, value)
         return self.courses.save(course)
 
     def create_chapter(self, course_id: int, payload: ChapterCreate) -> Chapter:

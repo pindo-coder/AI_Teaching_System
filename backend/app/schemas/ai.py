@@ -17,6 +17,7 @@ AiTaskType = Literal[
     "note_knowledge_structure",
     "note_real_significance",
     "note_concept_compare",
+    "news_study_note",
 ]
 
 
