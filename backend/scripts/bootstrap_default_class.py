@@ -3,6 +3,7 @@ from datetime import date
 
 from sqlalchemy import select
 
+import app.db.models  # noqa: F401  # 注册全部 ORM 模型，确保字符串关系可被解析
 from app.db.session import SessionLocal
 from app.models.classroom import ClassroomActivity
 from app.models.course import Course
@@ -48,7 +49,7 @@ def bootstrap() -> None:
         for student in db.scalars(select(User).where(User.role == "student")).all():
             db.add(ClassMembership(teaching_class_id=item.id, user_id=student.id, status="active", join_method="migration"))
             db.add(ClassRosterEntry(teaching_class_id=item.id, identity_no=(student.identity_no or f"LEGACY-{student.id}").upper(),
-                                    student_name=student.username, matched_user_id=student.id, status="matched"))
+                                    student_name=student.username, bound_user_id=student.id))
             db.add(StudentCourseSeat(user_id=student.id, subject_id=subject.id, term_id=term.id,
                                      teaching_class_id=item.id))
         for assignment in db.scalars(select(TeacherAssignment).where(TeacherAssignment.teaching_class_id.is_(None))).all():

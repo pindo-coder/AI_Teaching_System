@@ -11,6 +11,7 @@ from datetime import datetime
 
 from sqlalchemy import select, update
 
+import app.db.models  # noqa: F401  # 注册全部 ORM 模型及其字符串关系
 from app.core.config import settings
 from app.db.session import SessionLocal
 from app.models.citation import IndexVersion, KnowledgeChunk
@@ -34,7 +35,7 @@ def rebuild(*, activate: bool) -> str:
         version = IndexVersion(
             collection_name=target, embedding_provider=settings.embedding_provider,
             embedding_model=settings.embedding_model, embedding_dimensions=settings.embedding_dimensions,
-            chunk_size=settings.chunk_size, chunk_overlap=settings.chunk_overlap, status="building",
+            chunk_size=settings.text_chunk_size, chunk_overlap=settings.text_chunk_overlap, status="building",
         )
         db.add(version); db.commit(); db.refresh(version)
         try:

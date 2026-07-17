@@ -1,6 +1,7 @@
 """为升级前已经上传的 PDF 补建分页、章节边界和精确引用元数据。"""
 from sqlalchemy import select
 
+import app.db.models  # noqa: F401  # 注册全部 ORM 模型及其字符串关系
 from app.db.session import SessionLocal
 from app.models.chapter import Chapter
 from app.models.citation import DocumentOutlineNode, DocumentPage, TextbookVersion
