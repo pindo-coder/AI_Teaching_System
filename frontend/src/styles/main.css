@@ -101,12 +101,18 @@ a { color: var(--primary); text-decoration: none; }
 .course-tabs { display: flex; gap: 4px; margin: -20px 14px 0; padding: 5px; position: relative; z-index: 2; background: #fff; border-radius: 30px; box-shadow: 0 8px 24px rgba(37, 85, 150, .12); }
 .course-tabs a { flex: 1; padding: 13px 18px; color: #44536b; border-radius: 24px; text-align: center; font-weight: 650; }
 .course-tabs a:first-child { color: #fff; background: linear-gradient(100deg, #13b9e8, #5b87eb); }
-.course-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin: 24px 0 6px; }
+.course-tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 24px 0 6px; }
 .course-tool-card { cursor: pointer; border: 1px solid var(--border); border-radius: 16px; transition: transform .2s ease, box-shadow .2s ease; }
 .course-tool-card:hover { transform: translateY(-3px); box-shadow: 0 10px 24px rgba(52, 94, 170, .12); }
 .tool-kicker { color: var(--primary); font-size: 12px; font-weight: 700; letter-spacing: 1px; }
 .course-tool-card h3 { margin: 8px 0; font-size: 21px; }
 .course-tool-card p { min-height: 42px; margin: 0 0 12px; color: var(--muted); line-height: 1.7; }
+.calibration-document-list { display: grid; gap: 12px; }
+.calibration-document-item { width: 100%; padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; gap: 20px; text-align: left; color: var(--text); background: #f8faff; border: 1px solid var(--border); border-radius: 14px; cursor: pointer; transition: border-color .2s ease, transform .2s ease, box-shadow .2s ease; }
+.calibration-document-item:hover { transform: translateY(-2px); border-color: #7ba8ff; box-shadow: 0 10px 24px rgba(52, 94, 170, .12); }
+.calibration-document-item div { min-width: 0; display: grid; gap: 5px; }
+.calibration-document-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
+.calibration-document-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
 .knowledge-graph-card { overflow: hidden; margin-top: 24px; background: #071b3d; border: 1px solid #183b70; border-radius: 20px; box-shadow: 0 18px 45px rgba(18,51,103,.18); }
 .knowledge-graph-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; padding: 24px 28px 18px; color: #fff; background: linear-gradient(90deg, rgba(24,65,132,.82), rgba(11,34,76,.45)); }
 .knowledge-graph-heading h2 { margin: 4px 0 5px; font-size: 25px; }.knowledge-graph-heading p { margin: 0; color: #a9c4ec; }.knowledge-graph-heading .eyebrow { color: #59c8ff !important; }

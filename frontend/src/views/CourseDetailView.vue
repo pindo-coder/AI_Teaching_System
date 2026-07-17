@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { courseApi } from '@/api/courses'
+import { knowledgeApi, type KnowledgeDocument } from '@/api/knowledge'
 import { useAuthStore } from '@/stores/auth'
 import type { CourseDetail, LearningStage } from '@/types'
 import { textbookPreview } from '@/utils/textbookText'
@@ -15,11 +16,35 @@ const courseId = computed(() => Number(route.params.id))
 const course = ref<CourseDetail | null>(null)
 const loading = ref(false)
 const dialogVisible = ref(false)
+const calibrationDialogVisible = ref(false)
+const documents = ref<KnowledgeDocument[]>([])
 const form = reactive({ title: '', content: '', sort_order: 0 })
+const canManageCitations = computed(() => ['teacher', 'admin'].includes(auth.user?.role || ''))
+const calibrationSummary = computed(() => {
+  if (!documents.value.length) return '尚未导入可校准的教材文件'
+  const published = documents.value.filter((item) => item.calibration_status === 'published').length
+  const pending = documents.value.length - published
+  return pending ? `${pending} 份资料待校准或发布` : `${published} 份资料已完成校准发布`
+})
 
 async function loadCourse() {
   loading.value = true
-  try { course.value = (await courseApi.detail(courseId.value)).data.data } finally { loading.value = false }
+  try {
+    const [courseResult, documentResult] = await Promise.all([
+      courseApi.detail(courseId.value),
+      canManageCitations.value ? knowledgeApi.list(courseId.value) : Promise.resolve(null),
+    ])
+    course.value = courseResult.data.data
+    documents.value = documentResult?.data.data || []
+  } finally { loading.value = false }
+}
+function openCalibration() {
+  if (!documents.value.length) return ElMessage.warning('当前教材没有可校准的资料，请重新导入带文字层的 PDF 教材')
+  if (documents.value.length === 1) return router.push(`/knowledge/documents/${documents.value[0].id}/calibrate`)
+  calibrationDialogVisible.value = true
+}
+function calibrationLabel(status: KnowledgeDocument['calibration_status']) {
+  return status === 'published' ? '已发布' : status === 'calibrated' ? '已校准待发布' : '待校准'
 }
 async function createChapter() {
   if (!form.title.trim()) return ElMessage.warning('请输入章节标题')
@@ -48,9 +73,9 @@ onMounted(loadCourse)
 <template>
   <div v-loading="loading">
     <div class="course-breadcrumb"><el-button link @click="$router.push('/courses')">课程中心</el-button><span>/</span><span>{{ course?.name || '教材详情' }}</span></div>
-    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="auth.isAdmin" class="hero-admin-actions"><el-button class="hero-admin-button" type="warning" @click="dialogVisible = true">添加专题</el-button><el-button class="hero-admin-button hero-delete-button" type="danger" plain @click="deleteCourse">删除教材</el-button></div></header>
+    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-button class="hero-admin-button" type="primary" @click="openCalibration">教材引用校准</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button" type="warning" @click="dialogVisible = true">添加专题</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button hero-delete-button" type="danger" plain @click="deleteCourse">删除教材</el-button></div></header>
     <nav class="course-tabs" aria-label="教材内容导航"><a href="#overview">内容概览</a><a href="#chapters">专题章节</a><a href="#learning-path">学习路径</a></nav>
-    <section class="course-tools"><el-card shadow="hover" class="course-tool-card" @click="router.push('/current-affairs')"><span class="tool-kicker">关联教材</span><h3>时政要点</h3><p>从现实议题回到教材知识，查看当前时政学习内容。</p><el-link type="primary" :underline="false">进入时政要点 →</el-link></el-card><el-card shadow="hover" class="course-tool-card" @click="router.push('/interaction')"><span class="tool-kicker">课堂场景</span><h3>课堂互动</h3><p>围绕当前教材专题生成讨论题、随堂问答和观点辨析。</p><el-link type="primary" :underline="false">进入课堂互动 →</el-link></el-card></section>
+    <section class="course-tools"><el-card shadow="hover" class="course-tool-card" @click="router.push('/current-affairs')"><span class="tool-kicker">关联教材</span><h3>时政要点</h3><p>从现实议题回到教材知识，查看当前时政学习内容。</p><el-link type="primary" :underline="false">进入时政要点 →</el-link></el-card><el-card shadow="hover" class="course-tool-card" @click="router.push('/interaction')"><span class="tool-kicker">课堂场景</span><h3>课堂互动</h3><p>围绕当前教材专题生成讨论题、随堂问答和观点辨析。</p><el-link type="primary" :underline="false">进入课堂互动 →</el-link></el-card><el-card v-if="canManageCitations" shadow="hover" class="course-tool-card" @click="openCalibration"><span class="tool-kicker">教师与管理员工具</span><h3>教材引用校准</h3><p>{{ calibrationSummary }}</p><el-link type="primary" :underline="false">校准章节与页码 →</el-link></el-card></section>
     <KnowledgeGraph v-if="course" id="overview" :course-name="course.name" :chapters="course.chapters" @learn="(chapterId) => startLearning(chapterId, 'preview')" />
     <div class="course-detail-layout">
       <main>
@@ -70,5 +95,8 @@ onMounted(loadCourse)
       </aside>
     </div>
     <el-dialog v-model="dialogVisible" title="添加专题" width="560px"><el-form label-position="top"><el-form-item label="专题标题" required><el-input v-model="form.title" /></el-form-item><el-form-item label="专题内容"><el-input v-model="form.content" type="textarea" :rows="5" /></el-form-item><el-form-item label="排序"><el-input-number v-model="form.sort_order" :min="0" /></el-form-item></el-form><template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" @click="createChapter">保存</el-button></template></el-dialog>
+    <el-dialog v-model="calibrationDialogVisible" title="选择需要校准的教材资料" width="680px">
+      <div class="calibration-document-list"><button v-for="item in documents" :key="item.id" type="button" class="calibration-document-item" @click="router.push(`/knowledge/documents/${item.id}/calibrate`)"><div><strong>{{ item.source_title }}</strong><span>{{ item.original_filename }}</span></div><el-tag :type="item.calibration_status === 'published' ? 'success' : item.calibration_status === 'calibrated' ? 'primary' : 'warning'">{{ calibrationLabel(item.calibration_status) }}</el-tag></button></div>
+    </el-dialog>
   </div>
 </template>

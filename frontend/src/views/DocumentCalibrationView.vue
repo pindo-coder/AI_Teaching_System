@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, CirclePlus, Delete, Select } from '@element-plus/icons-vue'
@@ -28,17 +28,34 @@ const nodes = ref<EditableNode[]>([])
 const selectedClientId = ref('')
 const selectedPage = ref(1)
 const pdfUrl = ref('')
+const pdfLoading = ref(false)
+let pdfRequestId = 0
 const versionLabel = ref('当前版')
 const accessPolicy = ref<'citation_only' | 'full_preview' | 'download'>('full_preview')
 const pageRanges = ref<PageNumberRangeInput[]>([])
 
 const selectedNode = computed(() => nodes.value.find((item) => item.client_id === selectedClientId.value) || null)
 const selectedPageData = computed(() => pages.value.find((item) => item.pdf_page === selectedPage.value) || null)
-const pdfPageUrl = computed(() => pdfUrl.value ? `${pdfUrl.value}#page=${selectedPage.value}&toolbar=1&navpanes=0&view=FitH` : '')
+const pdfPageUrl = computed(() => pdfUrl.value ? `${pdfUrl.value}#page=1&toolbar=1&navpanes=0&view=FitH` : '')
 const maxPage = computed(() => pages.value.at(-1)?.pdf_page || 1)
 const canPublish = computed(() => auth.user?.role === 'admin' && document.value?.calibration_status === 'calibrated')
 
 function revokePdf() { if (pdfUrl.value) URL.revokeObjectURL(pdfUrl.value); pdfUrl.value = '' }
+
+async function loadPdfPage(page: number) {
+  const requestId = ++pdfRequestId
+  pdfLoading.value = true
+  try {
+    const result = await knowledgeApi.fileBlob(documentId, page)
+    if (requestId !== pdfRequestId) return
+    revokePdf()
+    pdfUrl.value = URL.createObjectURL(result.data)
+  } catch (error: unknown) {
+    if (requestId === pdfRequestId) ElMessage.error(getErrorMessage(error, `PDF 第 ${page} 页加载失败`))
+  } finally {
+    if (requestId === pdfRequestId) pdfLoading.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -46,8 +63,8 @@ async function load() {
     const detail = (await knowledgeApi.detail(documentId)).data.data
     document.value = detail
     accessPolicy.value = detail.access_policy
-    const [pageResult, outlineResult, courseResult, fileResult, metaResult] = await Promise.all([
-      knowledgeApi.pages(documentId), knowledgeApi.outline(documentId), courseApi.detail(detail.course_id), knowledgeApi.fileBlob(documentId), knowledgeApi.calibrationMeta(documentId),
+    const [pageResult, outlineResult, courseResult, metaResult] = await Promise.all([
+      knowledgeApi.pages(documentId), knowledgeApi.outline(documentId), courseApi.detail(detail.course_id), knowledgeApi.calibrationMeta(documentId),
     ])
     pages.value = pageResult.data.data
     chapters.value = courseResult.data.data.chapters
@@ -63,7 +80,7 @@ async function load() {
     }))
     selectedClientId.value = nodes.value[0]?.client_id || ''
     selectedPage.value = nodes.value[0]?.pdf_page_start || 1
-    revokePdf(); pdfUrl.value = URL.createObjectURL(fileResult.data)
+    await loadPdfPage(selectedPage.value)
   } catch (error: unknown) {
     ElMessage.error(getErrorMessage(error, '教材校准数据加载失败'))
   } finally { loading.value = false }
@@ -132,6 +149,7 @@ async function publish() {
 
 onMounted(load)
 onBeforeUnmount(revokePdf)
+watch(selectedPage, (page, previous) => { if (!loading.value && page !== previous) loadPdfPage(page) })
 </script>
 
 <template>
@@ -155,7 +173,7 @@ onBeforeUnmount(revokePdf)
         <div class="outline-list"><button v-for="node in nodes" :key="node.client_id" :class="['outline-node', { active: node.client_id === selectedClientId }]" :style="{ paddingLeft: `${16 + (node.parent_client_id ? 18 : 0)}px` }" @click="selectNode(node)"><span>{{ node.node_type === 'chapter' ? '章' : node.node_type === 'section' ? '节' : node.node_type === 'knowledge_point' ? '点' : '附' }}</span><div><strong>{{ node.title }}</strong><small>PDF {{ node.pdf_page_start }}–{{ node.pdf_page_end }}</small></div></button></div>
       </aside>
 
-      <section class="calibration-pdf">
+      <section v-loading="pdfLoading" class="calibration-pdf">
         <div class="panel-title"><div><span>02</span><strong>PDF 原页</strong></div><div class="page-stepper"><el-button size="small" :disabled="selectedPage <= 1" @click="selectedPage--">上一页</el-button><el-input-number v-model="selectedPage" :min="1" :max="maxPage" controls-position="right" /><el-button size="small" :disabled="selectedPage >= maxPage" @click="selectedPage++">下一页</el-button></div></div>
         <iframe v-if="pdfPageUrl" :key="selectedPage" :src="pdfPageUrl" title="教材 PDF"></iframe>
       </section>
