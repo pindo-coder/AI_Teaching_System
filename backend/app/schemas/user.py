@@ -36,8 +36,15 @@ class UserRead(BaseModel):
     id: int
     username: str
     role: str
+    approval_status: str
+    approval_note: str | None
     identity_no: str | None
     created_time: datetime
+
+
+class TeacherApprovalUpdate(BaseModel):
+    status: Literal["approved", "rejected", "disabled"]
+    note: str = Field(default="", max_length=500)
 
 
 class TokenData(BaseModel):

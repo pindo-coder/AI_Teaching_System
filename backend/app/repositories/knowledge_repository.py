@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.knowledge_document import KnowledgeDocument
@@ -20,6 +20,7 @@ class KnowledgeRepository:
         query = select(KnowledgeDocument).where(
             KnowledgeDocument.course_id == course_id,
             KnowledgeDocument.status == "ready",
+            or_(KnowledgeDocument.source_type != "pdf", KnowledgeDocument.calibration_status == "published"),
         )
         return list(self.db.scalars(query).all())
 

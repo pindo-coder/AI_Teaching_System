@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { aiApi, type AiAssistData } from '@/api/ai'
+import { aiApi, type AiAssistData, type AiSource } from '@/api/ai'
 import { courseApi } from '@/api/courses'
 import { getErrorMessage } from '@/utils/error'
 import { newsApi, type NewsItem, type TextbookRelationItem } from '@/api/news'
@@ -10,6 +10,7 @@ import { studyApi } from '@/api/study'
 import type { CourseDetail } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
 import { Refresh, Search } from '@element-plus/icons-vue'
+import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 
 const router = useRouter()
 const loading = ref(false)
@@ -29,6 +30,8 @@ const aiResult = ref<AiAssistData | null>(null)
 const aiLoading = ref(false)
 const aiMode = ref<'summary' | 'relation'>('summary')
 const dialogVisible = ref(false)
+const citationVisible = ref(false)
+const selectedSource = ref<AiSource | null>(null)
 const studyDialogVisible = ref(false)
 const refreshing = ref(false)
 const relationLoading = ref(false)
@@ -44,6 +47,7 @@ let lastNewsLoadedAt = 0
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
 const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value))
+function openCitation(source: AiSource) { if (source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true } }
 
 async function loadNews(resetPage = false) {
   if (resetPage) currentPage.value = 1
@@ -289,11 +293,12 @@ function openSavedNote() {
       <section v-if="aiResult" class="ai-dialog-result ai-result">
         <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? '依据教材资料生成' : '教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
         <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="aiLoading" class="stream-cursor" aria-label="正在生成"></span>
-        <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>回答仅依据以下课程资料</span></div><div v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" class="source-item"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" type="info">{{ source.position }}</el-tag></div><p>{{ source.excerpt }}</p></div></div>
+        <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对教材原页</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :disabled="!source.document_id || !source.pdf_page_start" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="source.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span></button></div>
       </section>
       <el-empty v-else-if="!aiLoading" description="暂无生成结果" />
       <template #footer><el-button @click="dialogVisible = false">关闭</el-button></template>
     </el-dialog>
+    <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
     <el-dialog v-model="studyDialogVisible" title="生成时政研学笔记" width="880px" class="study-note-dialog">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要，请以原文为准。' }}</p></div>
       <div class="study-note-steps">

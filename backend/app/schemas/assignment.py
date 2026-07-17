@@ -9,6 +9,7 @@ TaskKind = Literal["reading", "ai_assist", "note"]
 
 
 class AssignmentCreate(BaseModel):
+    teaching_class_id: int | None = None
     course_id: int
     chapter_id: int
     learning_stage: LearningStage
@@ -16,13 +17,16 @@ class AssignmentCreate(BaseModel):
     title: str = Field(min_length=2, max_length=160)
     description: str = Field(default="", max_length=3000)
     due_time: datetime
-    target_scope: Literal["all_students", "selected_students"] = "all_students"
+    target_scope: Literal["all_students", "selected_students", "selected_groups"] = "all_students"
     student_ids: list[int] = Field(default_factory=list)
+    group_ids: list[int] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def selected_students_required(self):
         if self.target_scope == "selected_students" and not self.student_ids:
             raise ValueError("指定学生发布时至少选择一名学生")
+        if self.target_scope == "selected_groups" and not self.group_ids:
+            raise ValueError("按小组发布时至少选择一个学习小组")
         return self
 
 
@@ -34,6 +38,7 @@ class AssignmentStudentItem(BaseModel):
 
 class StudentAssignmentRead(BaseModel):
     id: int
+    teaching_class_id: int | None
     course_id: int
     chapter_id: int
     course_name: str
@@ -52,6 +57,7 @@ class StudentAssignmentRead(BaseModel):
 
 class TeacherAssignmentRead(BaseModel):
     id: int
+    teaching_class_id: int | None
     course_id: int
     chapter_id: int
     course_name: str

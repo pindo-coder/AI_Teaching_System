@@ -22,6 +22,15 @@ export interface AiSource {
   chapter_id: number
   excerpt: string
   position: string
+  document_id: number | null
+  vector_id: string | null
+  section_path: string | null
+  pdf_page_start: number | null
+  pdf_page_end: number | null
+  paragraph_index: number | null
+  printed_page_start: string | null
+  printed_page_end: string | null
+  evidence_type: string
 }
 
 export interface AiAssistData {

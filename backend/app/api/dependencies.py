@@ -39,6 +39,8 @@ def require_roles(*roles: str) -> Callable[[User], User]:
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
         if current_user.role not in roles:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号无权执行此操作")
+        if current_user.role == "teacher" and current_user.approval_status != "approved":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="教师账号尚未通过管理员审核")
         return current_user
 
     return role_checker

@@ -25,6 +25,7 @@ class AuthService:
                 password_hash=hash_password(password),
                 role=role,
                 identity_no=normalized_identity,
+                approval_status="pending" if role == "teacher" else "approved",
             )
         except IntegrityError:
             self.db.rollback()

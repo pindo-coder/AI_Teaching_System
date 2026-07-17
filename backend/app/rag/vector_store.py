@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -12,11 +13,18 @@ def resolve_backend_path(configured_path: str) -> Path:
     return path if path.is_absolute() else (BACKEND_DIR / path).resolve()
 
 
-def get_vector_store() -> Chroma:
+def get_vector_store(collection_name: str | None = None) -> Chroma:
     persist_directory = resolve_backend_path(settings.chroma_persist_directory)
     persist_directory.mkdir(parents=True, exist_ok=True)
+    active_file = persist_directory / "active_index.json"
+    file_collection = None
+    if active_file.exists():
+        try:
+            file_collection = json.loads(active_file.read_text(encoding="utf-8")).get("collection_name")
+        except (OSError, ValueError, TypeError):
+            file_collection = None
     return Chroma(
-        collection_name=settings.rag_collection_name,
+        collection_name=collection_name or settings.rag_active_collection or file_collection or settings.rag_collection_name,
         embedding_function=get_embeddings(),
         persist_directory=str(persist_directory),
     )
@@ -49,6 +57,34 @@ def add_chunks(*, document_id: int, chunks: list[str], metadata: dict[str, str |
     ]
     ids = [f"document-{document_id}-chunk-{index}" for index in range(len(chunks))]
     get_vector_store().add_documents(documents, ids=ids)
+
+
+def add_precise_chunks(*, document_id: int, chunks: list[dict[str, object]],
+                       metadata: dict[str, str | int], collection_name: str | None = None) -> list[str]:
+    ids = [f"document-{document_id}-chunk-{index}" for index in range(len(chunks))]
+    documents = []
+    for index, chunk in enumerate(chunks):
+        pdf_start = int(chunk["pdf_page_start"])
+        pdf_end = int(chunk.get("pdf_page_end", pdf_start))
+        printed_start = str(chunk.get("printed_page_start") or "")
+        printed_end = str(chunk.get("printed_page_end") or printed_start)
+        paragraph_index = int(chunk.get("paragraph_index") or 1)
+        printed = f"教材第 {printed_start}" + (f"—{printed_end}" if printed_end and printed_end != printed_start else "") + " 页｜" if printed_start else ""
+        pdf = f"PDF 第 {pdf_start}" + (f"—{pdf_end}" if pdf_end != pdf_start else "") + " 页"
+        documents.append(Document(
+            page_content=str(chunk["content"]),
+            metadata={**metadata, **dict(chunk.get("metadata") or {}),
+                      "document_id": document_id, "vector_id": ids[index], "chunk_index": index,
+                      "chunk_count": len(chunks), "pdf_page_start": pdf_start, "pdf_page_end": pdf_end,
+                      "paragraph_index": paragraph_index,
+                      "printed_page_start": printed_start, "printed_page_end": printed_end,
+                      "section_path": str(chunk.get("section_path") or ""),
+                      "start_anchor": str(chunk.get("start_anchor") or ""),
+                      "end_anchor": str(chunk.get("end_anchor") or ""),
+                      "position_label": f"{printed}{pdf}｜第 {paragraph_index} 段"},
+        ))
+    get_vector_store(collection_name).add_documents(documents, ids=ids)
+    return ids
 
 
 def delete_document_vectors(document_id: int) -> None:

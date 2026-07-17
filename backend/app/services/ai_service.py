@@ -146,6 +146,7 @@ class AiService:
                 course_id=course.id,
                 chapter_id=chapter.id,
                 fallback_to_course=False,
+                document_ids=[document.id for document in ready_documents],
             )
         if not chapter_content and ready_documents and not retrieved_chunks:
             return AiAssistData(
@@ -156,7 +157,7 @@ class AiService:
 
         content = (
             "\n\n".join(
-                f"[资料 {index + 1}：{item.metadata.get('source_title', '未命名资料')}]\n{item.content}"
+                f"[资料 {index + 1}｜{'主教材' if str(item.metadata.get('source_role', 'primary')) == 'primary' else '补充资料'}｜{item.metadata.get('section_path') or item.metadata.get('source_title', '未命名资料')}｜{item.metadata.get('position_label', '位置待校准')}]\n{item.content}"
                 for index, item in enumerate(retrieved_chunks)
             )
             if retrieved_chunks
@@ -188,6 +189,15 @@ class AiService:
                     chapter_id=chapter.id,
                     excerpt=item.content[:180] + ("……" if len(item.content) > 180 else ""),
                     position=source_position(item.metadata),
+                    document_id=int(item.metadata["document_id"]) if item.metadata.get("document_id") is not None else None,
+                    vector_id=str(item.metadata.get("vector_id")) if item.metadata.get("vector_id") else None,
+                    section_path=str(item.metadata.get("section_path")) if item.metadata.get("section_path") else None,
+                    pdf_page_start=int(item.metadata["pdf_page_start"]) if item.metadata.get("pdf_page_start") is not None else None,
+                    pdf_page_end=int(item.metadata["pdf_page_end"]) if item.metadata.get("pdf_page_end") is not None else None,
+                    paragraph_index=int(item.metadata["paragraph_index"]) if item.metadata.get("paragraph_index") is not None else None,
+                    printed_page_start=str(item.metadata.get("printed_page_start")) if item.metadata.get("printed_page_start") else None,
+                    printed_page_end=str(item.metadata.get("printed_page_end")) if item.metadata.get("printed_page_end") else None,
+                    evidence_type="教材直接依据" if str(item.metadata.get("source_role", "primary")) == "primary" else "补充资料依据",
                 )
                 for item in retrieved_chunks
             ]

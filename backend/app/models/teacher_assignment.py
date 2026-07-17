@@ -10,6 +10,9 @@ class TeacherAssignment(Base):
     __tablename__ = "teacher_assignments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    teaching_class_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teaching_classes.id", ondelete="SET NULL"), index=True
+    )
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
     chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), index=True)
@@ -20,6 +23,7 @@ class TeacherAssignment(Base):
     due_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(20), default="published", nullable=False, index=True)
     target_scope: Mapped[str] = mapped_column(String(30), default="all_students", nullable=False)
+    target_group_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     required_task_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     created_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 

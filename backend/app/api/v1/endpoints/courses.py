@@ -20,6 +20,7 @@ from app.services.course_service import CourseService
 from app.services.chapter_extractor import extract_chapters
 from app.rag.document_loader import extract_text
 from app.services.knowledge_service import KnowledgeService
+from app.services.citation_service import CitationService
 
 
 router = APIRouter(tags=["courses"])
@@ -49,20 +50,23 @@ async def import_course(
         filename = file.filename or "教材资料.txt"
         text = extract_text(filename, content)
         source_title = (file.filename or "教材资料").rsplit(".", 1)[0]
-        KnowledgeService(db).ingest(
+        course_service = CourseService(db)
+        chapters = []
+        for sort_order, (title, chapter_content) in enumerate(extract_chapters(text), start=1):
+            chapters.append(course_service.create_chapter(
+                course.id,
+                ChapterCreate(title=title, content=chapter_content, sort_order=sort_order),
+            ))
+        document = KnowledgeService(db).ingest(
             filename=filename,
             content=content,
             source_title=source_title,
             course_id=course.id,
             chapter_id=None,
             knowledge_point=None,
+            defer_index=True,
         )
-        course_service = CourseService(db)
-        for sort_order, (title, chapter_content) in enumerate(extract_chapters(text), start=1):
-            course_service.create_chapter(
-                course.id,
-                ChapterCreate(title=title, content=chapter_content, sort_order=sort_order),
-            )
+        CitationService(db).auto_calibrate(document.id, chapters)
     message = "教材、专题和知识库已自动建立" if file else "教材创建成功"
     return ApiResponse(message=message, data=CourseRead.model_validate(course))
 

@@ -14,8 +14,9 @@ manager = require_roles("teacher", "admin")
 
 
 @router.get("/students", response_model=ApiResponse[list[AssignmentStudentItem]])
-def list_students(_: User = Depends(manager), db: Session = Depends(get_db)) -> ApiResponse[list[AssignmentStudentItem]]:
-    return ApiResponse(data=AssignmentService(db).list_students())
+def list_students(teaching_class_id: int | None = None, user: User = Depends(manager),
+                  db: Session = Depends(get_db)) -> ApiResponse[list[AssignmentStudentItem]]:
+    return ApiResponse(data=AssignmentService(db).list_students(user, teaching_class_id))
 
 
 @router.get("/student", response_model=ApiResponse[list[StudentAssignmentRead]])

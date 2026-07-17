@@ -11,6 +11,7 @@ import NoteRichEditor from '@/components/NoteRichEditor.vue'
 import { notePlainText, sanitizeNoteHtml } from '@/utils/noteContent'
 import { courseApi } from '@/api/courses'
 import type { Chapter, Course } from '@/types'
+import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -48,6 +49,12 @@ const createCourseId = ref<number | null>(null)
 const availableChapters = ref<Chapter[]>([])
 const createChapterId = ref<number | null>(null)
 const createLoading = ref(false)
+const citationVisible = ref(false)
+const selectedSource = ref<AiSource | null>(null)
+
+function openCitation(source: AiSource) {
+  if (source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true }
+}
 
 const filteredNotes = computed(() => {
   const keyword = query.value.trim().toLowerCase()
@@ -375,7 +382,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
         <aside v-if="!aiCollapsed" class="notes-ai-panel">
           <template v-if="selected">
             <header class="notes-ai-heading"><div class="ai-icon"><el-icon :size="21"><MagicStick /></el-icon></div><div><h2>笔记 AI 助手</h2><p>本章会话 · 自动承接最近追问</p></div><el-tooltip content="收起 AI 区"><el-button text :icon="ArrowRightBold" @click="setAiCollapsed(true)" /></el-tooltip><el-button text :icon="RefreshRight" @click="clearChat">清空</el-button></header>
-            <div ref="chatScroll" class="notes-chat-history"><el-empty v-if="!chatMessages.length && !chatLoading" :image-size="64" description="在这里提问，历史会自动保存" /><article v-for="message in chatMessages" :key="message.id" class="notes-chat-message" :class="message.role"><span class="chat-role">{{ message.role === 'user' ? '我' : 'AI' }}</span><div class="chat-bubble"><span v-if="message.role === 'user'">{{ message.content }}</span><template v-else><article class="teaching-document" v-html="renderTeachingDocument(message.content)"></article><span v-if="message.pending && chatLoading" class="stream-cursor" aria-label="正在生成"></span><div v-if="message.sources.length" class="answer-sources chat-sources"><div class="source-heading"><strong>教材依据</strong><span v-if="message.model">{{ message.model }}</span></div><div v-for="(source, index) in message.sources" :key="`${message.id}-${index}`" class="source-item"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" type="info">{{ source.position }}</el-tag></div><p>{{ source.excerpt }}</p></div></div></template></div></article></div>
+            <div ref="chatScroll" class="notes-chat-history"><el-empty v-if="!chatMessages.length && !chatLoading" :image-size="64" description="在这里提问，历史会自动保存" /><article v-for="message in chatMessages" :key="message.id" class="notes-chat-message" :class="message.role"><span class="chat-role">{{ message.role === 'user' ? '我' : 'AI' }}</span><div class="chat-bubble"><span v-if="message.role === 'user'">{{ message.content }}</span><template v-else><article class="teaching-document" v-html="renderTeachingDocument(message.content)"></article><span v-if="message.pending && chatLoading" class="stream-cursor" aria-label="正在生成"></span><div v-if="message.sources.length" class="answer-sources chat-sources"><div class="source-heading"><strong>教材依据</strong><span v-if="message.model">{{ message.model }}</span></div><button v-for="(source, index) in message.sources" :key="`${message.id}-${index}`" type="button" class="source-item source-item--button" :disabled="!source.document_id || !source.pdf_page_start" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="source.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">核对原页 →</span></button></div></template></div></article></div>
             <div class="notes-chat-input"><el-input v-model="chatQuestion" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="结合当前笔记向 AI 提问……" @keydown.ctrl.enter="askAi" /><el-button type="primary" :icon="Promotion" :loading="chatLoading" @click="askAi">发送</el-button></div>
           </template>
           <section v-else class="notes-empty-ai">
@@ -391,5 +398,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
     <el-dialog v-model="createDialogVisible" title="新建章节笔记" width="480px">
       <el-form label-position="top"><el-form-item label="选择教材"><el-select v-model="createCourseId" style="width:100%" @change="loadCreateChapters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="选择专题章节"><el-select v-model="createChapterId" filterable style="width:100%" placeholder="请选择需要整理的章节"><el-option v-for="chapter in availableChapters" :key="chapter.id" :label="`${chapter.title}${notes.some((note) => note.chapter_id === chapter.id) ? '（已有笔记）' : ''}`" :value="chapter.id" /></el-select></el-form-item></el-form><p class="create-note-hint">每个专题保留一篇个人主笔记；如果已经创建，系统会直接打开原笔记。</p><template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="createLoading" @click="createOrOpenNote">创建并编辑</el-button></template>
     </el-dialog>
+    <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
   </div>
 </template>

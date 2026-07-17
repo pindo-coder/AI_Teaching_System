@@ -13,4 +13,7 @@ export const authApi = {
   login: (payload: { username: string; password: string }) =>
     http.post<ApiResponse<TokenData>>('/auth/login', payload),
   me: () => http.get<ApiResponse<User>>('/auth/me'),
+  pendingTeachers: () => http.get<ApiResponse<User[]>>('/auth/teachers/pending'),
+  reviewTeacher: (userId: number, status: 'approved' | 'rejected' | 'disabled', note = '') =>
+    http.put<ApiResponse<User>>(`/auth/teachers/${userId}/approval`, { status, note }),
 }

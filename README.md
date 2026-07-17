@@ -65,7 +65,7 @@ npm run build
 
 运行配置从 `.env` 读取，仓库只提交 `.env.example`。不要提交真实 API 密钥、数据库文件、上传资料或 Chroma 数据。
 
-公开注册账号固定为 `student`。课程和章节写操作仅 `admin` 可用，所有登录用户均可查看课程并记录学习进度。
+学生和教师均可公开注册；教师账号需要管理员审核后才能进入教学功能。课程和章节写操作仅 `admin` 可用，所有已授权用户均可查看课程并记录学习进度。
 
 ## AI 模式
 
@@ -104,11 +104,20 @@ EMBEDDING_MODEL=BAAI/bge-m3
 ```env
 EMBEDDING_PROVIDER=dashscope
 DASHSCOPE_API_KEY=your-dashscope-key
-DASHSCOPE_EMBEDDING_MODEL=text-embedding-v2
+DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1024
 ```
 
-DashScope 默认使用 `https://dashscope.aliyuncs.com/compatible-mode/v1`。真实 Embedding
-配置后，需要重新导入教材，不能混用之前的 Mock 向量。
+DashScope 默认使用 `https://dashscope.aliyuncs.com/compatible-mode/v1`。切换模型后不要直接覆盖旧集合，使用安全重建脚本：
+
+```bash
+cd backend
+PYTHONPATH=. python -m scripts.rebuild_precise_index
+# 确认构建与数量检查正常后再原子切换
+PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
+```
+
+旧 Chroma collection 会保留；删除 `knowledge_base/chroma/active_index.json` 即可回退到环境变量或默认集合。
 
 ## 切换 MySQL
 
@@ -126,6 +135,20 @@ PYTHONPATH=. python scripts/init_database.py
 ```
 
 初始化脚本适用于 SQLite 和 MySQL；正式环境应使用独立数据库用户，不要使用 root。
+
+## 升级现有数据库与教材
+
+已有服务器数据库按以下顺序升级。执行前先备份 MySQL、上传目录和 Chroma 目录：
+
+```bash
+cd backend
+alembic upgrade head
+PYTHONPATH=. python -m scripts.bootstrap_default_class
+PYTHONPATH=. python -m scripts.migrate_existing_citations
+PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
+```
+
+迁移后，管理员应进入“教材知识库 → 校准结构”，确认自动识别的章、节、知识点、PDF 页和印刷页码，再发布教材版本。教学班支持主讲教师、协作教师、名单导入、入班审批、分组和同课程同学期唯一在班规则。
 
 模拟 Embedding 仅用于验证入库与检索流程，真实教材检索应配置语义 Embedding 服务。
 

@@ -8,6 +8,7 @@ import { courseApi } from '@/api/courses'
 import { useAuthStore } from '@/stores/auth'
 import type { Chapter, Course, LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
+import { teachingClassApi, type ClassGroup, type TeachingClass } from '@/api/teachingClasses'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -17,16 +18,20 @@ const teacherTasks = ref<TeacherAssignment[]>([])
 const courses = ref<Course[]>([])
 const chapters = ref<Chapter[]>([])
 const students = ref<AssignmentStudent[]>([])
+const teachingClasses = ref<TeachingClass[]>([])
+const groups = ref<ClassGroup[]>([])
 const dialogVisible = ref(false)
 const publishing = ref(false)
 const form = reactive({
+  teaching_class_id: null as number | null,
   course_id: null as number | null,
   chapter_id: null as number | null,
   learning_stage: 'preview' as LearningStage,
   task_kind: 'reading' as AssignmentTaskKind,
   title: '', description: '', due_time: '',
-  target_scope: 'all_students' as 'all_students' | 'selected_students',
+  target_scope: 'all_students' as 'all_students' | 'selected_students' | 'selected_groups',
   student_ids: [] as number[],
+  group_ids: [] as number[],
 })
 const stageLabels: Record<LearningStage, string> = { preview: '课前预习', review: '课后巩固', exam: '考前冲刺' }
 const kindLabels: Record<AssignmentTaskKind, string> = { reading: '教材阅读', ai_assist: 'AI 学习辅助', note: '章节笔记' }
@@ -44,10 +49,10 @@ async function load() {
   loading.value = true
   try {
     if (auth.isTeacher) {
-      const [taskResponse, courseResponse, studentResponse] = await Promise.all([assignmentApi.teacher(), courseApi.list(), assignmentApi.students()])
+      const [taskResponse, courseResponse, classResponse] = await Promise.all([assignmentApi.teacher(), courseApi.list(), teachingClassApi.list()])
       teacherTasks.value = taskResponse.data.data
       courses.value = courseResponse.data.data
-      students.value = studentResponse.data.data
+      teachingClasses.value = classResponse.data.data.filter((item) => item.status !== 'archived')
     } else studentTasks.value = (await assignmentApi.student(true)).data.data
   } finally { loading.value = false }
 }
@@ -56,23 +61,35 @@ async function loadChapters() {
   chapters.value = form.course_id ? (await courseApi.detail(form.course_id)).data.data.chapters : []
 }
 watch(() => form.course_id, () => void loadChapters())
+watch(() => form.teaching_class_id, async (classId) => {
+  form.student_ids = []; form.group_ids = []
+  const selected = teachingClasses.value.find((item) => item.id === classId)
+  if (selected && !selected.material_ids.includes(form.course_id || -1)) form.course_id = selected.primary_course_id
+  if (classId) {
+    const [studentResponse, groupResponse] = await Promise.all([assignmentApi.students(classId), teachingClassApi.groups(classId)])
+    students.value = studentResponse.data.data; groups.value = groupResponse.data.data
+  } else { students.value = []; groups.value = [] }
+})
 watch(() => form.learning_stage, (stage) => { if (form.task_kind === 'note' && stage !== 'review') form.task_kind = 'reading' })
 function openCreate() {
   dialogVisible.value = true
-  if (courses.value.length && !form.course_id) form.course_id = courses.value[0].id
+  if (teachingClasses.value.length && !form.teaching_class_id) form.teaching_class_id = teachingClasses.value[0].id
+  const selected = teachingClasses.value.find((item) => item.id === form.teaching_class_id)
+  if (selected && !form.course_id) form.course_id = selected.primary_course_id
   if (!form.due_time) {
     const tomorrow = new Date(Date.now() + 24 * 3600 * 1000)
     form.due_time = tomorrow.toISOString().slice(0, 16)
   }
 }
 async function publish() {
-  if (!form.course_id || !form.chapter_id || !form.title.trim() || !form.due_time) return ElMessage.warning('请完整填写教材、章节、任务名称和截止时间')
+  if (!form.teaching_class_id || !form.course_id || !form.chapter_id || !form.title.trim() || !form.due_time) return ElMessage.warning('请完整填写教学班、教材、章节、任务名称和截止时间')
   if (form.target_scope === 'selected_students' && !form.student_ids.length) return ElMessage.warning('请选择至少一名学生')
+  if (form.target_scope === 'selected_groups' && !form.group_ids.length) return ElMessage.warning('请选择至少一个学习小组')
   publishing.value = true
   try {
     await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: `${form.due_time}:00` })
     dialogVisible.value = false
-    form.title = ''; form.description = ''; form.student_ids = []
+    form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []
     await load()
     ElMessage.success('学习任务已发布')
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '任务发布失败')) }
@@ -119,12 +136,14 @@ onMounted(load)
 
     <el-dialog v-model="dialogVisible" title="发布学习任务" width="680px">
       <el-form label-position="top" class="assignment-form">
-        <div class="assignment-form-grid"><el-form-item label="教材"><el-select v-model="form.course_id" style="width:100%"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="专题章节"><el-select v-model="form.chapter_id" filterable style="width:100%"><el-option v-for="chapter in chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item></div>
+        <el-form-item label="所属教学班"><el-select v-model="form.teaching_class_id" style="width:100%" placeholder="任务必须发布到具体教学班"><el-option v-for="item in teachingClasses" :key="item.id" :label="`${item.name} · ${item.term_name}`" :value="item.id" /></el-select></el-form-item>
+        <div class="assignment-form-grid"><el-form-item label="教材"><el-select v-model="form.course_id" style="width:100%"><el-option v-for="course in courses.filter((item) => teachingClasses.find((klass) => klass.id === form.teaching_class_id)?.material_ids.includes(item.id))" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="专题章节"><el-select v-model="form.chapter_id" filterable style="width:100%"><el-option v-for="chapter in chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item></div>
         <div class="assignment-form-grid"><el-form-item label="学习阶段"><el-select v-model="form.learning_stage" style="width:100%"><el-option label="课前预习" value="preview" /><el-option label="课后巩固" value="review" /><el-option label="考前冲刺" value="exam" /></el-select></el-form-item><el-form-item label="完成条件"><el-select v-model="form.task_kind" style="width:100%"><el-option v-for="(label, value) in kindLabels" :key="value" :label="label" :value="value" :disabled="value === 'note' && form.learning_stage !== 'review'" /></el-select></el-form-item></div>
         <el-form-item label="任务名称"><el-input v-model="form.title" maxlength="160" show-word-limit placeholder="例如：完成第十七章课后巩固" /></el-form-item>
         <el-form-item label="任务要求"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="3000" show-word-limit placeholder="说明学习重点和具体要求" /></el-form-item>
-        <div class="assignment-form-grid"><el-form-item label="截止时间"><el-date-picker v-model="form.due_time" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width:100%" /></el-form-item><el-form-item label="发布对象"><el-radio-group v-model="form.target_scope"><el-radio-button value="all_students">全部学生</el-radio-button><el-radio-button value="selected_students">指定学生</el-radio-button></el-radio-group></el-form-item></div>
+        <div class="assignment-form-grid"><el-form-item label="截止时间"><el-date-picker v-model="form.due_time" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width:100%" /></el-form-item><el-form-item label="发布对象"><el-radio-group v-model="form.target_scope"><el-radio-button value="all_students">全班</el-radio-button><el-radio-button value="selected_groups">指定小组</el-radio-button><el-radio-button value="selected_students">指定学生</el-radio-button></el-radio-group></el-form-item></div>
         <el-form-item v-if="form.target_scope === 'selected_students'" label="选择学生"><el-select v-model="form.student_ids" multiple filterable collapse-tags style="width:100%"><el-option v-for="student in students" :key="student.id" :label="`${student.username}${student.identity_no ? ` · ${student.identity_no}` : ''}`" :value="student.id" /></el-select></el-form-item>
+        <el-form-item v-if="form.target_scope === 'selected_groups'" label="选择学习小组"><el-select v-model="form.group_ids" multiple collapse-tags style="width:100%"><el-option v-for="group in groups" :key="group.id" :label="`${group.name}（${group.user_ids.length}人）`" :value="group.id" /></el-select></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="publishing" @click="publish">发布任务</el-button></template>
     </el-dialog>

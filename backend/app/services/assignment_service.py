@@ -1,7 +1,7 @@
 from datetime import datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.chapter import Chapter
@@ -9,6 +9,7 @@ from app.models.course import Course
 from app.models.learning_task import UserTaskProgress
 from app.models.teacher_assignment import AssignmentRecipient, TeacherAssignment
 from app.models.user import User
+from app.models.teaching_class import ClassGroupMember, ClassMembership, TeachingClassMaterial, TeachingClassTeacher
 from app.schemas.assignment import AssignmentCreate
 from app.services.task_service import TaskService
 
@@ -27,8 +28,22 @@ class AssignmentService:
             return ["note_saved"]
         return []
 
-    def list_students(self) -> list[dict[str, object]]:
-        students = self.db.scalars(select(User).where(User.role == "student").order_by(User.username)).all()
+    def list_students(self, requester: User, teaching_class_id: int | None = None) -> list[dict[str, object]]:
+        statement = select(User).where(User.role == "student")
+        if teaching_class_id is not None:
+            from app.services.teaching_class_service import TeachingClassService
+            TeachingClassService(self.db).require_teacher(teaching_class_id, requester)
+            statement = statement.join(ClassMembership, ClassMembership.user_id == User.id).where(
+                ClassMembership.teaching_class_id == teaching_class_id, ClassMembership.status == "active"
+            )
+        elif requester.role != "admin":
+            class_ids = select(TeachingClassTeacher.teaching_class_id).where(
+                TeachingClassTeacher.user_id == requester.id
+            )
+            statement = statement.join(ClassMembership, ClassMembership.user_id == User.id).where(
+                ClassMembership.teaching_class_id.in_(class_ids), ClassMembership.status == "active"
+            ).distinct()
+        students = self.db.scalars(statement.order_by(User.username)).all()
         return [{"id": item.id, "username": item.username, "identity_no": item.identity_no} for item in students]
 
     def create(self, teacher_id: int, payload: AssignmentCreate) -> TeacherAssignment:
@@ -40,8 +55,19 @@ class AssignmentService:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="截止时间必须晚于当前时间")
         if payload.task_kind == "note" and payload.learning_stage != "review":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节笔记任务应关联课后巩固阶段")
+        if payload.teaching_class_id is not None:
+            teacher = self.db.get(User, teacher_id)
+            from app.services.teaching_class_service import TeachingClassService
+            TeachingClassService(self.db).require_teacher(payload.teaching_class_id, teacher)
+            material = self.db.scalar(select(TeachingClassMaterial.id).where(
+                TeachingClassMaterial.teaching_class_id == payload.teaching_class_id,
+                TeachingClassMaterial.course_id == payload.course_id,
+            ))
+            if material is None:
+                raise HTTPException(status_code=400, detail="该教材未绑定到当前教学班")
         assignment = TeacherAssignment(
             created_by=teacher_id,
+            teaching_class_id=payload.teaching_class_id,
             course_id=payload.course_id,
             chapter_id=payload.chapter_id,
             learning_stage=payload.learning_stage,
@@ -51,11 +77,32 @@ class AssignmentService:
             due_time=due_time,
             status="published",
             target_scope=payload.target_scope,
+            target_group_ids=payload.group_ids,
             required_task_types=self._required_task_types(payload.learning_stage, payload.task_kind),
         )
         self.db.add(assignment)
         self.db.flush()
-        if payload.target_scope == "all_students":
+        if payload.teaching_class_id is not None:
+            class_students = select(ClassMembership.user_id).where(
+                ClassMembership.teaching_class_id == payload.teaching_class_id,
+                ClassMembership.status == "active",
+            )
+            if payload.target_scope == "all_students":
+                student_ids = list(self.db.scalars(class_students).all())
+            elif payload.target_scope == "selected_groups":
+                student_ids = list(self.db.scalars(select(ClassGroupMember.user_id).where(
+                    ClassGroupMember.teaching_class_id == payload.teaching_class_id,
+                    ClassGroupMember.group_id.in_(set(payload.group_ids)),
+                )).all())
+            else:
+                student_ids = list(self.db.scalars(select(ClassMembership.user_id).where(
+                    ClassMembership.teaching_class_id == payload.teaching_class_id,
+                    ClassMembership.status == "active",
+                    ClassMembership.user_id.in_(set(payload.student_ids)),
+                )).all())
+                if len(student_ids) != len(set(payload.student_ids)):
+                    raise HTTPException(status_code=400, detail="指定学生必须属于当前教学班")
+        elif payload.target_scope == "all_students":
             student_ids = list(self.db.scalars(select(User.id).where(User.role == "student")).all())
         else:
             student_ids = list(self.db.scalars(select(User.id).where(
@@ -95,6 +142,13 @@ class AssignmentService:
         )).all())
         for assignment in assignments:
             if assignment.id not in existing:
+                if assignment.teaching_class_id is not None:
+                    active_member = self.db.scalar(select(ClassMembership.id).where(
+                        ClassMembership.teaching_class_id == assignment.teaching_class_id,
+                        ClassMembership.user_id == user_id, ClassMembership.status == "active",
+                    ))
+                    if active_member is None:
+                        continue
                 self.db.add(AssignmentRecipient(assignment_id=assignment.id, user_id=user_id))
         self.db.flush()
 
@@ -118,6 +172,7 @@ class AssignmentService:
                 continue
             output.append({
                 "id": assignment.id, "course_id": assignment.course_id, "chapter_id": assignment.chapter_id,
+                "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
                 "title": assignment.title, "description": assignment.description, "due_time": assignment.due_time,
@@ -136,7 +191,13 @@ class AssignmentService:
             .order_by(TeacherAssignment.created_time.desc(), TeacherAssignment.id.desc())
         )
         if not is_admin:
-            statement = statement.where(TeacherAssignment.created_by == teacher_id)
+            class_ids = select(TeachingClassTeacher.teaching_class_id).where(
+                TeachingClassTeacher.user_id == teacher_id
+            )
+            statement = statement.where(or_(
+                TeacherAssignment.created_by == teacher_id,
+                TeacherAssignment.teaching_class_id.in_(class_ids),
+            ))
         output = []
         now = datetime.now()
         for assignment, course_name, chapter_title in self.db.execute(statement).all():
@@ -147,6 +208,7 @@ class AssignmentService:
                 self._sync_recipient(assignment, recipient)
             output.append({
                 "id": assignment.id, "course_id": assignment.course_id, "chapter_id": assignment.chapter_id,
+                "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
                 "title": assignment.title, "description": assignment.description, "due_time": assignment.due_time,
@@ -164,7 +226,12 @@ class AssignmentService:
         if assignment is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
         if not is_admin and assignment.created_by != teacher_id:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只能撤回自己发布的任务")
+            relation = self.db.scalar(select(TeachingClassTeacher.id).where(
+                TeachingClassTeacher.teaching_class_id == assignment.teaching_class_id,
+                TeachingClassTeacher.user_id == teacher_id,
+            )) if assignment.teaching_class_id else None
+            if relation is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权撤回该教学班任务")
         assignment.status = "cancelled"
         self.db.commit()
         self.db.refresh(assignment)

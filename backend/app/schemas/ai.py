@@ -36,6 +36,15 @@ class AiSource(BaseModel):
     chapter_id: int
     excerpt: str
     position: str = "当前专题正文"
+    document_id: int | None = None
+    vector_id: str | None = None
+    section_path: str | None = None
+    pdf_page_start: int | None = None
+    pdf_page_end: int | None = None
+    paragraph_index: int | None = None
+    printed_page_start: str | None = None
+    printed_page_end: str | None = None
+    evidence_type: str = "教材直接依据"
 
 
 class AiAssistData(BaseModel):

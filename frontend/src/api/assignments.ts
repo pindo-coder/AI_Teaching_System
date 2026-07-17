@@ -11,6 +11,7 @@ export interface AssignmentStudent {
 
 export interface StudentAssignment {
   id: number
+  teaching_class_id: number | null
   course_id: number
   chapter_id: number
   course_name: string
@@ -29,6 +30,7 @@ export interface StudentAssignment {
 
 export interface TeacherAssignment {
   id: number
+  teaching_class_id: number | null
   course_id: number
   chapter_id: number
   course_name: string
@@ -39,7 +41,7 @@ export interface TeacherAssignment {
   description: string
   due_time: string
   status: 'published' | 'cancelled'
-  target_scope: 'all_students' | 'selected_students'
+  target_scope: 'all_students' | 'selected_students' | 'selected_groups'
   created_time: string
   total_count: number
   completed_count: number
@@ -50,8 +52,9 @@ export interface TeacherAssignment {
 export const assignmentApi = {
   student: (includeCompleted = true) => http.get<ApiResponse<StudentAssignment[]>>('/assignments/student', { params: { include_completed: includeCompleted } }),
   teacher: () => http.get<ApiResponse<TeacherAssignment[]>>('/assignments'),
-  students: () => http.get<ApiResponse<AssignmentStudent[]>>('/assignments/students'),
+  students: (teachingClassId?: number) => http.get<ApiResponse<AssignmentStudent[]>>('/assignments/students', { params: teachingClassId ? { teaching_class_id: teachingClassId } : undefined }),
   create: (payload: {
+    teaching_class_id: number | null
     course_id: number
     chapter_id: number
     learning_stage: LearningStage
@@ -59,8 +62,9 @@ export const assignmentApi = {
     title: string
     description: string
     due_time: string
-    target_scope: 'all_students' | 'selected_students'
+    target_scope: 'all_students' | 'selected_students' | 'selected_groups'
     student_ids: number[]
+    group_ids: number[]
   }) => http.post<ApiResponse<TeacherAssignment>>('/assignments', payload),
   cancel: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/assignments/${id}`),
 }

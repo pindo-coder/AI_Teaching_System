@@ -43,6 +43,7 @@ def test_teacher_registration_requires_unique_staff_number(client: TestClient) -
     assert teacher.status_code == 201
     assert teacher.json()["data"]["role"] == "teacher"
     assert teacher.json()["data"]["identity_no"] == "T20260001"
+    assert teacher.json()["data"]["approval_status"] == "pending"
 
     duplicate_identity = client.post(
         "/api/v1/auth/register",

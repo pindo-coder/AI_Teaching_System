@@ -14,5 +14,14 @@ from app.models.study_chat_message import StudyChatMessage
 from app.models.review_practice import ReviewPractice
 from app.models.news_study_note import NewsStudyNote
 from app.models.teacher_assignment import AssignmentRecipient, TeacherAssignment
+from app.models.teaching_class import (
+    AcademicTerm, ClassGroup, ClassGroupMember, ClassJoinRequest, ClassMembership,
+    ClassRosterEntry, ClassTransferLog, CourseSubject, StudentCourseSeat, TeachingClass,
+    TeachingClassMaterial, TeachingClassTeacher,
+)
+from app.models.citation import (
+    CitationFeedback, DocumentOutlineNode, DocumentPage, IndexVersion, KnowledgeChunk,
+    PageNumberRange, TextbookVersion,
+)
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback"]

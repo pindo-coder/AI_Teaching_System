@@ -63,7 +63,11 @@ def test_upload_search_reindex_and_delete_document(client: TestClient, db: Sessi
         },
     )
     assert ai_response.status_code == 200
-    assert ai_response.json()["data"]["sources"][0]["source_title"] == "测试教材第一章"
+    source = ai_response.json()["data"]["sources"][0]
+    assert source["source_title"] == "测试教材第一章"
+    assert source["document_id"] == document["id"]
+    assert source["pdf_page_start"] == 1
+    assert source["evidence_type"] == "教材直接依据"
 
     reindex = client.post(f"/api/v1/knowledge/documents/{document['id']}/reindex", headers=headers)
     assert reindex.status_code == 200

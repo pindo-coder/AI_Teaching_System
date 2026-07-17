@@ -32,10 +32,12 @@ class Settings(BaseSettings):
     embedding_provider: str = "mock"
     embedding_api_key: str | None = Field(default=None, validation_alias=AliasChoices("EMBEDDING_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"))
     embedding_base_url: str | None = Field(default=None, validation_alias=AliasChoices("EMBEDDING_BASE_URL", "DASHSCOPE_BASE_URL", "OPENAI_BASE_URL"))
-    embedding_model: str = Field(default="text-embedding-3-small", validation_alias=AliasChoices("EMBEDDING_MODEL", "DASHSCOPE_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"))
+    embedding_model: str = Field(default="text-embedding-v4", validation_alias=AliasChoices("EMBEDDING_MODEL", "DASHSCOPE_EMBEDDING_MODEL", "OPENAI_EMBEDDING_MODEL"))
+    embedding_dimensions: int = 1024
     chroma_persist_directory: str = "../knowledge_base/chroma"
     knowledge_upload_directory: str = "../knowledge_base/uploads"
     rag_collection_name: str = "ideology_course_kb"
+    rag_active_collection: str | None = None
     rag_top_k: int = 4
     rag_score_threshold: float = 0.15
     text_chunk_size: int = 800

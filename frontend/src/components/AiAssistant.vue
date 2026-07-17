@@ -7,6 +7,8 @@ import type { LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
 import { renderTeachingDocument } from '@/utils/richText'
 import { learningApi } from '@/api/learning'
+import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
+import type { AiSource } from '@/api/ai'
 
 const props = defineProps<{
   courseId: number
@@ -48,11 +50,19 @@ const question = ref('')
 const taskType = ref<AiTaskType>('question_answer')
 const loading = ref(false)
 const result = ref<AiAssistData | null>(null)
+const citationVisible = ref(false)
+const selectedSource = ref<AiSource | null>(null)
 const renderedAnswer = computed(() => renderTeachingDocument(result.value?.answer || ''))
 
 function choosePrompt(label: string, task: AiTaskType) {
   question.value = label
   taskType.value = task
+}
+
+function openCitation(source: AiSource) {
+  if (!source.document_id || !source.pdf_page_start) return
+  selectedSource.value = source
+  citationVisible.value = true
 }
 
 async function submit() {
@@ -100,7 +110,8 @@ async function submit() {
     <section v-if="result" class="ai-result">
       <div class="answer-meta"><el-tag :type="result.grounded ? 'success' : 'warning'" effect="light">{{ result.grounded ? '依据课程资料生成' : '课程资料不足' }}</el-tag><span>模型：{{ result.model }}</span></div>
       <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="loading" class="stream-cursor" aria-label="正在生成"></span>
-      <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>回答仅依据以下课程资料</span></div><div v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" class="source-item"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" type="info">{{ source.position }}</el-tag></div><p>{{ source.excerpt }}</p></div></div>
+      <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用可核对教材原页</span></div><button v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :disabled="!source.document_id || !source.pdf_page_start" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="source.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span></button></div>
     </section>
+    <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
   </el-card>
 </template>

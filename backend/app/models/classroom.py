@@ -10,6 +10,9 @@ class ClassroomActivity(Base):
     __tablename__ = "classroom_activities"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    teaching_class_id: Mapped[int | None] = mapped_column(
+        ForeignKey("teaching_classes.id", ondelete="SET NULL"), index=True
+    )
     course_id: Mapped[int] = mapped_column(ForeignKey("courses.id", ondelete="CASCADE"), index=True)
     chapter_id: Mapped[int] = mapped_column(ForeignKey("chapters.id", ondelete="CASCADE"), index=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)

@@ -6,6 +6,7 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     { path: '/register', name: 'register', component: () => import('@/views/RegisterView.vue'), meta: { public: true } },
+    { path: '/teacher-pending', name: 'teacher-pending', component: () => import('@/views/TeacherPendingView.vue') },
     {
       path: '/', component: () => import('@/layouts/MainLayout.vue'),
       children: [
@@ -17,7 +18,9 @@ const router = createRouter({
         { path: 'reviews', name: 'reviews', component: () => import('@/views/ReviewsView.vue') },
         { path: 'notes', name: 'notes', component: () => import('@/views/NotesView.vue') },
         { path: 'assignments', name: 'assignments', component: () => import('@/views/AssignmentsView.vue') },
+        { path: 'classes', name: 'teaching-classes', component: () => import('@/views/TeachingClassesView.vue') },
         { path: 'knowledge', name: 'knowledge', component: () => import('@/views/KnowledgeBaseView.vue'), meta: { roles: ['teacher', 'admin'] } },
+        { path: 'knowledge/documents/:documentId/calibrate', name: 'document-calibration', component: () => import('@/views/DocumentCalibrationView.vue'), meta: { roles: ['teacher', 'admin'] } },
         {
           path: 'courses/:courseId/chapters/:chapterId/:stage(preview|review|exam)',
           name: 'learning-stage',
@@ -32,6 +35,8 @@ const router = createRouter({
 router.beforeEach((to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } }
+  if (auth.user?.role === 'teacher' && auth.user.approval_status !== 'approved' && to.name !== 'teacher-pending') return { name: 'teacher-pending' }
+  if (to.name === 'teacher-pending' && auth.user?.approval_status === 'approved') return { name: 'dashboard' }
   if (to.meta.public && auth.isAuthenticated) return { name: 'dashboard' }
   if (to.meta.roles && auth.user && !(to.meta.roles as string[]).includes(auth.user.role)) return { name: 'dashboard' }
 })

@@ -2,6 +2,7 @@ import { http, type ApiResponse } from './http'
 
 export interface ClassroomActivity {
   id: number
+  teaching_class_id: number | null
   course_id: number
   chapter_id: number
   created_by: number
@@ -21,7 +22,7 @@ export interface ClassroomResponse {
 
 export const classroomApi = {
   list: () => http.get<ApiResponse<ClassroomActivity[]>>('/classroom/activities'),
-  publish: (payload: { course_id: number; chapter_id: number; question: string; minutes: number }) =>
+  publish: (payload: { teaching_class_id: number; course_id: number; chapter_id: number; question: string; minutes: number }) =>
     http.post<ApiResponse<ClassroomActivity>>('/classroom/activities', payload),
   respond: (activityId: number, answer: string) =>
     http.post<ApiResponse<ClassroomResponse>>(`/classroom/activities/${activityId}/responses`, { answer }),

@@ -5,6 +5,8 @@ export interface User {
   id: number
   username: string
   role: UserRole
+  approval_status: 'pending' | 'approved' | 'rejected' | 'disabled'
+  approval_note: string | null
   identity_no: string | null
   created_time: string
 }
