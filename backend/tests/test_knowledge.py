@@ -3,8 +3,11 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
 from app.models.chapter import Chapter
+from app.models.citation import DocumentOutlineNode, TextbookVersion
 from app.models.course import Course
+from app.models.knowledge_document import KnowledgeDocument
 from app.models.user import User
+from app.repositories.knowledge_repository import KnowledgeRepository
 
 
 def prepare_manager(db: Session, role: str = "teacher") -> tuple[dict[str, str], int, int]:
@@ -93,3 +96,42 @@ def test_rejects_unsupported_file_type(client: TestClient, db: Session) -> None:
         files={"file": ("payload.exe", b"not allowed", "application/octet-stream")},
     )
     assert response.status_code == 400
+
+
+def test_upload_new_version_can_auto_create_pending_outline(client: TestClient, db: Session) -> None:
+    headers, course_id, chapter_id = prepare_manager(db)
+    response = client.post(
+        "/api/v1/knowledge/documents",
+        headers=headers,
+        data={
+            "source_title": "OCR 修订版教材",
+            "course_id": str(course_id),
+            "version_label": "2023版 OCR修订版",
+            "source_role": "primary",
+            "access_policy": "full_preview",
+            "auto_calibrate": "true",
+        },
+        files={"file": ("ocr.md", "# 马克思主义中国化时代化\n教材完整正文。", "text/markdown")},
+    )
+    assert response.status_code == 201, response.text
+    document = response.json()["data"]
+    assert document["calibration_status"] == "pending"
+    outline = db.query(DocumentOutlineNode).filter_by(document_id=document["id"]).one()
+    assert outline.chapter_id == chapter_id
+
+
+def test_only_current_published_pdf_version_is_ready_for_ai(db: Session) -> None:
+    course = Course(name="教材版本切换测试")
+    db.add(course); db.flush()
+    old_version = TextbookVersion(course_id=course.id, version_label="旧版", status="published", is_current=False)
+    new_version = TextbookVersion(course_id=course.id, version_label="OCR版", status="published", is_current=True)
+    db.add_all([old_version, new_version]); db.flush()
+    db.add_all([
+        KnowledgeDocument(source_title="旧教材", source_type="pdf", original_filename="old.pdf",
+                          stored_path="/tmp/old.pdf", course_id=course.id, vector_collection="test",
+                          textbook_version_id=old_version.id, status="ready", calibration_status="published", chunk_count=1),
+        KnowledgeDocument(source_title="新教材", source_type="pdf", original_filename="new.pdf",
+                          stored_path="/tmp/new.pdf", course_id=course.id, vector_collection="test",
+                          textbook_version_id=new_version.id, status="ready", calibration_status="published", chunk_count=1),
+    ]); db.commit()
+    assert [item.source_title for item in KnowledgeRepository(db).list_ready_for_course(course.id)] == ["新教材"]

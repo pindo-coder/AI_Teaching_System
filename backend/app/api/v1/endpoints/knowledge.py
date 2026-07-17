@@ -2,7 +2,7 @@ from io import BytesIO
 from typing import Annotated
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -17,6 +17,7 @@ from app.schemas.knowledge import (
 )
 from app.services.knowledge_service import KnowledgeService
 from app.services.citation_service import CitationService
+from app.repositories.course_repository import ChapterRepository
 from app.models.citation import PageNumberRange, TextbookVersion
 from sqlalchemy import select
 
@@ -39,10 +40,22 @@ async def upload_document(
     version_label: Annotated[str, Form(max_length=100)] = "当前版",
     source_role: Annotated[str, Form(pattern="^(primary|supplementary)$")] = "primary",
     access_policy: Annotated[str, Form(pattern="^(citation_only|full_preview|download)$")] = "full_preview",
+    auto_calibrate: Annotated[bool, Form()] = False,
     _: User = Depends(knowledge_manager),
     db: Session = Depends(get_db),
 ) -> ApiResponse[KnowledgeDocumentRead]:
     content = await file.read()
+    chapters = ChapterRepository(db).list_by_course(course_id) if auto_calibrate else []
+    if auto_calibrate and not chapters:
+        raise HTTPException(status_code=400, detail="当前教材还没有专题，无法自动生成章节边界")
+    if auto_calibrate and db.scalar(select(TextbookVersion).where(
+        TextbookVersion.course_id == course_id,
+        TextbookVersion.version_label == version_label,
+    )):
+        raise HTTPException(
+            status_code=409,
+            detail="教材版本标识已存在，请为新文件填写不同的版本名称",
+        )
     document = KnowledgeService(db).ingest(
         filename=file.filename or "unknown",
         content=content,
@@ -53,8 +66,12 @@ async def upload_document(
         version_label=version_label,
         source_role=source_role,
         access_policy=access_policy,
+        defer_index=auto_calibrate,
     )
-    return ApiResponse(message="文档上传并建立索引成功", data=KnowledgeDocumentRead.model_validate(document))
+    if auto_calibrate:
+        document = CitationService(db).auto_calibrate(document.id, chapters, version_label=version_label)
+    message = "新版本已上传并生成待确认章节边界" if auto_calibrate else "文档上传并建立索引成功"
+    return ApiResponse(message=message, data=KnowledgeDocumentRead.model_validate(document))
 
 
 @router.get("/documents", response_model=ApiResponse[list[KnowledgeDocumentRead]])
