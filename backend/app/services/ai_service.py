@@ -6,6 +6,7 @@ from fastapi import HTTPException, status
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
+from sqlalchemy import case, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -19,6 +20,8 @@ from app.core.prompts import (
 )
 from app.repositories.course_repository import ChapterRepository, CourseRepository
 from app.repositories.knowledge_repository import KnowledgeRepository
+from app.models.citation import DocumentOutlineNode, DocumentPage
+from app.models.knowledge_document import KnowledgeDocument
 from app.rag.retriever import retrieve
 from app.schemas.ai import AiAssistData, AiAssistRequest, AiSource
 
@@ -121,10 +124,66 @@ class MockGenerator:
 
 class AiService:
     def __init__(self, db: Session, generator: AiGenerator | None = None) -> None:
+        self.db = db
         self.courses = CourseRepository(db)
         self.chapters = ChapterRepository(db)
         self.documents = KnowledgeRepository(db)
         self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator())
+
+    def _chapter_direct_source(self, *, course_id: int, chapter_id: int, excerpt: str) -> AiSource | None:
+        """为专题正文补回其教材 PDF 定位，使非 RAG 回答同样可核对原页。"""
+        row = self.db.execute(
+            select(KnowledgeDocument, DocumentOutlineNode)
+            .join(DocumentOutlineNode, DocumentOutlineNode.document_id == KnowledgeDocument.id)
+            .where(
+                KnowledgeDocument.course_id == course_id,
+                KnowledgeDocument.source_type == "pdf",
+                KnowledgeDocument.status == "ready",
+                DocumentOutlineNode.chapter_id == chapter_id,
+            )
+            .order_by(
+                case((KnowledgeDocument.source_role == "primary", 0), else_=1),
+                case((KnowledgeDocument.calibration_status == "published", 0), else_=1),
+                KnowledgeDocument.id,
+            )
+        ).first()
+        if row is None:
+            return None
+        document, outline = row
+        page_rows = self.db.scalars(
+            select(DocumentPage).where(
+                DocumentPage.document_id == document.id,
+                DocumentPage.pdf_page.in_([outline.pdf_page_start, outline.pdf_page_end]),
+            )
+        ).all()
+        labels = {item.pdf_page: item.printed_page_label for item in page_rows}
+        printed_start = labels.get(outline.pdf_page_start)
+        printed_end = labels.get(outline.pdf_page_end)
+        if printed_start:
+            position = f"教材第 {printed_start}"
+            if printed_end and printed_end != printed_start:
+                position += f"—{printed_end}"
+            position += " 页"
+        else:
+            position = f"PDF 第 {outline.pdf_page_start}"
+            if outline.pdf_page_end != outline.pdf_page_start:
+                position += f"—{outline.pdf_page_end}"
+            position += " 页（印刷页码待校准）"
+        return AiSource(
+            source_type="pdf",
+            source_title=document.source_title,
+            course_id=course_id,
+            chapter_id=chapter_id,
+            excerpt=excerpt[:180] + ("……" if len(excerpt) > 180 else ""),
+            position=position,
+            document_id=document.id,
+            section_path=outline.title,
+            pdf_page_start=outline.pdf_page_start,
+            pdf_page_end=outline.pdf_page_end,
+            printed_page_start=printed_start,
+            printed_page_end=printed_end,
+            evidence_type="教材直接依据",
+        )
 
     def _prepare(self, payload: AiAssistRequest) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
         course = self.courses.get(payload.course_id)
@@ -180,6 +239,9 @@ class AiService:
             "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],
             "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
+        direct_source = self._chapter_direct_source(
+            course_id=course.id, chapter_id=chapter.id, excerpt=content
+        ) if not retrieved_chunks else None
         sources = (
             [
                 AiSource(
@@ -202,7 +264,7 @@ class AiService:
                 for item in retrieved_chunks
             ]
             if retrieved_chunks
-            else [
+            else ([direct_source] if direct_source else [
                 AiSource(
                     source_type="chapter",
                     source_title=f"{course.name} · {chapter.title}",
@@ -211,7 +273,7 @@ class AiService:
                     excerpt=content[:180] + ("……" if len(content) > 180 else ""),
                     position="当前专题正文",
                 )
-            ]
+            ])
         )
         return variables, sources, len(retrieved_chunks)
 
