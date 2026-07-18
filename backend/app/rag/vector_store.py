@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import re
 
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
@@ -31,11 +32,12 @@ def get_vector_store(collection_name: str | None = None) -> Chroma:
 
 
 def get_study_note_vector_store() -> Chroma:
-    """个人笔记与教材库分集合存放，避免检索结果相互污染。"""
+    """个人笔记按模型和维度分集合，切换 Embedding 后不复用旧维度集合。"""
     persist_directory = resolve_backend_path(settings.chroma_persist_directory)
     persist_directory.mkdir(parents=True, exist_ok=True)
+    model_token = re.sub(r"[^A-Za-z0-9._-]+", "-", settings.embedding_model).strip("-_") or "embedding"
     return Chroma(
-        collection_name=f"{settings.rag_collection_name}_study_notes",
+        collection_name=f"{settings.rag_collection_name}_study_notes_{model_token}_{settings.embedding_dimensions}",
         embedding_function=get_embeddings(),
         persist_directory=str(persist_directory),
     )

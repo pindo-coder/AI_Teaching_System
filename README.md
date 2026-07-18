@@ -117,9 +117,10 @@ cd backend
 PYTHONPATH=. python -m scripts.rebuild_precise_index
 # 确认构建与数量检查正常后再原子切换
 PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
+PYTHONPATH=. python -m scripts.rebuild_study_note_index
 ```
 
-旧 Chroma collection 会保留；删除 `knowledge_base/chroma/active_index.json` 即可回退到环境变量或默认集合。
+教材与个人笔记都会按当前模型和维度进入独立 collection。旧 Chroma collection 会保留；删除 `knowledge_base/chroma/active_index.json` 即可回退教材索引到环境变量或默认集合。
 
 ## 切换 MySQL
 
