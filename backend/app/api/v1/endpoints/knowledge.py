@@ -9,11 +9,12 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user, require_roles
 from app.db.session import get_db
 from app.models.user import User
+from app.models.knowledge_document import KnowledgeDocument
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.schemas.common import ApiResponse
 from app.schemas.knowledge import (
     CitationFeedbackCreate, DocumentCalibrationUpdate, KnowledgeDocumentRead,
-    KnowledgeSearchItem, KnowledgeSearchRequest,
+    KnowledgeSearchItem, KnowledgeSearchRequest, TextbookVersionRead,
 )
 from app.services.knowledge_service import KnowledgeService
 from app.services.citation_service import CitationService
@@ -82,6 +83,56 @@ def list_documents(
 ) -> ApiResponse[list[KnowledgeDocumentRead]]:
     documents = KnowledgeRepository(db).list(course_id=course_id)
     return ApiResponse(data=[KnowledgeDocumentRead.model_validate(item) for item in documents])
+
+
+@router.get("/courses/{course_id}/versions", response_model=ApiResponse[list[TextbookVersionRead]])
+def list_textbook_versions(
+    course_id: int,
+    _: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[list[TextbookVersionRead]]:
+    versions = list(db.scalars(select(TextbookVersion).where(
+        TextbookVersion.course_id == course_id
+    ).order_by(TextbookVersion.created_time.desc(), TextbookVersion.id.desc())).all())
+    documents = list(db.scalars(select(KnowledgeDocument).where(
+        KnowledgeDocument.course_id == course_id
+    ).order_by(KnowledgeDocument.created_time.desc())).all())
+    by_version: dict[int, list[KnowledgeDocumentRead]] = {}
+    for document in documents:
+        if document.textbook_version_id:
+            by_version.setdefault(document.textbook_version_id, []).append(
+                KnowledgeDocumentRead.model_validate(document)
+            )
+    return ApiResponse(data=[TextbookVersionRead(
+        id=version.id,
+        course_id=version.course_id,
+        version_label=version.version_label,
+        status=version.status,
+        is_current=version.is_current,
+        created_time=version.created_time,
+        documents=by_version.get(version.id, []),
+    ) for version in versions])
+
+
+@router.post("/versions/{version_id}/activate", response_model=ApiResponse[TextbookVersionRead])
+def activate_textbook_version(
+    version_id: int,
+    _: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TextbookVersionRead]:
+    version = CitationService(db).activate_version(version_id)
+    documents = list(db.scalars(select(KnowledgeDocument).where(
+        KnowledgeDocument.textbook_version_id == version.id
+    ).order_by(KnowledgeDocument.created_time.desc())).all())
+    return ApiResponse(message="当前教材版本已切换", data=TextbookVersionRead(
+        id=version.id,
+        course_id=version.course_id,
+        version_label=version.version_label,
+        status=version.status,
+        is_current=version.is_current,
+        created_time=version.created_time,
+        documents=[KnowledgeDocumentRead.model_validate(item) for item in documents],
+    ))
 
 
 @router.get("/documents/{document_id}", response_model=ApiResponse[KnowledgeDocumentRead])

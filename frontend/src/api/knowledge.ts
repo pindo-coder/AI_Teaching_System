@@ -18,6 +18,16 @@ export interface KnowledgeDocument {
   updated_time: string
 }
 
+export interface TextbookVersion {
+  id: number
+  course_id: number
+  version_label: string
+  status: 'draft' | 'published'
+  is_current: boolean
+  created_time: string
+  documents: KnowledgeDocument[]
+}
+
 export interface DocumentPage {
   id: number
   pdf_page: number
@@ -93,4 +103,8 @@ export const knowledgeApi = {
     }),
   autoCalibrate: (id: number) =>
     http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}/auto-calibrate`),
+  versions: (courseId: number) =>
+    http.get<ApiResponse<TextbookVersion[]>>(`/knowledge/courses/${courseId}/versions`),
+  activateVersion: (versionId: number) =>
+    http.post<ApiResponse<TextbookVersion>>(`/knowledge/versions/${versionId}/activate`),
 }

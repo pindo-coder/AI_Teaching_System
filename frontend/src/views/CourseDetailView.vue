@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { courseApi } from '@/api/courses'
-import { knowledgeApi, type KnowledgeDocument } from '@/api/knowledge'
+import { knowledgeApi, type KnowledgeDocument, type TextbookVersion } from '@/api/knowledge'
 import { useAuthStore } from '@/stores/auth'
 import type { CourseDetail, LearningStage } from '@/types'
 import { textbookPreview } from '@/utils/textbookText'
@@ -19,6 +19,10 @@ const loading = ref(false)
 const dialogVisible = ref(false)
 const calibrationDialogVisible = ref(false)
 const replacementDialogVisible = ref(false)
+const versionDialogVisible = ref(false)
+const versionsLoading = ref(false)
+const activatingVersionId = ref<number | null>(null)
+const versions = ref<TextbookVersion[]>([])
 const replacementUploading = ref(false)
 const replacementFile = ref<File | null>(null)
 const replacementFileInput = ref<HTMLInputElement>()
@@ -58,6 +62,40 @@ function openCalibration() {
 }
 function openReplacementUpload() {
   replacementDialogVisible.value = true
+}
+async function openVersionManager() {
+  versionDialogVisible.value = true
+  versionsLoading.value = true
+  try {
+    versions.value = (await knowledgeApi.versions(courseId.value)).data.data
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '教材版本加载失败'))
+  } finally { versionsLoading.value = false }
+}
+function versionCanActivate(version: TextbookVersion) {
+  return version.status === 'published' && version.documents.some(
+    (item) => item.status === 'ready' && item.calibration_status === 'published',
+  )
+}
+function formatVersionTime(value: string) {
+  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+}
+async function activateVersion(version: TextbookVersion) {
+  if (version.is_current || !versionCanActivate(version)) return
+  const confirmed = await ElMessageBox.confirm(
+    `切换到“${version.version_label}”后，学生和 AI 将立即使用该版本的教材依据。历史版本仍会保留，是否继续？`,
+    '切换当前教材版本',
+    { type: 'warning', confirmButtonText: '确认切换', cancelButtonText: '取消' },
+  ).catch(() => false)
+  if (!confirmed) return
+  activatingVersionId.value = version.id
+  try {
+    await knowledgeApi.activateVersion(version.id)
+    ElMessage.success(`已切换到“${version.version_label}”`)
+    versions.value = (await knowledgeApi.versions(courseId.value)).data.data
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '教材版本切换失败'))
+  } finally { activatingVersionId.value = null }
 }
 function chooseReplacementFile(event: Event) {
   const target = event.target as HTMLInputElement
@@ -153,7 +191,7 @@ onMounted(loadCourse)
 <template>
   <div v-loading="loading">
     <div class="course-breadcrumb"><el-button link @click="$router.push('/courses')">课程中心</el-button><span>/</span><span>{{ course?.name || '教材详情' }}</span></div>
-    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-button class="hero-admin-button" type="success" @click="openReplacementUpload">上传新版教材</el-button><el-button class="hero-admin-button" type="primary" @click="openCalibration">教材引用校准</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button" type="warning" @click="dialogVisible = true">添加专题</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button hero-delete-button" type="danger" plain @click="deleteCourse">删除教材</el-button></div></header>
+    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-button v-if="auth.isAdmin" class="hero-admin-button" type="info" @click="openVersionManager">历史版本</el-button><el-button class="hero-admin-button" type="success" @click="openReplacementUpload">上传新版教材</el-button><el-button class="hero-admin-button" type="primary" @click="openCalibration">教材引用校准</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button" type="warning" @click="dialogVisible = true">添加专题</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button hero-delete-button" type="danger" plain @click="deleteCourse">删除教材</el-button></div></header>
     <nav class="course-tabs" aria-label="教材内容导航"><a href="#overview">内容概览</a><a href="#chapters">专题章节</a><a href="#learning-path">学习路径</a></nav>
     <section class="course-tools"><el-card shadow="hover" class="course-tool-card" @click="router.push('/current-affairs')"><span class="tool-kicker">关联教材</span><h3>时政要点</h3><p>从现实议题回到教材知识，查看当前时政学习内容。</p><el-link type="primary" :underline="false">进入时政要点 →</el-link></el-card><el-card shadow="hover" class="course-tool-card" @click="router.push('/interaction')"><span class="tool-kicker">课堂场景</span><h3>课堂互动</h3><p>围绕当前教材专题生成讨论题、随堂问答和观点辨析。</p><el-link type="primary" :underline="false">进入课堂互动 →</el-link></el-card><el-card v-if="canManageCitations" shadow="hover" class="course-tool-card" @click="openCalibration"><span class="tool-kicker">教师与管理员工具</span><h3>教材引用校准</h3><p>{{ calibrationSummary }}</p><el-link type="primary" :underline="false">校准章节与页码 →</el-link></el-card></section>
     <KnowledgeGraph v-if="course" id="overview" :course-name="course.name" :chapters="course.chapters" @learn="(chapterId) => startLearning(chapterId, 'preview')" />
@@ -178,6 +216,17 @@ onMounted(loadCourse)
     <el-dialog v-model="calibrationDialogVisible" title="选择需要校准的教材资料" width="680px">
       <div class="calibration-document-list"><div v-for="item in documents" :key="item.id" class="calibration-document-item" role="button" tabindex="0" @click="router.push(`/knowledge/documents/${item.id}/calibrate`)" @keydown.enter="router.push(`/knowledge/documents/${item.id}/calibrate`)"><div><strong>{{ item.source_title }}</strong><span>{{ item.original_filename }}</span></div><div class="calibration-document-actions"><el-tag :type="item.calibration_status === 'published' ? 'success' : item.calibration_status === 'calibrated' ? 'primary' : 'warning'">{{ calibrationLabel(item.calibration_status) }}</el-tag><el-button link type="danger" @click.stop="deleteKnowledgeDocument(item)">删除</el-button></div></div></div>
       <template #footer><el-button type="primary" plain @click="calibrationDialogVisible = false; openReplacementUpload()">上传 OCR 新版本</el-button><el-button @click="calibrationDialogVisible = false">关闭</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="versionDialogVisible" title="教材历史版本" width="760px">
+      <el-alert title="版本切换规则" type="info" :closable="false" show-icon>只有完成校准并发布的版本才能设为当前版本。切换后 AI 与学生立即使用所选版本，其他历史版本不会删除。</el-alert>
+      <div v-loading="versionsLoading" class="textbook-version-list">
+        <article v-for="version in versions" :key="version.id" :class="['textbook-version-card', { current: version.is_current }]">
+          <div class="textbook-version-heading"><div><div class="version-title-row"><h3>{{ version.version_label }}</h3><el-tag v-if="version.is_current" type="success">当前使用</el-tag><el-tag v-else :type="version.status === 'published' ? 'primary' : 'warning'">{{ version.status === 'published' ? '历史已发布' : '草稿' }}</el-tag></div><p>创建于 {{ formatVersionTime(version.created_time) }} · {{ version.documents.length }} 份资料</p></div><el-button v-if="version.is_current" disabled>当前版本</el-button><el-button v-else-if="versionCanActivate(version)" type="primary" :loading="activatingVersionId === version.id" @click="activateVersion(version)">设为当前版本</el-button><el-button v-else disabled>校准发布后可切换</el-button></div>
+          <div class="version-document-list"><div v-for="item in version.documents" :key="item.id"><div><strong>{{ item.source_title }}</strong><span>{{ item.original_filename }}</span></div><div><el-tag size="small" :type="item.calibration_status === 'published' ? 'success' : item.calibration_status === 'calibrated' ? 'primary' : 'warning'">{{ calibrationLabel(item.calibration_status) }}</el-tag><el-button link type="primary" @click="router.push(`/knowledge/documents/${item.id}/calibrate`)">查看校准</el-button></div></div><el-empty v-if="!version.documents.length" :image-size="48" description="该版本暂无资料" /></div>
+        </article>
+        <el-empty v-if="!versionsLoading && !versions.length" description="暂无教材历史版本" />
+      </div>
+      <template #footer><el-button type="primary" plain @click="versionDialogVisible = false; openReplacementUpload()">上传新版本</el-button><el-button @click="versionDialogVisible = false">关闭</el-button></template>
     </el-dialog>
     <el-dialog v-model="replacementDialogVisible" title="上传 OCR 新教材版本" width="620px" :close-on-click-modal="!replacementUploading">
       <el-alert title="安全替换知识库" type="info" :closable="false" show-icon>

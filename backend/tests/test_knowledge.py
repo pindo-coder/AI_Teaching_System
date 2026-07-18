@@ -141,3 +141,29 @@ def test_only_current_published_pdf_version_is_ready_for_ai(db: Session) -> None
                           textbook_version_id=new_version.id, status="ready", calibration_status="published", chunk_count=1),
     ]); db.commit()
     assert [item.source_title for item in KnowledgeRepository(db).list_ready_for_course(course.id)] == ["新教材"]
+
+
+def test_admin_can_list_and_restore_published_textbook_version(client: TestClient, db: Session) -> None:
+    headers, course_id, _ = prepare_manager(db, role="admin")
+    old_version = TextbookVersion(course_id=course_id, version_label="2023 历史版", status="published", is_current=False)
+    current_version = TextbookVersion(course_id=course_id, version_label="2026 当前版", status="published", is_current=True)
+    db.add_all([old_version, current_version]); db.flush()
+    db.add_all([
+        KnowledgeDocument(source_title="历史教材", source_type="pdf", original_filename="old.pdf",
+                          stored_path="/tmp/old.pdf", course_id=course_id, vector_collection="test",
+                          textbook_version_id=old_version.id, status="ready", calibration_status="published", chunk_count=1),
+        KnowledgeDocument(source_title="当前教材", source_type="pdf", original_filename="current.pdf",
+                          stored_path="/tmp/current.pdf", course_id=course_id, vector_collection="test",
+                          textbook_version_id=current_version.id, status="ready", calibration_status="published", chunk_count=1),
+    ]); db.commit()
+
+    listed = client.get(f"/api/v1/knowledge/courses/{course_id}/versions", headers=headers)
+    assert listed.status_code == 200, listed.text
+    assert {item["version_label"] for item in listed.json()["data"]} == {"2023 历史版", "2026 当前版"}
+
+    activated = client.post(f"/api/v1/knowledge/versions/{old_version.id}/activate", headers=headers)
+    assert activated.status_code == 200, activated.text
+    db.refresh(old_version); db.refresh(current_version)
+    assert old_version.is_current is True
+    assert current_version.is_current is False
+    assert [item.source_title for item in KnowledgeRepository(db).list_ready_for_course(course_id)] == ["历史教材"]

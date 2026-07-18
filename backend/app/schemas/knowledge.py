@@ -23,6 +23,16 @@ class KnowledgeDocumentRead(BaseModel):
     updated_time: datetime
 
 
+class TextbookVersionRead(BaseModel):
+    id: int
+    course_id: int
+    version_label: str
+    status: str
+    is_current: bool
+    created_time: datetime
+    documents: list[KnowledgeDocumentRead] = Field(default_factory=list)
+
+
 class KnowledgeSearchRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     course_id: int

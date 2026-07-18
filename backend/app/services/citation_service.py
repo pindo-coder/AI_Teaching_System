@@ -304,6 +304,29 @@ class CitationService:
         self.db.commit(); self.db.refresh(document)
         return document
 
+    def activate_version(self, version_id: int) -> TextbookVersion:
+        version = self.db.get(TextbookVersion, version_id)
+        if version is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="教材版本不存在")
+        documents = list(self.db.scalars(select(KnowledgeDocument).where(
+            KnowledgeDocument.textbook_version_id == version.id
+        )).all())
+        if version.status != "published" or not any(
+            item.status == "ready" and item.calibration_status == "published" for item in documents
+        ):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail="该版本尚未完成校准发布，不能设为当前版本")
+        for previous in self.db.scalars(select(TextbookVersion).where(
+            TextbookVersion.course_id == version.course_id,
+            TextbookVersion.id != version.id,
+            TextbookVersion.is_current.is_(True),
+        )).all():
+            previous.is_current = False
+        version.is_current = True
+        self.db.commit(); self.db.refresh(version)
+        return version
+
     def feedback(self, user_id: int, payload: CitationFeedbackCreate) -> CitationFeedback:
         record = CitationFeedback(user_id=user_id, **payload.model_dump())
         self.db.add(record); self.db.commit(); self.db.refresh(record)
