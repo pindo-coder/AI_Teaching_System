@@ -281,10 +281,6 @@ class CitationService:
                 pdf_page_end=end_page, start_anchor=None, end_anchor=None,
                 retrieval_enabled=True, calibration_status="auto",
             ))
-        if document.textbook_version_id:
-            version = self.db.get(TextbookVersion, document.textbook_version_id)
-            if version:
-                version.version_label = version_label
         document.calibration_status = "pending"
         document.status = "processing"
         document.chunk_count = 0
