@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown, CirclePlus, Clock, Delete, DocumentChecked, Setting, UploadFilled } from '@element-plus/icons-vue'
 import { courseApi } from '@/api/courses'
 import { knowledgeApi, type KnowledgeDocument, type TextbookVersion } from '@/api/knowledge'
 import { useAuthStore } from '@/stores/auth'
@@ -185,13 +186,20 @@ async function deleteCourse() {
   ElMessage.success('教材已删除')
   await router.push('/courses')
 }
+async function handleManagementCommand(command: 'history' | 'upload' | 'calibration' | 'chapter' | 'delete') {
+  if (command === 'history') await openVersionManager()
+  else if (command === 'upload') openReplacementUpload()
+  else if (command === 'calibration') openCalibration()
+  else if (command === 'chapter') dialogVisible.value = true
+  else if (command === 'delete') await deleteCourse()
+}
 onMounted(loadCourse)
 </script>
 
 <template>
   <div v-loading="loading">
     <div class="course-breadcrumb"><el-button link @click="$router.push('/courses')">课程中心</el-button><span>/</span><span>{{ course?.name || '教材详情' }}</span></div>
-    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-button v-if="auth.isAdmin" class="hero-admin-button" type="info" @click="openVersionManager">历史版本</el-button><el-button class="hero-admin-button" type="success" @click="openReplacementUpload">上传新版教材</el-button><el-button class="hero-admin-button" type="primary" @click="openCalibration">教材引用校准</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button" type="warning" @click="dialogVisible = true">添加专题</el-button><el-button v-if="auth.isAdmin" class="hero-admin-button hero-delete-button" type="danger" plain @click="deleteCourse">删除教材</el-button></div></header>
+    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-dropdown trigger="click" popper-class="course-management-dropdown" @command="handleManagementCommand"><el-button class="hero-management-button" type="primary" :icon="Setting">教材管理<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="auth.isAdmin" command="history" :icon="Clock">历史版本</el-dropdown-item><el-dropdown-item command="upload" :icon="UploadFilled">上传新版教材</el-dropdown-item><el-dropdown-item command="calibration" :icon="DocumentChecked">教材引用校准</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="chapter" :icon="CirclePlus" divided>添加专题</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="delete" :icon="Delete" class="management-danger-item" divided>删除教材</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
     <nav class="course-tabs" aria-label="教材内容导航"><a href="#overview">内容概览</a><a href="#chapters">专题章节</a><a href="#learning-path">学习路径</a></nav>
     <section class="course-tools"><el-card shadow="hover" class="course-tool-card" @click="router.push('/current-affairs')"><span class="tool-kicker">关联教材</span><h3>时政要点</h3><p>从现实议题回到教材知识，查看当前时政学习内容。</p><el-link type="primary" :underline="false">进入时政要点 →</el-link></el-card><el-card shadow="hover" class="course-tool-card" @click="router.push('/interaction')"><span class="tool-kicker">课堂场景</span><h3>课堂互动</h3><p>围绕当前教材专题生成讨论题、随堂问答和观点辨析。</p><el-link type="primary" :underline="false">进入课堂互动 →</el-link></el-card><el-card v-if="canManageCitations" shadow="hover" class="course-tool-card" @click="openCalibration"><span class="tool-kicker">教师与管理员工具</span><h3>教材引用校准</h3><p>{{ calibrationSummary }}</p><el-link type="primary" :underline="false">校准章节与页码 →</el-link></el-card></section>
     <KnowledgeGraph v-if="course" id="overview" :course-name="course.name" :chapters="course.chapters" @learn="(chapterId) => startLearning(chapterId, 'preview')" />
