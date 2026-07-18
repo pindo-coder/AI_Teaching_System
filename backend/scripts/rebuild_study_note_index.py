@@ -5,6 +5,7 @@
 
 from sqlalchemy import select
 
+import app.db.models  # noqa: F401  注册全部 ORM 关系后再执行独立脚本
 from app.db.session import SessionLocal
 from app.models.study_note import StudyNote
 from app.rag.vector_store import get_study_note_vector_store, upsert_study_note_vector
