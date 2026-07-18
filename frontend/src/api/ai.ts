@@ -31,6 +31,10 @@ export interface AiSource {
   printed_page_start: string | null
   printed_page_end: string | null
   evidence_type: string
+  material_type: 'central' | 'textbook' | 'local' | string
+  publisher: string | null
+  published_date: string | null
+  source_url: string | null
 }
 
 export interface AiAssistData {

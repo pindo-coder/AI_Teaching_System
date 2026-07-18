@@ -192,7 +192,7 @@ watch(selectedPage, (page, previous) => { if (!loading.value && page !== previou
 <template>
   <div v-loading="loading" class="calibration-page">
     <header class="calibration-header">
-      <el-button text :icon="ArrowLeft" @click="router.back()">返回知识库</el-button>
+      <el-button text :icon="ArrowLeft" @click="router.back()">返回资料中心</el-button>
       <div><p class="eyebrow">Textbook Calibration</p><h1>{{ document?.source_title || '教材校准工作台' }}</h1><p>确认章节边界、印刷页码和正文锚点，AI 引用将精确到原始页与知识点。</p></div>
       <div class="calibration-header__actions"><el-tag :type="document?.calibration_status === 'published' ? 'success' : 'warning'">{{ document?.calibration_status }}</el-tag><el-button :loading="autoSplitting" @click="autoSplit">重新自动拆分</el-button><el-button type="primary" :loading="saving" :icon="Select" @click="save">保存并重建索引</el-button><el-button v-if="auth.user?.role === 'admin'" :disabled="!canPublish" :loading="publishing" @click="publish">发布版本</el-button><el-button type="danger" plain :loading="deleting" :icon="Delete" @click="deleteDocument">删除资料</el-button></div>
     </header>

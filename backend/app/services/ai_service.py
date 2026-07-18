@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from sqlalchemy import case, select
+from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -20,9 +20,10 @@ from app.core.prompts import (
 )
 from app.repositories.course_repository import ChapterRepository, CourseRepository
 from app.repositories.knowledge_repository import KnowledgeRepository
-from app.models.citation import DocumentOutlineNode, DocumentPage
+from app.models.citation import DocumentOutlineNode, DocumentPage, TextbookVersion
 from app.models.knowledge_document import KnowledgeDocument
-from app.rag.retriever import retrieve
+from app.models.user import User
+from app.rag.retriever import retrieve_layered
 from app.schemas.ai import AiAssistData, AiAssistRequest, AiSource
 
 
@@ -123,11 +124,13 @@ class MockGenerator:
 
 
 class AiService:
-    def __init__(self, db: Session, generator: AiGenerator | None = None) -> None:
+    def __init__(self, db: Session, generator: AiGenerator | None = None,
+                 user: User | None = None) -> None:
         self.db = db
         self.courses = CourseRepository(db)
         self.chapters = ChapterRepository(db)
         self.documents = KnowledgeRepository(db)
+        self.user = user
         self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator())
 
     def _chapter_direct_source(self, *, course_id: int, chapter_id: int, excerpt: str) -> AiSource | None:
@@ -135,10 +138,14 @@ class AiService:
         row = self.db.execute(
             select(KnowledgeDocument, DocumentOutlineNode)
             .join(DocumentOutlineNode, DocumentOutlineNode.document_id == KnowledgeDocument.id)
+            .outerjoin(TextbookVersion, TextbookVersion.id == KnowledgeDocument.textbook_version_id)
             .where(
                 KnowledgeDocument.course_id == course_id,
+                KnowledgeDocument.material_type == "textbook",
                 KnowledgeDocument.source_type == "pdf",
                 KnowledgeDocument.status == "ready",
+                KnowledgeDocument.calibration_status == "published",
+                or_(KnowledgeDocument.textbook_version_id.is_(None), TextbookVersion.is_current.is_(True)),
                 DocumentOutlineNode.chapter_id == chapter_id,
             )
             .order_by(
@@ -183,7 +190,41 @@ class AiService:
             printed_page_start=printed_start,
             printed_page_end=printed_end,
             evidence_type="教材直接依据",
+            material_type="textbook",
         )
+
+    def _validated_sources(self, sources: list[AiSource]) -> list[AiSource]:
+        """引用卡片只使用数据库中仍然存在的资料与页码，拒绝过期向量元数据。"""
+        output: list[AiSource] = []
+        seen: set[tuple[int | None, str | None, int | None]] = set()
+        evidence_labels = {"central": "中央材料依据", "textbook": "教材直接依据", "local": "地方材料依据"}
+        for source in sources:
+            if source.document_id is not None:
+                document = self.db.get(KnowledgeDocument, source.document_id)
+                if document is None or document.status != "ready":
+                    continue
+                source.source_title = document.source_title
+                source.material_type = document.material_type
+                source.publisher = document.publisher
+                source.published_date = document.published_date.isoformat() if document.published_date else None
+                source.source_url = document.source_url
+                source.evidence_type = evidence_labels.get(document.material_type, "资料依据")
+                if source.pdf_page_start is not None:
+                    page_exists = self.db.scalar(select(DocumentPage.id).where(
+                        DocumentPage.document_id == document.id,
+                        DocumentPage.pdf_page == source.pdf_page_start,
+                    ))
+                    if page_exists is None:
+                        source.pdf_page_start = None
+                        source.pdf_page_end = None
+                        source.printed_page_start = None
+                        source.printed_page_end = None
+            key = (source.document_id, source.vector_id, source.pdf_page_start)
+            if key in seen:
+                continue
+            seen.add(key)
+            output.append(source)
+        return output
 
     def _prepare(self, payload: AiAssistRequest) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
         course = self.courses.get(payload.course_id)
@@ -194,34 +235,36 @@ class AiService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="章节不存在")
         if chapter.course_id != course.id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节与课程不匹配")
-        ready_documents = self.documents.list_ready_for_course(course.id)
+        layer_document_ids = self.documents.eligible_layer_ids(
+            course_id=course.id, chapter_id=chapter.id, user=self.user
+        )
         # 导入教材自动生成的专题正文是当前章节的首要依据，不能在章节检索
         # 不到时回退到整本教材的 Top-K，否则容易把导论内容带入其他章节。
         chapter_content = (chapter.content or "").strip()
         retrieved_chunks = []
-        if ready_documents:
-            retrieved_chunks = retrieve(
-                f"{chapter.title} {payload.question}",
-                course_id=course.id,
-                chapter_id=chapter.id,
-                fallback_to_course=False,
-                document_ids=[document.id for document in ready_documents],
+        if any(layer_document_ids.values()):
+            retrieved_chunks = retrieve_layered(
+                f"{chapter.title} {payload.question}", layer_document_ids=layer_document_ids,
+                chapter_id=chapter.id, top_k=6,
             )
-        if not chapter_content and ready_documents and not retrieved_chunks:
+        if not chapter_content and any(layer_document_ids.values()) and not retrieved_chunks:
             return AiAssistData(
                 answer="当前专题没有可用的教材原文或知识库片段，暂时无法生成有依据的内容。",
                 grounded=False,
                 model="none",
             )
 
-        content = (
-            "\n\n".join(
-                f"[资料 {index + 1}｜{'主教材' if str(item.metadata.get('source_role', 'primary')) == 'primary' else '补充资料'}｜{item.metadata.get('section_path') or item.metadata.get('source_title', '未命名资料')}｜{item.metadata.get('position_label', '位置待校准')}]\n{item.content}"
-                for index, item in enumerate(retrieved_chunks)
+        material_labels = {"central": "中央材料", "textbook": "教材正文", "local": "地方材料"}
+        content_parts = [
+            f"[资料 {index + 1}｜{material_labels.get(str(item.metadata.get('material_type')), '资料')}｜{item.metadata.get('section_path') or item.metadata.get('source_title', '未命名资料')}｜{item.metadata.get('position_label', '位置待校准')}]\n{item.content}"
+            for index, item in enumerate(retrieved_chunks)
+        ]
+        has_textbook_chunk = any(str(item.metadata.get("material_type")) == "textbook" for item in retrieved_chunks)
+        if chapter_content and not has_textbook_chunk:
+            content_parts.append(
+                f"[资料 {len(content_parts) + 1}｜教材正文｜当前专题正文｜专题内容]\n{chapter_content}"
             )
-            if retrieved_chunks
-            else chapter_content
-        )
+        content = "\n\n".join(content_parts) if content_parts else chapter_content
         if not content:
             return AiAssistData(
                 answer="当前章节尚未录入课程资料，无法生成有依据的回答。请联系教师完善章节内容。",
@@ -240,10 +283,9 @@ class AiService:
             "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
         direct_source = self._chapter_direct_source(
-            course_id=course.id, chapter_id=chapter.id, excerpt=content
-        ) if not retrieved_chunks else None
-        sources = (
-            [
+            course_id=course.id, chapter_id=chapter.id, excerpt=chapter_content
+        ) if not has_textbook_chunk else None
+        sources = [
                 AiSource(
                     source_type=str(item.metadata.get("source_type", "document")),
                     source_title=str(item.metadata.get("source_title", "未命名资料")),
@@ -260,11 +302,20 @@ class AiService:
                     printed_page_start=str(item.metadata.get("printed_page_start")) if item.metadata.get("printed_page_start") else None,
                     printed_page_end=str(item.metadata.get("printed_page_end")) if item.metadata.get("printed_page_end") else None,
                     evidence_type="教材直接依据" if str(item.metadata.get("source_role", "primary")) == "primary" else "补充资料依据",
+                    material_type=str(item.metadata.get("material_type", "textbook")),
+                    publisher=str(item.metadata.get("publisher")) if item.metadata.get("publisher") else None,
+                    published_date=str(item.metadata.get("published_date")) if item.metadata.get("published_date") else None,
+                    source_url=str(item.metadata.get("source_url")) if item.metadata.get("source_url") else None,
                 )
                 for item in retrieved_chunks
             ]
-            if retrieved_chunks
-            else ([direct_source] if direct_source else [
+        evidence_labels = {"central": "中央材料依据", "textbook": "教材直接依据", "local": "地方材料依据"}
+        for source in sources:
+            source.evidence_type = evidence_labels.get(source.material_type, "资料依据")
+        if direct_source:
+            sources.append(direct_source)
+        if not sources:
+            sources = [
                 AiSource(
                     source_type="chapter",
                     source_title=f"{course.name} · {chapter.title}",
@@ -272,10 +323,10 @@ class AiService:
                     chapter_id=chapter.id,
                     excerpt=content[:180] + ("……" if len(content) > 180 else ""),
                     position="当前专题正文",
+                    material_type="textbook",
                 )
-            ])
-        )
-        return variables, sources, len(retrieved_chunks)
+            ]
+        return variables, self._validated_sources(sources), len(retrieved_chunks)
 
     def assist(self, payload: AiAssistRequest) -> AiAssistData:
         prepared = self._prepare(payload)

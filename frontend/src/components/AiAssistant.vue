@@ -60,9 +60,18 @@ function choosePrompt(label: string, task: AiTaskType) {
 }
 
 function openCitation(source: AiSource) {
-  if (!source.document_id || !source.pdf_page_start) return
-  selectedSource.value = source
-  citationVisible.value = true
+  if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) {
+    selectedSource.value = source
+    citationVisible.value = true
+  } else if (source.source_url) {
+    window.open(source.source_url, '_blank', 'noopener,noreferrer')
+  }
+}
+
+function sourceTagType(source: AiSource) {
+  if (source.material_type === 'central') return 'danger'
+  if (source.material_type === 'textbook') return 'primary'
+  return 'success'
 }
 
 async function submit() {
@@ -110,7 +119,7 @@ async function submit() {
     <section v-if="result" class="ai-result">
       <div class="answer-meta"><el-tag :type="result.grounded ? 'success' : 'warning'" effect="light">{{ result.grounded ? '依据课程资料生成' : '课程资料不足' }}</el-tag><span>模型：{{ result.model }}</span></div>
       <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="loading" class="stream-cursor" aria-label="正在生成"></span>
-      <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用可核对教材原页</span></div><button v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :disabled="!source.document_id || !source.pdf_page_start" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="source.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span></button></div>
+      <div v-if="result.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>所有依据均可核对真实来源</span></div><button v-for="(source, index) in result.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (source.source_type !== 'pdf' || !source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.source_type === 'pdf' && source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div>
     </section>
     <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
   </el-card>

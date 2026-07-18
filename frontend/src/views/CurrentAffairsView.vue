@@ -47,7 +47,8 @@ let lastNewsLoadedAt = 0
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
 const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value))
-function openCitation(source: AiSource) { if (source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true } }
+function openCitation(source: AiSource) { if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true } else if (source.source_url) window.open(source.source_url, '_blank', 'noopener,noreferrer') }
+function sourceTagType(source: AiSource) { return source.material_type === 'central' ? 'danger' : source.material_type === 'textbook' ? 'primary' : 'success' }
 
 async function loadNews(resetPage = false) {
   if (resetPage) currentPage.value = 1
@@ -293,7 +294,7 @@ function openSavedNote() {
       <section v-if="aiResult" class="ai-dialog-result ai-result">
         <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? '依据教材资料生成' : '教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
         <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="aiLoading" class="stream-cursor" aria-label="正在生成"></span>
-        <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对教材原页</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :disabled="!source.document_id || !source.pdf_page_start" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="source.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span></button></div>
+        <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对真实来源</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (source.source_type !== 'pdf' || !source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.source_type === 'pdf' && source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div>
       </section>
       <el-empty v-else-if="!aiLoading" description="暂无生成结果" />
       <template #footer><el-button @click="dialogVisible = false">关闭</el-button></template>

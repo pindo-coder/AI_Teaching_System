@@ -18,19 +18,19 @@ router = APIRouter(prefix="/ai", tags=["ai"])
 @router.post("/assist", response_model=ApiResponse[AiAssistData])
 def assist(
     payload: AiAssistRequest,
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ApiResponse[AiAssistData]:
-    return ApiResponse(message="AI 辅助内容生成成功", data=AiService(db).assist(payload))
+    return ApiResponse(message="AI 辅助内容生成成功", data=AiService(db, user=user).assist(payload))
 
 
 @router.post("/assist/stream")
 def assist_stream(
     payload: AiAssistRequest,
-    _: User = Depends(get_current_user),
+    user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    chunks, sources, grounded, model = AiService(db).stream(payload)
+    chunks, sources, grounded, model = AiService(db, user=user).stream(payload)
 
     def event_stream():
         try:

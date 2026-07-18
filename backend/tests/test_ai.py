@@ -51,7 +51,7 @@ def test_chapter_content_source_includes_clickable_pdf_location(client: TestClie
         source_title="测试教材", source_type="pdf", original_filename="测试教材.pdf",
         stored_path="/tmp/test-textbook.pdf", course_id=course_id, chapter_id=None,
         vector_collection="test", source_role="primary", access_policy="full_preview",
-        calibration_status="pending", status="ready", chunk_count=0,
+            calibration_status="published", status="ready", chunk_count=0,
     )
     db.add(document); db.flush()
     db.add_all([

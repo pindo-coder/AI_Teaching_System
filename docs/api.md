@@ -54,9 +54,9 @@
 `review_outline` 和 `mock_questions`。响应包含 `grounded`、`model` 与 `sources`；
 当前章节无资料时不会调用模型，并明确返回资料不足。
 
-## 知识库
+## 资料中心与知识库
 
-知识库接口仅 `teacher` 和 `admin` 可用。
+资料管理接口仅 `teacher` 和 `admin` 可用。中央材料的导入、范围确认、发布、归档和索引维护仅限 `admin`；教师只能维护本人上传且绑定本人教学班的地方材料。教材接口继续使用原有版本与校准流程。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -66,9 +66,19 @@
 | DELETE | `/knowledge/documents/{id}` | 删除原文件、数据库记录和向量 |
 | POST | `/knowledge/documents/{id}/reindex` | 根据原文件重新建立索引 |
 | POST | `/knowledge/search` | 调试课程/章节向量检索 |
+| GET | `/knowledge/materials` | 按权限列出中央、教材、地方或待分类资料 |
+| POST | `/knowledge/materials` | 上传中央或地方资料文件 |
+| POST | `/knowledge/materials/url` | 管理员归档公开 HTTPS 中央原文 |
+| GET | `/knowledge/materials/{id}/suggestions` | 获取教材与专题关联建议 |
+| PUT | `/knowledge/materials/{id}/scopes` | 人工确认教材、专题、教学班和知识点范围 |
+| POST | `/knowledge/materials/{id}/publish` | 发布已核验的中央或地方资料 |
+| POST | `/knowledge/materials/{id}/archive` | 归档资料并停止参与新回答 |
+| PUT | `/knowledge/materials/{id}/classification` | 管理员确认升级前资料的层级 |
 
-上传使用 `multipart/form-data`，字段包括 `file`、`source_title`、`course_id`、
-可选的 `chapter_id` 和 `knowledge_point`。
+教材上传使用 `multipart/form-data`，字段包括 `file`、`source_title`、`course_id`、
+可选的 `chapter_id` 和 `knowledge_point`。中央/地方材料还需要 `publisher`、
+`published_date`、JSON 数组格式的 `course_ids`、`chapter_ids`、
+`teaching_class_ids` 与 `knowledge_tags`。中央材料上传后处于待确认状态，只有确认范围并发布后才进入 AI 检索。
 
 统一成功响应结构：
 

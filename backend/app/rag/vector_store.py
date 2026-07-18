@@ -69,8 +69,17 @@ def add_precise_chunks(*, document_id: int, chunks: list[dict[str, object]],
         printed_start = str(chunk.get("printed_page_start") or "")
         printed_end = str(chunk.get("printed_page_end") or printed_start)
         paragraph_index = int(chunk.get("paragraph_index") or 1)
-        printed = f"教材第 {printed_start}" + (f"—{printed_end}" if printed_end and printed_end != printed_start else "") + " 页｜" if printed_start else ""
-        pdf = f"PDF 第 {pdf_start}" + (f"—{pdf_end}" if pdf_end != pdf_start else "") + " 页"
+        material_type = str(metadata.get("material_type") or "textbook")
+        source_type = str(metadata.get("source_type") or "document")
+        if source_type == "pdf":
+            printed_prefix = "教材第" if material_type == "textbook" else "印刷第"
+            printed = f"{printed_prefix} {printed_start}" + (f"—{printed_end}" if printed_end and printed_end != printed_start else "") + " 页｜" if printed_start else ""
+            physical = f"PDF 第 {pdf_start}" + (f"—{pdf_end}" if pdf_end != pdf_start else "") + " 页"
+            position_label = f"{printed}{physical}｜第 {paragraph_index} 段"
+        elif metadata.get("source_url"):
+            position_label = f"权威原文网页｜第 {paragraph_index} 段"
+        else:
+            position_label = f"资料正文｜第 {paragraph_index} 段"
         documents.append(Document(
             page_content=str(chunk["content"]),
             metadata={**metadata, **dict(chunk.get("metadata") or {}),
@@ -81,7 +90,7 @@ def add_precise_chunks(*, document_id: int, chunks: list[dict[str, object]],
                       "section_path": str(chunk.get("section_path") or ""),
                       "start_anchor": str(chunk.get("start_anchor") or ""),
                       "end_anchor": str(chunk.get("end_anchor") or ""),
-                      "position_label": f"{printed}{pdf}｜第 {paragraph_index} 段"},
+                      "position_label": position_label},
         ))
     get_vector_store(collection_name).add_documents(documents, ids=ids)
     return ids

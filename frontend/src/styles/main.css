@@ -263,6 +263,7 @@ a { color: var(--primary); text-decoration: none; }
 .source-item { margin-top: 14px; padding-top: 12px; border-top: 1px solid #e6eaf0; font-size: 13px; }
 .source-title { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .source-title span { color: var(--primary); font-weight: 650; }
+.source-publisher { display: block; margin-top: 6px; color: #7b8799; font-size: 12px; }
 .source-item p { margin: 7px 0 0; color: #627087; line-height: 1.7; }
 .learning-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-top: 22px; padding: 18px 22px; color: var(--muted); background: #fff; border: 1px solid var(--border); border-radius: 12px; }
 .affairs-layout, .interaction-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(380px, .9fr); align-items: start; gap: 22px; }
@@ -645,6 +646,9 @@ a { color: var(--primary); text-decoration: none; }
 .class-material-tag { max-width: 100%; margin: 0 8px 8px 0; overflow: hidden; text-overflow: ellipsis; }
 .source-item--button:not(:disabled):hover { border-color: #438cf4; transform: translateY(-1px); box-shadow: 0 10px 28px rgba(34, 88, 181, .1); }
 .source-item--button:disabled { cursor: default; }
+.source-item--button.source-central { border-left: 3px solid #b63d4d; }
+.source-item--button.source-textbook { border-left: 3px solid #356ed2; }
+.source-item--button.source-local { border-left: 3px solid #26906f; }
 .source-position { display: block; margin-top: 8px; color: #315aab; font-size: 13px; }
 .source-open { display: inline-block; margin-top: 8px; color: #2d73dd; font-size: 13px; font-weight: 700; }
 .citation-dialog .el-dialog__body { padding-top: 8px; }

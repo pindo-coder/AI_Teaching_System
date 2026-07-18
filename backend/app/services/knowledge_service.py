@@ -1,6 +1,8 @@
 from pathlib import Path
 from uuid import uuid4
 import logging
+import hashlib
+from datetime import date, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select
@@ -33,13 +35,22 @@ class KnowledgeService:
         filename: str,
         content: bytes,
         source_title: str,
-        course_id: int,
+        course_id: int | None,
         chapter_id: int | None,
         knowledge_point: str | None,
         version_label: str = "当前版",
         source_role: str = "primary",
         access_policy: str = "full_preview",
         defer_index: bool = False,
+        material_type: str = "textbook",
+        publisher: str | None = None,
+        published_date: date | None = None,
+        source_url: str | None = None,
+        applicable_scope: str | None = None,
+        owner_user_id: int | None = None,
+        review_status: str | None = None,
+        supersedes_document_id: int | None = None,
+        snapshot_time: datetime | None = None,
     ) -> KnowledgeDocument:
         suffix = Path(filename).suffix.lower()
         if suffix not in SUPPORTED_EXTENSIONS:
@@ -53,8 +64,12 @@ class KnowledgeService:
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                 detail=f"文件不能超过 {settings.max_upload_size_mb} MB",
             )
-        course = self.courses.get(course_id)
-        if course is None:
+        if material_type not in {"central", "textbook", "local", "unclassified"}:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="资料类型无效")
+        if material_type == "textbook" and course_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="教材资料必须绑定所属教材")
+        course = self.courses.get(course_id) if course_id is not None else None
+        if course_id is not None and course is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="课程不存在")
         if chapter_id is not None:
             chapter = self.chapters.get(chapter_id)
@@ -74,15 +89,24 @@ class KnowledgeService:
         upload_dir.mkdir(parents=True, exist_ok=True)
         stored_path = upload_dir / f"{uuid4().hex}{suffix}"
         stored_path.write_bytes(content)
-        textbook_version = self.db.scalar(select(TextbookVersion).where(
-            TextbookVersion.course_id == course_id, TextbookVersion.version_label == version_label
-        ))
-        if textbook_version is None:
-            textbook_version = TextbookVersion(course_id=course_id, version_label=version_label,
-                                               status="draft", is_current=False)
-            self.db.add(textbook_version); self.db.commit(); self.db.refresh(textbook_version)
+        textbook_version = None
+        if material_type == "textbook" and course_id is not None:
+            textbook_version = self.db.scalar(select(TextbookVersion).where(
+                TextbookVersion.course_id == course_id, TextbookVersion.version_label == version_label
+            ))
+            if textbook_version is None:
+                has_current_version = self.db.scalar(select(func.count()).select_from(TextbookVersion).where(
+                    TextbookVersion.course_id == course_id,
+                    TextbookVersion.is_current.is_(True),
+                )) > 0
+                publish_text_version = suffix != ".pdf" and not has_current_version
+                textbook_version = TextbookVersion(course_id=course_id, version_label=version_label,
+                                                   status="published" if publish_text_version else "draft",
+                                                   is_current=publish_text_version)
+                self.db.add(textbook_version); self.db.commit(); self.db.refresh(textbook_version)
+        digest = hashlib.sha256(content).hexdigest()
         document = self.documents.create(
-            textbook_version_id=textbook_version.id,
+            textbook_version_id=textbook_version.id if textbook_version else None,
             source_title=source_title.strip(),
             source_type=suffix.lstrip("."),
             original_filename=Path(filename).name,
@@ -92,8 +116,20 @@ class KnowledgeService:
             knowledge_point=knowledge_point.strip() if knowledge_point else None,
             vector_collection=settings.rag_collection_name,
             source_role=source_role,
+            material_type=material_type,
+            publisher=publisher.strip() if publisher else None,
+            published_date=published_date,
+            source_url=source_url,
+            applicable_scope=applicable_scope.strip() if applicable_scope else None,
+            owner_user_id=owner_user_id,
+            review_status=review_status or ("published" if material_type == "textbook" else "pending"),
+            is_active=True,
+            content_hash=digest,
+            snapshot_time=snapshot_time,
+            version_label=version_label.strip() if version_label else None,
+            supersedes_document_id=supersedes_document_id,
             access_policy=access_policy,
-            calibration_status="pending" if suffix == ".pdf" else "calibrated",
+            calibration_status="pending" if suffix == ".pdf" and material_type == "textbook" else "calibrated",
             status="processing",
             chunk_count=0,
         )
@@ -113,6 +149,10 @@ class KnowledgeService:
                     "chapter_id": chapter_id if chapter_id is not None else -1,
                     "knowledge_point": document.knowledge_point or "",
                     "source_role": document.source_role,
+                    "material_type": document.material_type,
+                    "publisher": document.publisher or "",
+                    "published_date": document.published_date.isoformat() if document.published_date else "",
+                    "source_url": document.source_url or "",
                     "authority_level": "",
                     "effective_date": "",
                     "expired_date": "",
@@ -162,6 +202,11 @@ class KnowledgeService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="当前正在使用的已发布教材不能直接删除，请先发布替代版本",
             )
+        if document.material_type in {"central", "local"} and document.review_status == "published" and document.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="已发布资料不能直接删除，请先归档后再处理",
+            )
         delete_document_vectors(document.id)
         path = Path(document.stored_path)
         if path.exists():
@@ -198,6 +243,10 @@ class KnowledgeService:
                     "chapter_id": document.chapter_id if document.chapter_id is not None else -1,
                     "knowledge_point": document.knowledge_point or "",
                     "source_role": document.source_role,
+                    "material_type": document.material_type,
+                    "publisher": document.publisher or "",
+                    "published_date": document.published_date.isoformat() if document.published_date else "",
+                    "source_url": document.source_url or "",
                     "authority_level": "",
                     "effective_date": "",
                     "expired_date": "",

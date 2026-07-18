@@ -23,5 +23,8 @@ from app.models.citation import (
     CitationFeedback, DocumentOutlineNode, DocumentPage, IndexVersion, KnowledgeChunk,
     PageNumberRange, TextbookVersion,
 )
+from app.models.material_scope import (
+    DocumentChapterScope, DocumentClassScope, DocumentCourseScope, DocumentKnowledgeTag,
+)
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback", "DocumentCourseScope", "DocumentChapterScope", "DocumentClassScope", "DocumentKnowledgeTag"]

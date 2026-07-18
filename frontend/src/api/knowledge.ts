@@ -5,13 +5,31 @@ export interface KnowledgeDocument {
   source_title: string
   source_type: string
   original_filename: string
-  course_id: number
+  course_id: number | null
   chapter_id: number | null
   textbook_version_id: number | null
   knowledge_point: string | null
   status: 'processing' | 'ready' | 'failed'
   chunk_count: number
   source_role: 'primary' | 'supplementary'
+  material_type: 'central' | 'textbook' | 'local' | 'unclassified'
+  publisher: string | null
+  published_date: string | null
+  source_url: string | null
+  applicable_scope: string | null
+  owner_user_id: number | null
+  review_status: 'pending' | 'published' | 'rejected' | 'archived'
+  is_active: boolean
+  verified_by: number | null
+  verified_time: string | null
+  content_hash: string | null
+  snapshot_time: string | null
+  version_label: string | null
+  supersedes_document_id: number | null
+  course_ids: number[]
+  chapter_ids: number[]
+  teaching_class_ids: number[]
+  knowledge_tags: string[]
   access_policy: 'citation_only' | 'full_preview' | 'download'
   calibration_status: 'pending' | 'calibrated' | 'published'
   created_time: string
@@ -26,6 +44,14 @@ export interface TextbookVersion {
   is_current: boolean
   created_time: string
   documents: KnowledgeDocument[]
+}
+
+export interface MaterialSuggestion {
+  course_id: number
+  course_name: string
+  chapter_id: number | null
+  chapter_title: string | null
+  score: number
 }
 
 export interface DocumentPage {
@@ -107,4 +133,22 @@ export const knowledgeApi = {
     http.get<ApiResponse<TextbookVersion[]>>(`/knowledge/courses/${courseId}/versions`),
   activateVersion: (versionId: number) =>
     http.post<ApiResponse<TextbookVersion>>(`/knowledge/versions/${versionId}/activate`),
+  materials: (materialType?: KnowledgeDocument['material_type'], reviewStatus?: string) =>
+    http.get<ApiResponse<KnowledgeDocument[]>>('/knowledge/materials', {
+      params: { ...(materialType ? { material_type: materialType } : {}), ...(reviewStatus ? { review_status: reviewStatus } : {}) },
+    }),
+  uploadMaterial: (formData: FormData) =>
+    http.post<ApiResponse<KnowledgeDocument>>('/knowledge/materials', formData, { timeout: 120_000 }),
+  importMaterialUrl: (payload: Record<string, unknown>) =>
+    http.post<ApiResponse<KnowledgeDocument>>('/knowledge/materials/url', payload, { timeout: 120_000 }),
+  materialSuggestions: (id: number) =>
+    http.get<ApiResponse<MaterialSuggestion[]>>(`/knowledge/materials/${id}/suggestions`),
+  updateMaterialScopes: (id: number, payload: { course_ids: number[]; chapter_ids: number[]; teaching_class_ids: number[]; knowledge_tags: string[] }) =>
+    http.put<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/scopes`, payload),
+  publishMaterial: (id: number) =>
+    http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/publish`),
+  archiveMaterial: (id: number) =>
+    http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/archive`),
+  classifyMaterial: (id: number, payload: { material_type: 'central' | 'textbook' | 'local'; publisher?: string; published_date?: string; applicable_scope?: string }) =>
+    http.put<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/classification`, payload, { timeout: 120_000 }),
 }

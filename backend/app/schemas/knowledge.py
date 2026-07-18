@@ -1,4 +1,5 @@
-from datetime import datetime
+from datetime import date, datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -10,12 +11,30 @@ class KnowledgeDocumentRead(BaseModel):
     source_title: str
     source_type: str
     original_filename: str
-    course_id: int
+    course_id: int | None
     chapter_id: int | None
     textbook_version_id: int | None
     knowledge_point: str | None
     status: str
     source_role: str
+    material_type: str = "textbook"
+    publisher: str | None = None
+    published_date: date | None = None
+    source_url: str | None = None
+    applicable_scope: str | None = None
+    owner_user_id: int | None = None
+    review_status: str = "pending"
+    is_active: bool = True
+    verified_by: int | None = None
+    verified_time: datetime | None = None
+    content_hash: str | None = None
+    snapshot_time: datetime | None = None
+    version_label: str | None = None
+    supersedes_document_id: int | None = None
+    course_ids: list[int] = Field(default_factory=list)
+    chapter_ids: list[int] = Field(default_factory=list)
+    teaching_class_ids: list[int] = Field(default_factory=list)
+    knowledge_tags: list[str] = Field(default_factory=list)
     access_policy: str
     calibration_status: str
     chunk_count: int
@@ -44,6 +63,42 @@ class KnowledgeSearchItem(BaseModel):
     content: str
     score: float
     metadata: dict[str, object]
+
+
+class MaterialUrlCreate(BaseModel):
+    source_url: str = Field(min_length=8, max_length=1000)
+    source_title: str = Field(min_length=1, max_length=255)
+    publisher: str = Field(min_length=1, max_length=255)
+    published_date: date
+    applicable_scope: str | None = Field(default=None, max_length=500)
+    version_label: str | None = Field(default=None, max_length=100)
+    supersedes_document_id: int | None = None
+    access_policy: Literal["citation_only", "full_preview", "download"] = "full_preview"
+    course_ids: list[int] = Field(default_factory=list)
+    chapter_ids: list[int] = Field(default_factory=list)
+    knowledge_tags: list[str] = Field(default_factory=list, max_length=30)
+
+
+class MaterialScopeUpdate(BaseModel):
+    course_ids: list[int] = Field(default_factory=list)
+    chapter_ids: list[int] = Field(default_factory=list)
+    teaching_class_ids: list[int] = Field(default_factory=list)
+    knowledge_tags: list[str] = Field(default_factory=list, max_length=30)
+
+
+class MaterialClassificationUpdate(BaseModel):
+    material_type: Literal["central", "textbook", "local"]
+    publisher: str | None = Field(default=None, max_length=255)
+    published_date: date | None = None
+    applicable_scope: str | None = Field(default=None, max_length=500)
+
+
+class MaterialSuggestion(BaseModel):
+    course_id: int
+    course_name: str
+    chapter_id: int | None = None
+    chapter_title: str | None = None
+    score: float = 0
 
 
 class PageNumberRangeInput(BaseModel):

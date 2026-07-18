@@ -45,6 +45,10 @@ class AiSource(BaseModel):
     printed_page_start: str | None = None
     printed_page_end: str | None = None
     evidence_type: str = "教材直接依据"
+    material_type: str = "textbook"
+    publisher: str | None = None
+    published_date: str | None = None
+    source_url: str | None = None
 
 
 class AiAssistData(BaseModel):

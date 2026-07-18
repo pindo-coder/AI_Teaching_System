@@ -189,6 +189,9 @@ class CitationService:
             metadata={"source_title": document.source_title, "source_type": document.source_type,
                       "course_id": document.course_id, "chapter_id": document.chapter_id or -1,
                       "knowledge_point": document.knowledge_point or "", "source_role": document.source_role,
+                      "material_type": document.material_type, "publisher": document.publisher or "",
+                      "published_date": document.published_date.isoformat() if document.published_date else "",
+                      "source_url": document.source_url or "",
                       "authority_level": "", "effective_date": "", "expired_date": ""},
         )
         version = f"{settings.embedding_model}:{settings.embedding_dimensions}"

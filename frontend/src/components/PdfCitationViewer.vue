@@ -13,6 +13,7 @@ const loading = ref(false)
 const pageData = ref<DocumentPage | null>(null)
 const pdfUrl = ref('')
 const feedbackSent = ref(false)
+const sourceTagType = computed(() => props.source?.material_type === 'central' ? 'danger' : props.source?.material_type === 'local' ? 'success' : 'primary')
 
 const pageLabel = computed(() => {
   if (!props.source) return ''
@@ -87,13 +88,13 @@ onBeforeUnmount(revokePdf)
       <div class="citation-dialog__header">
         <span class="citation-dialog__icon"><el-icon><Document /></el-icon></span>
         <div><strong>{{ source?.source_title }}</strong><p>{{ source?.section_path || source?.position }} · {{ pageLabel }}</p></div>
-        <el-tag :type="source?.evidence_type === '教材直接依据' ? 'success' : 'info'">{{ source?.evidence_type }}</el-tag>
+        <el-tag :type="sourceTagType">{{ source?.evidence_type }}</el-tag>
       </div>
     </template>
     <div v-loading="loading" class="citation-viewer">
       <section class="citation-viewer__pdf">
-        <iframe v-if="pdfUrl" :src="`${pdfUrl}#toolbar=1&navpanes=0&view=FitH`" title="教材引用原页"></iframe>
-        <el-empty v-else description="正在读取教材原页" />
+        <iframe v-if="pdfUrl" :src="`${pdfUrl}#toolbar=1&navpanes=0&view=FitH`" title="资料引用原页"></iframe>
+        <el-empty v-else description="正在读取资料原页" />
       </section>
       <aside class="citation-viewer__text">
         <div class="citation-excerpt"><span>AI 使用的原文片段</span><p>{{ source?.excerpt }}</p></div>

@@ -139,8 +139,16 @@ def test_only_current_published_pdf_version_is_ready_for_ai(db: Session) -> None
         KnowledgeDocument(source_title="新教材", source_type="pdf", original_filename="new.pdf",
                           stored_path="/tmp/new.pdf", course_id=course.id, vector_collection="test",
                           textbook_version_id=new_version.id, status="ready", calibration_status="published", chunk_count=1),
+        KnowledgeDocument(source_title="旧版文本教材", source_type="md", original_filename="old.md",
+                          stored_path="/tmp/old.md", course_id=course.id, vector_collection="test",
+                          textbook_version_id=old_version.id, status="ready", calibration_status="calibrated", chunk_count=1),
+        KnowledgeDocument(source_title="当前文本教材", source_type="md", original_filename="new.md",
+                          stored_path="/tmp/new.md", course_id=course.id, vector_collection="test",
+                          textbook_version_id=new_version.id, status="ready", calibration_status="calibrated", chunk_count=1),
     ]); db.commit()
-    assert [item.source_title for item in KnowledgeRepository(db).list_ready_for_course(course.id)] == ["新教材"]
+    assert {item.source_title for item in KnowledgeRepository(db).list_ready_for_course(course.id)} == {
+        "新教材", "当前文本教材",
+    }
 
 
 def test_admin_can_list_and_restore_published_textbook_version(client: TestClient, db: Session) -> None:

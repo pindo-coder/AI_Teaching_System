@@ -45,4 +45,8 @@ def test_all_mvp_tables_are_registered() -> None:
             "knowledge_chunks",
             "index_versions",
             "citation_feedback",
+            "document_course_scopes",
+            "document_chapter_scopes",
+            "document_class_scopes",
+            "document_knowledge_tags",
         }
