@@ -91,4 +91,6 @@ export const knowledgeApi = {
     http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}/reindex`, undefined, {
       timeout: 120_000,
     }),
+  autoCalibrate: (id: number) =>
+    http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}/auto-calibrate`),
 }

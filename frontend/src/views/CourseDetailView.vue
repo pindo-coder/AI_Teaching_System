@@ -110,6 +110,22 @@ async function uploadReplacement() {
 function calibrationLabel(status: KnowledgeDocument['calibration_status']) {
   return status === 'published' ? '已发布' : status === 'calibrated' ? '已校准待发布' : '待校准'
 }
+async function deleteKnowledgeDocument(item: KnowledgeDocument) {
+  const confirmed = await ElMessageBox.confirm(
+    `确定删除“${item.source_title}”吗？文件、校准结构和向量索引将一并删除，但不会影响课程专题、笔记和学习记录。`,
+    '删除教材资料',
+    { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+  ).catch(() => false)
+  if (!confirmed) return
+  try {
+    await knowledgeApi.remove(item.id)
+    documents.value = documents.value.filter((document) => document.id !== item.id)
+    ElMessage.success('教材资料已删除')
+    if (!documents.value.length) calibrationDialogVisible.value = false
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '教材资料删除失败'))
+  }
+}
 async function createChapter() {
   if (!form.title.trim()) return ElMessage.warning('请输入章节标题')
   await courseApi.createChapter(courseId.value, form)
@@ -160,7 +176,7 @@ onMounted(loadCourse)
     </div>
     <el-dialog v-model="dialogVisible" title="添加专题" width="560px"><el-form label-position="top"><el-form-item label="专题标题" required><el-input v-model="form.title" /></el-form-item><el-form-item label="专题内容"><el-input v-model="form.content" type="textarea" :rows="5" /></el-form-item><el-form-item label="排序"><el-input-number v-model="form.sort_order" :min="0" /></el-form-item></el-form><template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" @click="createChapter">保存</el-button></template></el-dialog>
     <el-dialog v-model="calibrationDialogVisible" title="选择需要校准的教材资料" width="680px">
-      <div class="calibration-document-list"><button v-for="item in documents" :key="item.id" type="button" class="calibration-document-item" @click="router.push(`/knowledge/documents/${item.id}/calibrate`)"><div><strong>{{ item.source_title }}</strong><span>{{ item.original_filename }}</span></div><el-tag :type="item.calibration_status === 'published' ? 'success' : item.calibration_status === 'calibrated' ? 'primary' : 'warning'">{{ calibrationLabel(item.calibration_status) }}</el-tag></button></div>
+      <div class="calibration-document-list"><div v-for="item in documents" :key="item.id" class="calibration-document-item" role="button" tabindex="0" @click="router.push(`/knowledge/documents/${item.id}/calibrate`)" @keydown.enter="router.push(`/knowledge/documents/${item.id}/calibrate`)"><div><strong>{{ item.source_title }}</strong><span>{{ item.original_filename }}</span></div><div class="calibration-document-actions"><el-tag :type="item.calibration_status === 'published' ? 'success' : item.calibration_status === 'calibrated' ? 'primary' : 'warning'">{{ calibrationLabel(item.calibration_status) }}</el-tag><el-button link type="danger" @click.stop="deleteKnowledgeDocument(item)">删除</el-button></div></div></div>
       <template #footer><el-button type="primary" plain @click="calibrationDialogVisible = false; openReplacementUpload()">上传 OCR 新版本</el-button><el-button @click="calibrationDialogVisible = false">关闭</el-button></template>
     </el-dialog>
     <el-dialog v-model="replacementDialogVisible" title="上传 OCR 新教材版本" width="620px" :close-on-click-modal="!replacementUploading">

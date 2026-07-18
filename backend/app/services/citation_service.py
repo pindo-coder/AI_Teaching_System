@@ -1,3 +1,5 @@
+import re
+
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -213,47 +215,79 @@ class CitationService:
         return document
 
     def auto_calibrate(self, document_id: int, chapters: list[Chapter], version_label: str = "当前版") -> KnowledgeDocument:
-        """按章节标题生成待人工确认的初始结构，同时让章节检索立即具备正确隔离。"""
+        """生成待人工确认的章节草稿；确认前不改专题正文，也不建立向量索引。"""
+        document = self.require_document(document_id)
+        if document.calibration_status == "published":
+            from fastapi import HTTPException
+            raise HTTPException(status_code=409, detail="已发布教材不能重新自动拆分，请先上传新版本")
         pages = self.pages(document_id)
         if not pages or not chapters:
             from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="没有可用于自动校准的页面或章节")
-        starts: list[tuple[int, int, Chapter]] = []
-        last_page = 1
-        for chapter in chapters:
-            found_page = last_page; found_index = 0
-            compact_title = "".join(chapter.title.split())
-            for page in pages[last_page - 1:]:
-                compact_text = "".join(page.text.split())
-                index = compact_text.find(compact_title)
-                if index >= 0:
-                    found_page = page.pdf_page
-                    # 锚点使用原始标题；若 PDF 插入空格则用该页开头作为保守定位。
-                    found_index = page.text.find(chapter.title)
-                    break
-            starts.append((found_page, found_index, chapter)); last_page = found_page
-        outline: list[OutlineNodeInput] = []
+        ordered_chapters = sorted(chapters, key=lambda item: (item.sort_order, item.id))
+        compact_pages = {page.pdf_page: "".join(page.text.split()) for page in pages}
+        toc_pages = [number for number, text in compact_pages.items() if number <= 20 and "目录" in text]
+        content_floor = (max(toc_pages) + 1) if toc_pages else 1
+
+        def marker(chapter: Chapter) -> str:
+            title = "".join(chapter.title.split())
+            if "导论" in title:
+                return "导论"
+            matched = re.search(r"第[一二三四五六七八九十百]+章", title)
+            return matched.group(0) if matched else title
+
+        numbered = [item for item in ordered_chapters if marker(item).startswith("第")]
+        learning_pages = [
+            page.pdf_page for page in pages
+            if page.pdf_page >= content_floor and "学习要点" in compact_pages[page.pdf_page]
+        ]
+        start_by_chapter: dict[int, int] = {}
+        # 思政教材各章首页均有“学习要点”，它比容易出现空格、错字的 OCR 章名更稳定。
+        if numbered and len(learning_pages) >= len(numbered):
+            for chapter, page_number in zip(numbered, learning_pages):
+                start_by_chapter[chapter.id] = page_number
+
+        previous = content_floor
+        for chapter in ordered_chapters:
+            if chapter.id in start_by_chapter:
+                previous = start_by_chapter[chapter.id]
+                continue
+            token = marker(chapter)
+            candidates = []
+            for page in pages:
+                if page.pdf_page < previous or page.pdf_page < content_floor:
+                    continue
+                index = compact_pages[page.pdf_page].find(token)
+                if index < 0:
+                    continue
+                chapter_marker_count = len(set(re.findall(
+                    r"第[一二三四五六七八九十百]+章", compact_pages[page.pdf_page]
+                )))
+                # 优先页首标题，并避开一页列出多个章名的目录、总结或附录页。
+                candidates.append((chapter_marker_count > 2, index > 100, page.pdf_page))
+            if candidates:
+                previous = min(candidates)[2]
+            start_by_chapter[chapter.id] = previous
+
+        starts = [(start_by_chapter[item.id], item) for item in ordered_chapters]
         max_page = pages[-1].pdf_page
-        page_map = {page.pdf_page: page for page in pages}
-        for index, (start_page, start_index, chapter) in enumerate(starts):
+        self.db.execute(delete(DocumentOutlineNode).where(DocumentOutlineNode.document_id == document_id))
+        for index, (start_page, chapter) in enumerate(starts):
             next_start = starts[index + 1] if index + 1 < len(starts) else None
-            end_page = next_start[0] if next_start else max_page
-            end_anchor = None
-            if next_start and next_start[1] <= 0 and end_page > start_page:
-                end_page -= 1
-            elif next_start and next_start[1] > 0:
-                prefix = page_map[end_page].text[:next_start[1]].strip()
-                end_anchor = prefix[-160:] or None
-            outline.append(OutlineNodeInput(
-                client_id=f"chapter-{chapter.id}", chapter_id=chapter.id, node_type="chapter",
+            end_page = max(start_page, (next_start[0] - 1) if next_start else max_page)
+            self.db.add(DocumentOutlineNode(
+                document_id=document_id, chapter_id=chapter.id, node_type="chapter",
                 title=chapter.title, sort_order=chapter.sort_order, pdf_page_start=start_page,
-                pdf_page_end=max(start_page, end_page), start_anchor=chapter.title if start_index >= 0 else None,
-                end_anchor=end_anchor, retrieval_enabled=True,
+                pdf_page_end=end_page, start_anchor=None, end_anchor=None,
+                retrieval_enabled=True, calibration_status="auto",
             ))
-        document = self.calibrate(document_id, DocumentCalibrationUpdate(
-            version_label=version_label, access_policy="full_preview", page_number_ranges=[], outline=outline
-        ))
+        if document.textbook_version_id:
+            version = self.db.get(TextbookVersion, document.textbook_version_id)
+            if version:
+                version.version_label = version_label
         document.calibration_status = "pending"
+        document.status = "processing"
+        document.chunk_count = 0
         self.db.commit(); self.db.refresh(document)
         return document
 

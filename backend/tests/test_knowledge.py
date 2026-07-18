@@ -116,8 +116,14 @@ def test_upload_new_version_can_auto_create_pending_outline(client: TestClient, 
     assert response.status_code == 201, response.text
     document = response.json()["data"]
     assert document["calibration_status"] == "pending"
+    assert document["status"] == "processing"
     outline = db.query(DocumentOutlineNode).filter_by(document_id=document["id"]).one()
     assert outline.chapter_id == chapter_id
+    assert db.get(Chapter, chapter_id).content == "章节基础内容"
+
+    rerun = client.post(f"/api/v1/knowledge/documents/{document['id']}/auto-calibrate", headers=headers)
+    assert rerun.status_code == 200, rerun.text
+    assert db.query(DocumentOutlineNode).filter_by(document_id=document["id"]).count() == 1
 
 
 def test_only_current_published_pdf_version_is_ready_for_ai(db: Session) -> None:

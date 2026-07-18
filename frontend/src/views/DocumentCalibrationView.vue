@@ -21,6 +21,8 @@ const documentId = Number(route.params.documentId)
 const loading = ref(true)
 const saving = ref(false)
 const publishing = ref(false)
+const autoSplitting = ref(false)
+const deleting = ref(false)
 const document = ref<KnowledgeDocument | null>(null)
 const chapters = ref<Chapter[]>([])
 const pages = ref<DocumentPage[]>([])
@@ -147,6 +149,41 @@ async function publish() {
   finally { publishing.value = false }
 }
 
+async function autoSplit() {
+  const confirmed = await ElMessageBox.confirm(
+    '系统将重新识别章节首页并覆盖当前尚未保存的结构调整，是否继续？',
+    '重新自动拆分',
+    { type: 'warning', confirmButtonText: '重新拆分', cancelButtonText: '取消' },
+  ).catch(() => false)
+  if (!confirmed) return
+  autoSplitting.value = true
+  try {
+    await knowledgeApi.autoCalibrate(documentId)
+    ElMessage.success('已重新生成章节边界，请核对后保存')
+    await load()
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '自动拆分失败'))
+  } finally { autoSplitting.value = false }
+}
+
+async function deleteDocument() {
+  const confirmed = await ElMessageBox.confirm(
+    `确定删除“${document.value?.source_title || '这份教材资料'}”吗？文件、校准结构和向量索引将一并删除。`,
+    '删除教材资料',
+    { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' },
+  ).catch(() => false)
+  if (!confirmed || !document.value) return
+  deleting.value = true
+  try {
+    const courseId = document.value.course_id
+    await knowledgeApi.remove(documentId)
+    ElMessage.success('教材资料已删除')
+    await router.replace(`/courses/${courseId}`)
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '教材资料删除失败'))
+  } finally { deleting.value = false }
+}
+
 onMounted(load)
 onBeforeUnmount(revokePdf)
 watch(selectedPage, (page, previous) => { if (!loading.value && page !== previous) loadPdfPage(page) })
@@ -157,7 +194,7 @@ watch(selectedPage, (page, previous) => { if (!loading.value && page !== previou
     <header class="calibration-header">
       <el-button text :icon="ArrowLeft" @click="router.back()">返回知识库</el-button>
       <div><p class="eyebrow">Textbook Calibration</p><h1>{{ document?.source_title || '教材校准工作台' }}</h1><p>确认章节边界、印刷页码和正文锚点，AI 引用将精确到原始页与知识点。</p></div>
-      <div class="calibration-header__actions"><el-tag :type="document?.calibration_status === 'published' ? 'success' : 'warning'">{{ document?.calibration_status }}</el-tag><el-button type="primary" :loading="saving" :icon="Select" @click="save">保存并重建索引</el-button><el-button v-if="auth.user?.role === 'admin'" :disabled="!canPublish" :loading="publishing" @click="publish">发布版本</el-button></div>
+      <div class="calibration-header__actions"><el-tag :type="document?.calibration_status === 'published' ? 'success' : 'warning'">{{ document?.calibration_status }}</el-tag><el-button :loading="autoSplitting" @click="autoSplit">重新自动拆分</el-button><el-button type="primary" :loading="saving" :icon="Select" @click="save">保存并重建索引</el-button><el-button v-if="auth.user?.role === 'admin'" :disabled="!canPublish" :loading="publishing" @click="publish">发布版本</el-button><el-button type="danger" plain :loading="deleting" :icon="Delete" @click="deleteDocument">删除资料</el-button></div>
     </header>
 
     <section class="calibration-settings">

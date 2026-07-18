@@ -113,6 +113,7 @@ a { color: var(--primary); text-decoration: none; }
 .calibration-document-item div { min-width: 0; display: grid; gap: 5px; }
 .calibration-document-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 16px; }
 .calibration-document-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.calibration-document-actions { display: flex !important; grid-auto-flow: column; align-items: center; gap: 10px !important; overflow: visible !important; }
 .replacement-upload-form { margin-top: 20px; }
 .replacement-upload-form .el-form-item:last-child { margin-bottom: 0; }
 .replacement-file-hint { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.6; }

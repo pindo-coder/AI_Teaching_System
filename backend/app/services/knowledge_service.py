@@ -3,7 +3,7 @@ from uuid import uuid4
 import logging
 
 from fastapi import HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -155,11 +155,23 @@ class KnowledgeService:
 
     def delete(self, document_id: int) -> None:
         document = self.require_document(document_id)
+        version_id = document.textbook_version_id
+        version = self.db.get(TextbookVersion, version_id) if version_id else None
+        if document.calibration_status == "published" and version and version.is_current:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前正在使用的已发布教材不能直接删除，请先发布替代版本",
+            )
         delete_document_vectors(document.id)
         path = Path(document.stored_path)
         if path.exists():
             path.unlink()
         self.documents.delete(document)
+        if version and not self.db.scalar(select(func.count()).select_from(KnowledgeDocument).where(
+            KnowledgeDocument.textbook_version_id == version.id
+        )):
+            self.db.delete(version)
+            self.db.commit()
         logger.info("knowledge_deleted document_id=%s", document_id)
 
     def reindex(self, document_id: int) -> KnowledgeDocument:

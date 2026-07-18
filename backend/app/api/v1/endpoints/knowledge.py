@@ -212,6 +212,23 @@ def reindex_document(
     return ApiResponse(message="文档重新索引成功", data=KnowledgeDocumentRead.model_validate(document))
 
 
+@router.post("/documents/{document_id}/auto-calibrate", response_model=ApiResponse[KnowledgeDocumentRead])
+def auto_calibrate_document(
+    document_id: int,
+    _: User = Depends(knowledge_manager),
+    db: Session = Depends(get_db),
+) -> ApiResponse[KnowledgeDocumentRead]:
+    document = KnowledgeService(db).require_document(document_id)
+    chapters = ChapterRepository(db).list_by_course(document.course_id)
+    if not chapters:
+        raise HTTPException(status_code=400, detail="当前教材还没有专题，无法自动拆分")
+    version = db.get(TextbookVersion, document.textbook_version_id) if document.textbook_version_id else None
+    calibrated = CitationService(db).auto_calibrate(
+        document.id, chapters, version_label=version.version_label if version else "当前版"
+    )
+    return ApiResponse(message="已重新生成待确认章节边界", data=KnowledgeDocumentRead.model_validate(calibrated))
+
+
 @router.post("/search", response_model=ApiResponse[list[KnowledgeSearchItem]])
 def search_knowledge(
     payload: KnowledgeSearchRequest,
