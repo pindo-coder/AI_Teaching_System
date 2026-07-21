@@ -10,7 +10,9 @@ from app.api.v1.router import router as api_v1_router
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
 from app.db.init_db import init_db
+from app.db.session import engine
 from app.exceptions import register_exception_handlers
+from app.services.material_import_service import recover_material_batches
 
 
 configure_logging()
@@ -20,6 +22,9 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     init_db()
+    recovered = recover_material_batches(engine)
+    if recovered:
+        logger.info("recovered material import batches count=%s", recovered)
     yield
 
 

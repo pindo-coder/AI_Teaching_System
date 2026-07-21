@@ -1,4 +1,5 @@
 import { http, type ApiResponse } from './http'
+import type { AiSource } from './ai'
 
 export interface StudyNote {
   id: number
@@ -32,7 +33,7 @@ export interface StudyChatMessage {
   role: 'user' | 'assistant'
   content: string
   model: string | null
-  sources: Array<{ source_title: string; excerpt: string; position: string }>
+  sources: AiSource[]
   created_time: string
 }
 

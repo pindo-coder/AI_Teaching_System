@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     text_chunk_size: int = 800
     text_chunk_overlap: int = 120
     max_upload_size_mb: int = 100
+    material_batch_max_items: int = 500
+    material_batch_worker_concurrency: int = 2
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

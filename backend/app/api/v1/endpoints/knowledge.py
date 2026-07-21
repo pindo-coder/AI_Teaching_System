@@ -1,4 +1,5 @@
 from io import BytesIO
+from pathlib import Path
 from typing import Annotated
 from urllib.parse import quote
 from datetime import date
@@ -9,14 +10,17 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
+from app.core.config import settings
 from app.db.session import get_db
 from app.models.user import User
 from app.models.knowledge_document import KnowledgeDocument
+from app.models.material_import import MaterialImportItem
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.schemas.common import ApiResponse
 from app.schemas.knowledge import (
     CitationFeedbackCreate, DocumentCalibrationUpdate, KnowledgeDocumentRead,
-    KnowledgeSearchItem, KnowledgeSearchRequest, MaterialClassificationUpdate,
+    KnowledgeSearchItem, KnowledgeSearchRequest, MaterialBatchCreate, MaterialBatchPreview,
+    MaterialBatchRead, MaterialBatchSummaryRead, MaterialClassificationUpdate,
     MaterialScopeUpdate, MaterialSuggestion, MaterialUrlCreate, TextbookVersionRead,
 )
 from app.services.knowledge_service import KnowledgeService
@@ -25,6 +29,9 @@ from app.repositories.course_repository import ChapterRepository
 from app.models.citation import PageNumberRange, TextbookVersion
 from sqlalchemy import select
 from app.services.material_center_service import MaterialCenterService
+from app.services.material_import_service import (
+    MaterialBatchService, preview_material_file, schedule_material_batch,
+)
 
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
@@ -175,6 +182,86 @@ def import_material_url(
         chapter_ids=payload.chapter_ids, knowledge_tags=payload.knowledge_tags,
     )
     return ApiResponse(message="网页正文已存档，请确认智能关联后发布", data=service.read(document))
+
+
+@router.post("/materials/batch/preview", response_model=ApiResponse[MaterialBatchPreview])
+async def preview_material_batch(
+    file: Annotated[UploadFile, File()],
+    _: User = Depends(require_roles("admin")),
+) -> ApiResponse[MaterialBatchPreview]:
+    filename = file.filename or "batch.csv"
+    if Path(filename).suffix.lower() not in {".csv", ".xlsx", ".xls"}:
+        raise HTTPException(status_code=400, detail="批量导入仅支持 CSV、XLSX 和 XLS 文件")
+    content = await file.read(settings.max_upload_size_mb * 1024 * 1024 + 1)
+    if len(content) > settings.max_upload_size_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="批量导入文件超过系统大小限制")
+    return ApiResponse(message="文件已解析，请确认字段和数据", data=preview_material_file(filename, content))
+
+
+@router.post(
+    "/materials/batches", response_model=ApiResponse[MaterialBatchRead],
+    status_code=status.HTTP_201_CREATED,
+)
+def create_material_batch(
+    payload: MaterialBatchCreate,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[MaterialBatchRead]:
+    service = MaterialBatchService(db)
+    batch = service.create(user, payload)
+    schedule_material_batch(batch.id, db.get_bind())
+    return ApiResponse(
+        message="批量任务已转入后台，可以离开当前页面",
+        data=service.read(batch),
+    )
+
+
+@router.get("/materials/batches", response_model=ApiResponse[list[MaterialBatchSummaryRead]])
+def list_material_batches(
+    limit: int = 30,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[list[MaterialBatchSummaryRead]]:
+    limit = max(1, min(limit, 100))
+    return ApiResponse(data=[
+        MaterialBatchSummaryRead.model_validate(batch)
+        for batch in MaterialBatchService(db).list(user, limit)
+    ])
+
+
+@router.get("/materials/batches/{batch_id}", response_model=ApiResponse[MaterialBatchRead])
+def get_material_batch(
+    batch_id: int,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[MaterialBatchRead]:
+    service = MaterialBatchService(db)
+    return ApiResponse(data=service.read(service.require(batch_id, user)))
+
+
+@router.post("/materials/batches/{batch_id}/retry", response_model=ApiResponse[MaterialBatchRead])
+def retry_material_batch(
+    batch_id: int,
+    user: User = Depends(require_roles("admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[MaterialBatchRead]:
+    service = MaterialBatchService(db)
+    batch = service.require(batch_id, user)
+    if batch.status == "processing":
+        raise HTTPException(status_code=409, detail="当前批次仍在处理中")
+    failed = db.scalars(select(MaterialImportItem).where(
+        MaterialImportItem.batch_id == batch.id,
+        MaterialImportItem.status == "failed",
+    )).all()
+    if not failed:
+        raise HTTPException(status_code=409, detail="当前批次没有可重试的失败记录")
+    for item in failed:
+        item.status = "queued"
+        item.error_message = None
+    batch.status = "queued"
+    db.commit(); db.refresh(batch)
+    schedule_material_batch(batch.id, db.get_bind())
+    return ApiResponse(message="失败记录已进入重试队列", data=service.read(batch))
 
 
 @router.get("/materials/{document_id}/suggestions", response_model=ApiResponse[list[MaterialSuggestion]])

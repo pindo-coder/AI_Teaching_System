@@ -49,4 +49,6 @@ def test_all_mvp_tables_are_registered() -> None:
             "document_chapter_scopes",
             "document_class_scopes",
             "document_knowledge_tags",
+            "material_import_batches",
+            "material_import_items",
         }

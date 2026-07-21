@@ -63,10 +63,12 @@ async function load() {
   loading.value = true
   try {
     const detail = (await knowledgeApi.detail(documentId)).data.data
+    const courseId = detail.course_id
+    if (courseId === null) throw new Error('该教材尚未关联课程，无法进行引用校准')
     document.value = detail
     accessPolicy.value = detail.access_policy
     const [pageResult, outlineResult, courseResult, metaResult] = await Promise.all([
-      knowledgeApi.pages(documentId), knowledgeApi.outline(documentId), courseApi.detail(detail.course_id), knowledgeApi.calibrationMeta(documentId),
+      knowledgeApi.pages(documentId), knowledgeApi.outline(documentId), courseApi.detail(courseId), knowledgeApi.calibrationMeta(documentId),
     ])
     pages.value = pageResult.data.data
     chapters.value = courseResult.data.data.chapters

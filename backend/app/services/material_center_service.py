@@ -6,6 +6,7 @@ from html.parser import HTMLParser
 import hashlib
 import ipaddress
 from pathlib import Path
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -33,8 +34,21 @@ class _ArticleTextParser(HTMLParser):
         super().__init__()
         self.parts: list[str] = []
         self._ignored = 0
+        self.meta: dict[str, str] = {}
+        self._capture: str | None = None
+        self._capture_parts: list[str] = []
+        self.page_title = ""
+        self.first_h1 = ""
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {key.lower(): (value or "").strip() for key, value in attrs}
+        if tag == "meta" and attributes.get("content"):
+            key = (attributes.get("property") or attributes.get("name") or attributes.get("itemprop") or "").lower()
+            if key:
+                self.meta[key] = attributes["content"]
+        if tag in {"title", "h1"}:
+            self._capture = tag
+            self._capture_parts = []
         if tag in {"script", "style", "noscript", "svg"}:
             self._ignored += 1
         if tag in {"p", "article", "section", "h1", "h2", "h3", "li", "br"}:
@@ -45,14 +59,47 @@ class _ArticleTextParser(HTMLParser):
             self._ignored -= 1
         if tag in {"p", "article", "section", "h1", "h2", "h3", "li"}:
             self.parts.append("\n")
+        if self._capture == tag:
+            value = " ".join(" ".join(self._capture_parts).split())
+            if tag == "title":
+                self.page_title = value
+            elif tag == "h1" and not self.first_h1:
+                self.first_h1 = value
+            self._capture = None
+            self._capture_parts = []
 
     def handle_data(self, data: str) -> None:
         if not self._ignored and data.strip():
             self.parts.append(data.strip())
+            if self._capture:
+                self._capture_parts.append(data.strip())
 
     def text(self) -> str:
         lines = [" ".join(line.split()) for line in " ".join(self.parts).splitlines()]
         return "\n".join(line for line in lines if line).strip()
+
+    def metadata(self) -> tuple[str | None, str | None, date | None]:
+        def first(*keys: str) -> str | None:
+            return next((self.meta[key].strip() for key in keys if self.meta.get(key, "").strip()), None)
+
+        title = first("og:title", "twitter:title", "headline") or self.first_h1 or self.page_title or None
+        publisher = first(
+            "publisher", "source", "article:author", "author", "og:site_name",
+            "application-name", "sitename",
+        )
+        raw_date = first(
+            "article:published_time", "datepublished", "publishdate", "pubdate",
+            "release_date", "date", "sailthru.date",
+        )
+        published_date = None
+        if raw_date:
+            matched = re.search(r"(20\d{2})[年./\-](\d{1,2})[月./\-](\d{1,2})", raw_date)
+            if matched:
+                try:
+                    published_date = date(*map(int, matched.groups()))
+                except ValueError:
+                    pass
+        return title, publisher, published_date
 
 
 def _assert_public_https(url: str) -> None:
@@ -69,7 +116,7 @@ def _assert_public_https(url: str) -> None:
             raise HTTPException(status_code=400, detail="中央材料网址不能指向本机或内网地址")
 
 
-def _default_fetch(url: str) -> tuple[str, str]:
+def _default_fetch(url: str) -> tuple[str, str, str | None, str | None, date | None]:
     _assert_public_https(url)
     limit = settings.max_upload_size_mb * 1024 * 1024
     headers = {"User-Agent": "AI-Teaching-Material-Archive/1.0"}
@@ -92,15 +139,17 @@ def _default_fetch(url: str) -> tuple[str, str]:
         parser = _ArticleTextParser()
         parser.feed(raw)
         text = parser.text()
+        title, publisher, published_date = parser.metadata()
     else:
         text = raw.strip()
+        title, publisher, published_date = None, None, None
     if len(text) < 80:
         raise HTTPException(status_code=400, detail="未能从网页提取有效正文，请改为上传原始文件")
-    return text, str(response.url)
+    return text, str(response.url), title, publisher, published_date
 
 
 class MaterialCenterService:
-    def __init__(self, db: Session, fetcher: Callable[[str], tuple[str, str]] | None = None) -> None:
+    def __init__(self, db: Session, fetcher: Callable[[str], tuple] | None = None) -> None:
         self.db = db
         self.knowledge = KnowledgeService(db)
         self.fetcher = fetcher or _default_fetch
@@ -258,12 +307,24 @@ class MaterialCenterService:
             self.db.commit(); self.db.refresh(document)
         return document
 
-    def ingest_url(self, user: User, *, source_url: str, source_title: str, publisher: str,
-                   published_date: date, applicable_scope: str | None, version_label: str | None,
+    def ingest_url(self, user: User, *, source_url: str, source_title: str | None, publisher: str | None,
+                   published_date: date | None, applicable_scope: str | None, version_label: str | None,
                    supersedes_document_id: int | None, access_policy: str,
                    course_ids: list[int], chapter_ids: list[int], knowledge_tags: list[str]) -> KnowledgeDocument:
         self._require_type_permission(user, "central")
-        text, final_url = self.fetcher(source_url)
+        fetched = self.fetcher(source_url)
+        text, final_url = fetched[:2]
+        inferred_title = fetched[2] if len(fetched) > 2 else None
+        inferred_publisher = fetched[3] if len(fetched) > 3 else None
+        inferred_date = fetched[4] if len(fetched) > 4 else None
+        source_title = (source_title or inferred_title or "").strip()
+        publisher = (publisher or inferred_publisher or "").strip()
+        published_date = published_date or inferred_date
+        missing = [label for value, label in [
+            (source_title, "材料标题"), (publisher, "发布机关"), (published_date, "发布日期")
+        ] if not value]
+        if missing:
+            raise HTTPException(status_code=422, detail=f"网页未能识别{'、'.join(missing)}，请在预览表中补充后重试")
         raw_name = (urlparse(final_url).path.rsplit("/", 1)[-1] or "central-material")[:120]
         safe_name = f"{Path(raw_name).stem or 'central-material'}.md"
         document = self.ingest_file(

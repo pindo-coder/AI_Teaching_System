@@ -54,6 +54,76 @@ export interface MaterialSuggestion {
   score: number
 }
 
+export interface MaterialPreviewColumn {
+  field: string
+  column: string
+  confidence: number
+}
+
+export interface MaterialPreviewRow {
+  row_number: number
+  selected: boolean
+  source_url: string
+  source_title: string
+  publisher: string
+  published_date: string
+  applicable_scope: string
+  version_label: string
+  knowledge_tags: string[]
+  raw_data: Record<string, string>
+  errors: string[]
+  warnings: string[]
+}
+
+export interface MaterialPreviewSheet {
+  name: string
+  header_row: number
+  columns: string[]
+  mapping: MaterialPreviewColumn[]
+  rows: MaterialPreviewRow[]
+}
+
+export interface MaterialBatchPreview {
+  filename: string
+  sheets: MaterialPreviewSheet[]
+}
+
+export interface MaterialBatchItem {
+  id: number
+  row_number: number
+  source_url: string
+  source_title: string | null
+  publisher: string | null
+  published_date: string | null
+  applicable_scope: string | null
+  version_label: string | null
+  knowledge_tags: string[]
+  status: string
+  error_message: string | null
+  document_id: number | null
+  raw_data: Record<string, string>
+}
+
+export interface MaterialBatch {
+  id: number
+  original_filename: string | null
+  sheet_name: string | null
+  status: string
+  total_count: number
+  completed_count: number
+  success_count: number
+  failed_count: number
+  duplicate_count: number
+  course_ids: number[]
+  chapter_ids: number[]
+  access_policy: string
+  created_time: string
+  updated_time: string
+  items: MaterialBatchItem[]
+}
+
+export type MaterialBatchSummary = Omit<MaterialBatch, 'course_ids' | 'chapter_ids' | 'access_policy' | 'items'>
+
 export interface DocumentPage {
   id: number
   pdf_page: number
@@ -141,6 +211,19 @@ export const knowledgeApi = {
     http.post<ApiResponse<KnowledgeDocument>>('/knowledge/materials', formData, { timeout: 120_000 }),
   importMaterialUrl: (payload: Record<string, unknown>) =>
     http.post<ApiResponse<KnowledgeDocument>>('/knowledge/materials/url', payload, { timeout: 120_000 }),
+  previewMaterialBatch: (file: File) => {
+    const payload = new FormData()
+    payload.append('file', file)
+    return http.post<ApiResponse<MaterialBatchPreview>>('/knowledge/materials/batch/preview', payload, { timeout: 120_000 })
+  },
+  createMaterialBatch: (payload: Record<string, unknown>) =>
+    http.post<ApiResponse<MaterialBatch>>('/knowledge/materials/batches', payload),
+  materialBatches: (limit = 30) =>
+    http.get<ApiResponse<MaterialBatchSummary[]>>('/knowledge/materials/batches', { params: { limit } }),
+  materialBatch: (id: number) =>
+    http.get<ApiResponse<MaterialBatch>>(`/knowledge/materials/batches/${id}`),
+  retryMaterialBatch: (id: number) =>
+    http.post<ApiResponse<MaterialBatch>>(`/knowledge/materials/batches/${id}/retry`),
   materialSuggestions: (id: number) =>
     http.get<ApiResponse<MaterialSuggestion[]>>(`/knowledge/materials/${id}/suggestions`),
   updateMaterialScopes: (id: number, payload: { course_ids: number[]; chapter_ids: number[]; teaching_class_ids: number[]; knowledge_tags: string[] }) =>
