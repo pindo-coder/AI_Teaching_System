@@ -1,15 +1,15 @@
 from datetime import datetime
 
 from fastapi import HTTPException, status
-from sqlalchemy import or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.chapter import Chapter
 from app.models.course import Course
-from app.models.learning_task import UserTaskProgress
+from app.models.learning_task import LearningEvent, UserTaskProgress
 from app.models.teacher_assignment import AssignmentRecipient, TeacherAssignment
 from app.models.user import User
-from app.models.teaching_class import ClassGroupMember, ClassMembership, TeachingClassMaterial, TeachingClassTeacher
+from app.models.teaching_class import ClassGroup, ClassGroupMember, ClassMembership, TeachingClassMaterial, TeachingClassTeacher
 from app.schemas.assignment import AssignmentCreate
 from app.services.task_service import TaskService
 
@@ -220,6 +220,67 @@ class AssignmentService:
             })
         self.db.commit()
         return output
+
+    def recipient_details(self, assignment_id: int, requester: User) -> list[dict[str, object]]:
+        assignment = self.db.get(TeacherAssignment, assignment_id)
+        if assignment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+        if requester.role != "admin" and assignment.created_by != requester.id:
+            relation = self.db.scalar(select(TeachingClassTeacher.id).where(
+                TeachingClassTeacher.teaching_class_id == assignment.teaching_class_id,
+                TeachingClassTeacher.user_id == requester.id,
+            )) if assignment.teaching_class_id else None
+            if relation is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权查看该任务的学生完成详情")
+
+        group_join = and_(
+            ClassGroupMember.user_id == User.id,
+            ClassGroupMember.teaching_class_id == assignment.teaching_class_id,
+        )
+        rows = self.db.execute(
+            select(AssignmentRecipient, User, ClassGroup.name)
+            .join(User, User.id == AssignmentRecipient.user_id)
+            .outerjoin(ClassGroupMember, group_join)
+            .outerjoin(ClassGroup, ClassGroup.id == ClassGroupMember.group_id)
+            .where(AssignmentRecipient.assignment_id == assignment.id)
+            .order_by(User.username, User.id)
+        ).all()
+        now = datetime.now()
+        output: list[dict[str, object]] = []
+        status_order = {"overdue": 0, "not_started": 1, "in_progress": 2, "completed": 3}
+        for recipient, student, group_name in rows:
+            self._sync_recipient(assignment, recipient)
+            display_status = (
+                "overdue"
+                if recipient.status != "completed" and assignment.due_time < now
+                else recipient.status
+            )
+            last_activity_time = self.db.scalar(
+                select(func.max(LearningEvent.created_time)).where(
+                    LearningEvent.user_id == recipient.user_id,
+                    LearningEvent.course_id == assignment.course_id,
+                    LearningEvent.chapter_id == assignment.chapter_id,
+                    LearningEvent.learning_stage == assignment.learning_stage,
+                )
+            )
+            output.append({
+                "user_id": student.id,
+                "username": student.username,
+                "identity_no": student.identity_no,
+                "group_name": group_name,
+                "status": display_status,
+                "progress_value": recipient.progress_value,
+                "completed_time": recipient.completed_time,
+                "last_activity_time": last_activity_time,
+            })
+        self.db.commit()
+        return sorted(
+            output,
+            key=lambda item: (
+                status_order.get(str(item["status"]), 9),
+                str(item["identity_no"] or item["username"]),
+            ),
+        )
 
     def cancel(self, assignment_id: int, teacher_id: int, is_admin: bool = False) -> TeacherAssignment:
         assignment = self.db.get(TeacherAssignment, assignment_id)

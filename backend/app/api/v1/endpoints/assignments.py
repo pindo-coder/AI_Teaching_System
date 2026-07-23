@@ -4,7 +4,13 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user, require_roles
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.assignment import AssignmentCreate, AssignmentStudentItem, StudentAssignmentRead, TeacherAssignmentRead
+from app.schemas.assignment import (
+    AssignmentCreate,
+    AssignmentRecipientRead,
+    AssignmentStudentItem,
+    StudentAssignmentRead,
+    TeacherAssignmentRead,
+)
 from app.schemas.common import ApiResponse
 from app.services.assignment_service import AssignmentService
 
@@ -37,6 +43,15 @@ def create_assignment(payload: AssignmentCreate, user: User = Depends(manager), 
     assignment = AssignmentService(db).create(user.id, payload)
     item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
     return ApiResponse(message="学习任务已发布", data=TeacherAssignmentRead(**item))
+
+
+@router.get("/{assignment_id}/recipients", response_model=ApiResponse[list[AssignmentRecipientRead]])
+def assignment_recipients(
+    assignment_id: int,
+    user: User = Depends(manager),
+    db: Session = Depends(get_db),
+) -> ApiResponse[list[AssignmentRecipientRead]]:
+    return ApiResponse(data=AssignmentService(db).recipient_details(assignment_id, user))
 
 
 @router.delete("/{assignment_id}", response_model=ApiResponse[dict[str, int]])

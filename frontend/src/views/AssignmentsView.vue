@@ -1,9 +1,16 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Calendar, Plus, Promotion } from '@element-plus/icons-vue'
-import { assignmentApi, type AssignmentStudent, type AssignmentTaskKind, type StudentAssignment, type TeacherAssignment } from '@/api/assignments'
+import { Calendar, Download, Plus, Promotion, Refresh, Search, UserFilled } from '@element-plus/icons-vue'
+import {
+  assignmentApi,
+  type AssignmentRecipientDetail,
+  type AssignmentStudent,
+  type AssignmentTaskKind,
+  type StudentAssignment,
+  type TeacherAssignment,
+} from '@/api/assignments'
 import { courseApi } from '@/api/courses'
 import { useAuthStore } from '@/stores/auth'
 import type { Chapter, Course, LearningStage } from '@/types'
@@ -22,6 +29,14 @@ const teachingClasses = ref<TeachingClass[]>([])
 const groups = ref<ClassGroup[]>([])
 const dialogVisible = ref(false)
 const publishing = ref(false)
+const detailVisible = ref(false)
+const detailLoading = ref(false)
+const detailRefreshing = ref(false)
+const selectedTask = ref<TeacherAssignment | null>(null)
+const taskRecipients = ref<AssignmentRecipientDetail[]>([])
+const recipientKeyword = ref('')
+const recipientStatus = ref<'all' | 'unfinished' | AssignmentRecipientDetail['status']>('all')
+let detailRefreshTimer: number | undefined
 const form = reactive({
   teaching_class_id: null as number | null,
   course_id: null as number | null,
@@ -36,10 +51,33 @@ const form = reactive({
 const stageLabels: Record<LearningStage, string> = { preview: '课前预习', review: '课后巩固', exam: '考前冲刺' }
 const kindLabels: Record<AssignmentTaskKind, string> = { reading: '教材阅读', ai_assist: 'AI 学习辅助', note: '章节笔记' }
 const activeTeacherTasks = computed(() => teacherTasks.value.filter((item) => item.status === 'published'))
+const filteredRecipients = computed(() => {
+  const keyword = recipientKeyword.value.trim().toLowerCase()
+  return taskRecipients.value.filter((item) => {
+    const matchesStatus = recipientStatus.value === 'all'
+      || (recipientStatus.value === 'unfinished' && item.status !== 'completed')
+      || item.status === recipientStatus.value
+    const matchesKeyword = !keyword || [item.username, item.identity_no, item.group_name]
+      .some((value) => value?.toLowerCase().includes(keyword))
+    return matchesStatus && matchesKeyword
+  })
+})
+const recipientCounts = computed(() => ({
+  total: taskRecipients.value.length,
+  completed: taskRecipients.value.filter((item) => item.status === 'completed').length,
+  unfinished: taskRecipients.value.filter((item) => item.status !== 'completed').length,
+  overdue: taskRecipients.value.filter((item) => item.status === 'overdue').length,
+}))
 
 function taskPath(task: StudentAssignment) { return `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function statusLabel(status: StudentAssignment['status']) { return status === 'completed' ? '已完成' : status === 'overdue' ? '已逾期' : status === 'in_progress' ? '进行中' : '未开始' }
+function statusTagType(status: AssignmentRecipientDetail['status']) {
+  return status === 'completed' ? 'success' : status === 'overdue' ? 'danger' : status === 'in_progress' ? 'warning' : 'primary'
+}
+function formatActivityTime(value: string | null) {
+  return value ? new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '暂无学习记录'
+}
 function deadlineClass(task: StudentAssignment) {
   if (task.status === 'completed') return 'completed'
   if (task.status === 'overdue') return 'overdue'
@@ -101,7 +139,64 @@ async function cancelTask(task: TeacherAssignment) {
   await load()
   ElMessage.success('任务已撤回')
 }
+function stopDetailRefresh() {
+  if (detailRefreshTimer !== undefined) window.clearInterval(detailRefreshTimer)
+  detailRefreshTimer = undefined
+}
+async function loadRecipientDetails(silent = false) {
+  if (!selectedTask.value) return
+  if (silent) detailRefreshing.value = true
+  else detailLoading.value = true
+  try {
+    taskRecipients.value = (await assignmentApi.recipients(selectedTask.value.id)).data.data
+  } catch (error: unknown) {
+    if (!silent) ElMessage.error(getErrorMessage(error, '任务完成详情加载失败'))
+  } finally {
+    detailLoading.value = false
+    detailRefreshing.value = false
+  }
+}
+async function openTaskDetails(task: TeacherAssignment) {
+  selectedTask.value = task
+  recipientKeyword.value = ''
+  recipientStatus.value = 'all'
+  detailVisible.value = true
+  await loadRecipientDetails()
+}
+function csvCell(value: string | number | null) {
+  let text = value === null ? '' : String(value)
+  if (/^[=+\-@]/.test(text)) text = `'${text}`
+  return `"${text.replace(/"/g, '""')}"`
+}
+function exportUnfinishedRecipients() {
+  if (!selectedTask.value) return
+  const rows = taskRecipients.value.filter((item) => item.status !== 'completed')
+  if (!rows.length) return ElMessage.info('当前没有未完成学生')
+  const content = [
+    ['姓名', '学号', '小组', '状态', '完成进度', '最后学习时间'],
+    ...rows.map((item) => [
+      item.username,
+      item.identity_no || '',
+      item.group_name || '',
+      statusLabel(item.status),
+      `${item.progress_value}%`,
+      formatActivityTime(item.last_activity_time),
+    ]),
+  ].map((row) => row.map(csvCell).join(',')).join('\r\n')
+  const blob = new Blob([`\uFEFF${content}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${selectedTask.value.title.replace(/[\\/:*?"<>|]/g, '_')}-未完成名单.csv`
+  anchor.click()
+  URL.revokeObjectURL(url)
+}
+watch(detailVisible, (visible) => {
+  stopDetailRefresh()
+  if (visible) detailRefreshTimer = window.setInterval(() => void loadRecipientDetails(true), 30_000)
+})
 onMounted(load)
+onBeforeUnmount(stopDetailRefresh)
 </script>
 
 <template>
@@ -128,7 +223,10 @@ onMounted(load)
           <div class="assignment-status-line"><el-tag :type="task.status === 'published' ? 'success' : 'info'">{{ task.status === 'published' ? '已发布' : '已撤回' }}</el-tag><span>{{ stageLabels[task.learning_stage] }} · {{ kindLabels[task.task_kind] }}</span></div>
           <h2>{{ task.title }}</h2><p>{{ task.course_name }} · {{ task.chapter_title }}</p><p class="muted">{{ task.description || '未填写补充要求' }}</p>
           <div class="teacher-task-metrics"><span>完成 <strong>{{ task.completed_count }}/{{ task.total_count }}</strong></span><span>进行中 <strong>{{ task.in_progress_count }}</strong></span><span>逾期 <strong>{{ task.overdue_count }}</strong></span><span><el-icon><Calendar /></el-icon> {{ formatTime(task.due_time) }}</span></div>
-          <el-button v-if="task.status === 'published'" type="danger" plain @click="cancelTask(task)">撤回任务</el-button>
+          <div class="teacher-task-actions">
+            <el-button :icon="UserFilled" type="primary" plain @click="openTaskDetails(task)">查看完成详情</el-button>
+            <el-button v-if="task.status === 'published'" type="danger" plain @click="cancelTask(task)">撤回任务</el-button>
+          </div>
         </el-card>
         <el-empty v-if="!teacherTasks.length" description="尚未发布学习任务" />
       </section>
@@ -147,5 +245,178 @@ onMounted(load)
       </el-form>
       <template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="publishing" @click="publish">发布任务</el-button></template>
     </el-dialog>
+
+    <el-drawer v-model="detailVisible" size="min(920px, 96vw)" class="assignment-detail-drawer">
+      <template #header>
+        <div class="assignment-detail-heading">
+          <span class="assignment-detail-kicker">任务完成详情</span>
+          <strong>{{ selectedTask?.title }}</strong>
+          <small>{{ selectedTask?.course_name }} · {{ selectedTask?.chapter_title }} · 每 30 秒自动更新</small>
+        </div>
+      </template>
+      <div v-loading="detailLoading" class="assignment-detail-body">
+        <section class="recipient-summary">
+          <button :class="{ active: recipientStatus === 'all' }" @click="recipientStatus = 'all'"><strong>{{ recipientCounts.total }}</strong><span>全部学生</span></button>
+          <button :class="{ active: recipientStatus === 'unfinished' }" @click="recipientStatus = 'unfinished'"><strong>{{ recipientCounts.unfinished }}</strong><span>未完成</span></button>
+          <button :class="{ active: recipientStatus === 'completed' }" @click="recipientStatus = 'completed'"><strong>{{ recipientCounts.completed }}</strong><span>已完成</span></button>
+          <button :class="{ active: recipientStatus === 'overdue' }" @click="recipientStatus = 'overdue'"><strong>{{ recipientCounts.overdue }}</strong><span>已逾期</span></button>
+        </section>
+        <div class="recipient-toolbar">
+          <el-input v-model="recipientKeyword" :prefix-icon="Search" clearable placeholder="搜索姓名、学号或小组" />
+          <div>
+            <el-button :icon="Refresh" :loading="detailRefreshing" @click="loadRecipientDetails(true)">刷新</el-button>
+            <el-button :icon="Download" @click="exportUnfinishedRecipients">导出未完成名单</el-button>
+          </div>
+        </div>
+        <el-table :data="filteredRecipients" stripe class="recipient-table">
+          <el-table-column label="学生" min-width="150">
+            <template #default="{ row }"><div class="recipient-student"><strong>{{ row.username }}</strong><span>{{ row.identity_no || '未填写学号' }}</span></div></template>
+          </el-table-column>
+          <el-table-column prop="group_name" label="小组" min-width="110">
+            <template #default="{ row }">{{ row.group_name || '未分组' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }"><el-tag :type="statusTagType(row.status)">{{ statusLabel(row.status) }}</el-tag></template>
+          </el-table-column>
+          <el-table-column label="进度" min-width="160">
+            <template #default="{ row }"><el-progress :percentage="row.progress_value" :status="row.status === 'completed' ? 'success' : undefined" /></template>
+          </el-table-column>
+          <el-table-column label="最后学习时间" min-width="150">
+            <template #default="{ row }">{{ formatActivityTime(row.last_activity_time) }}</template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-if="!detailLoading && !filteredRecipients.length" description="没有符合当前条件的学生" />
+        <p class="recipient-privacy-note">仅展示任务完成依据与进度，不展示学生私人笔记正文或 AI 对话内容。</p>
+      </div>
+    </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.teacher-task-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.assignment-detail-heading {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  padding-right: var(--space-6);
+}
+
+.assignment-detail-heading strong {
+  color: var(--ink-900);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.assignment-detail-heading small {
+  color: var(--ink-400);
+}
+
+.assignment-detail-kicker {
+  color: var(--blue-600);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+  letter-spacing: .08em;
+}
+
+.assignment-detail-body {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.recipient-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+}
+
+.recipient-summary button {
+  display: grid;
+  gap: 3px;
+  padding: var(--space-3);
+  color: var(--ink-600);
+  background: var(--bg-page);
+  border: 1px solid transparent;
+  border-radius: var(--radius-input);
+  cursor: pointer;
+  text-align: left;
+}
+
+.recipient-summary button:hover,
+.recipient-summary button.active {
+  color: var(--blue-800);
+  background: var(--blue-50);
+  border-color: var(--blue-200);
+}
+
+.recipient-summary strong {
+  font-size: 22px;
+}
+
+.recipient-summary span {
+  font-size: var(--fs-meta);
+}
+
+.recipient-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.recipient-toolbar > .el-input {
+  max-width: 340px;
+}
+
+.recipient-toolbar > div {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.recipient-student {
+  display: grid;
+  gap: 2px;
+}
+
+.recipient-student span,
+.recipient-privacy-note {
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.recipient-privacy-note {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--bg-page);
+  border-radius: var(--radius-input);
+}
+
+@media (max-width: 767px) {
+  .recipient-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .recipient-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .recipient-toolbar > .el-input {
+    max-width: none;
+  }
+
+  .recipient-toolbar > div {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .recipient-toolbar .el-button {
+    width: 100%;
+    margin: 0;
+  }
+}
+</style>

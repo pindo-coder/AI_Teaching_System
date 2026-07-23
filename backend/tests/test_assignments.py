@@ -34,6 +34,25 @@ def test_teacher_assignment_is_visible_and_auto_completed_by_learning_event(clie
     pending = client.get("/api/v1/assignments/student", headers=_headers(student)).json()["data"]
     assert pending[0]["status"] == "not_started"
     assert pending[0]["chapter_title"] == "生态文明建设"
+    recipient_detail = client.get(
+        f"/api/v1/assignments/{assignment_id}/recipients",
+        headers=_headers(teacher),
+    )
+    assert recipient_detail.status_code == 200
+    assert recipient_detail.json()["data"] == [{
+        "user_id": student.id,
+        "username": "assignment_student",
+        "identity_no": "S20260101",
+        "group_name": None,
+        "status": "not_started",
+        "progress_value": 0,
+        "completed_time": None,
+        "last_activity_time": None,
+    }]
+    assert client.get(
+        f"/api/v1/assignments/{assignment_id}/recipients",
+        headers=_headers(student),
+    ).status_code == 403
 
     event = client.post("/api/v1/learning/events", headers=_headers(student), json={
         "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "preview",
@@ -47,6 +66,13 @@ def test_teacher_assignment_is_visible_and_auto_completed_by_learning_event(clie
     teacher_list = client.get("/api/v1/assignments", headers=_headers(teacher)).json()["data"]
     assert teacher_list[0]["completed_count"] == 1
     assert teacher_list[0]["total_count"] == 1
+    completed_detail = client.get(
+        f"/api/v1/assignments/{assignment_id}/recipients",
+        headers=_headers(teacher),
+    ).json()["data"][0]
+    assert completed_detail["status"] == "completed"
+    assert completed_detail["progress_value"] == 100
+    assert completed_detail["last_activity_time"] is not None
 
     forbidden = client.post("/api/v1/assignments", headers=_headers(student), json={
         "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "preview",

@@ -49,6 +49,17 @@ export interface TeacherAssignment {
   overdue_count: number
 }
 
+export interface AssignmentRecipientDetail {
+  user_id: number
+  username: string
+  identity_no: string | null
+  group_name: string | null
+  status: 'not_started' | 'in_progress' | 'completed' | 'overdue'
+  progress_value: number
+  completed_time: string | null
+  last_activity_time: string | null
+}
+
 export const assignmentApi = {
   student: (includeCompleted = true) => http.get<ApiResponse<StudentAssignment[]>>('/assignments/student', { params: { include_completed: includeCompleted } }),
   teacher: () => http.get<ApiResponse<TeacherAssignment[]>>('/assignments'),
@@ -66,5 +77,6 @@ export const assignmentApi = {
     student_ids: number[]
     group_ids: number[]
   }) => http.post<ApiResponse<TeacherAssignment>>('/assignments', payload),
+  recipients: (id: number) => http.get<ApiResponse<AssignmentRecipientDetail[]>>(`/assignments/${id}/recipients`),
   cancel: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/assignments/${id}`),
 }

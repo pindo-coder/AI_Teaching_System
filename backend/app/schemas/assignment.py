@@ -74,3 +74,14 @@ class TeacherAssignmentRead(BaseModel):
     completed_count: int
     in_progress_count: int
     overdue_count: int
+
+
+class AssignmentRecipientRead(BaseModel):
+    user_id: int
+    username: str
+    identity_no: str | None
+    group_name: str | None
+    status: str
+    progress_value: int
+    completed_time: datetime | None
+    last_activity_time: datetime | None
