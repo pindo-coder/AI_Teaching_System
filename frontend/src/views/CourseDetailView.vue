@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { CourseDetail, LearningStage } from '@/types'
 import { textbookPreview } from '@/utils/textbookText'
 import KnowledgeGraph from '@/components/KnowledgeGraph.vue'
+import UiHero from '@/components/ui/UiHero.vue'
 import { getErrorMessage } from '@/utils/error'
 
 const route = useRoute()
@@ -199,7 +200,27 @@ onMounted(loadCourse)
 <template>
   <div v-loading="loading">
     <div class="course-breadcrumb"><el-button link @click="$router.push('/courses')">课程中心</el-button><span>/</span><span>{{ course?.name || '教材详情' }}</span></div>
-    <header class="course-hero course-detail-hero"><div class="course-hero-copy"><p class="eyebrow">高校思政课 · 教材空间</p><h1>{{ course?.name }}</h1><div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div><div class="course-intro-card"><div class="intro-heading"><strong>课程介绍</strong><span>围绕教材专题开展学习</span></div><p>{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p></div></div><div class="course-hero-visual"><div class="hero-orbit"></div><div class="hero-metric metric-top"><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div><div class="hero-metric metric-left"><strong>3</strong><span>学习阶段</span></div><div class="hero-metric metric-right"><strong>AI</strong><span>学习辅助</span></div><div class="hero-core">思政<br>AI</div></div><div v-if="canManageCitations" class="hero-admin-actions"><el-dropdown trigger="click" popper-class="course-management-dropdown" @command="handleManagementCommand"><el-button class="hero-management-button" type="primary" :icon="Setting">教材管理<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button><template #dropdown><el-dropdown-menu><el-dropdown-item v-if="auth.isAdmin" command="history" :icon="Clock">历史版本</el-dropdown-item><el-dropdown-item command="upload" :icon="UploadFilled">上传新版教材</el-dropdown-item><el-dropdown-item command="calibration" :icon="DocumentChecked">教材引用校准</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="chapter" :icon="CirclePlus" divided>添加专题</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="delete" :icon="Delete" class="management-danger-item" divided>删除教材</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+    <UiHero variant="course" class="course-detail-hero-v2">
+      <div class="course-hero-copy">
+        <p class="course-hero-eyebrow">高校思政课 · 教材空间</p>
+        <h1>{{ course?.name }}</h1>
+        <p class="course-hero-description">{{ course?.description || '围绕教材内容，结合预习、课后巩固和考前冲刺，形成连续的学习辅助。' }}</p>
+        <div class="course-meta"><span>专题 {{ course?.chapters.length || 0 }}</span><span>学习阶段 3 个</span><span>AI 辅助学习</span></div>
+        <div v-if="canManageCitations" class="course-hero-actions">
+          <el-dropdown trigger="click" popper-class="course-management-dropdown" @command="handleManagementCommand">
+            <el-button class="hero-management-button" :icon="Setting">教材管理<el-icon class="el-icon--right"><ArrowDown /></el-icon></el-button>
+            <template #dropdown><el-dropdown-menu><el-dropdown-item v-if="auth.isAdmin" command="history" :icon="Clock">历史版本</el-dropdown-item><el-dropdown-item command="upload" :icon="UploadFilled">上传新版教材</el-dropdown-item><el-dropdown-item command="calibration" :icon="DocumentChecked">教材引用校准</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="chapter" :icon="CirclePlus" divided>添加专题</el-dropdown-item><el-dropdown-item v-if="auth.isAdmin" command="delete" :icon="Delete" class="management-danger-item" divided>删除教材</el-dropdown-item></el-dropdown-menu></template>
+          </el-dropdown>
+        </div>
+      </div>
+      <template #visual>
+        <div class="course-hero-summary">
+          <div><strong>{{ course?.chapters.length || 0 }}</strong><span>教材专题</span></div>
+          <div><strong>3</strong><span>学习阶段</span></div>
+          <div><strong>AI</strong><span>学习辅助</span></div>
+        </div>
+      </template>
+    </UiHero>
     <nav class="course-tabs" aria-label="教材内容导航"><a href="#overview">内容概览</a><a href="#chapters">专题章节</a><a href="#learning-path">学习路径</a></nav>
     <section class="course-tools"><el-card shadow="hover" class="course-tool-card" @click="router.push('/current-affairs')"><span class="tool-kicker">关联教材</span><h3>时政要点</h3><p>从现实议题回到教材知识，查看当前时政学习内容。</p><el-link type="primary" :underline="false">进入时政要点 →</el-link></el-card><el-card shadow="hover" class="course-tool-card" @click="router.push('/interaction')"><span class="tool-kicker">课堂场景</span><h3>课堂互动</h3><p>围绕当前教材专题生成讨论题、随堂问答和观点辨析。</p><el-link type="primary" :underline="false">进入课堂互动 →</el-link></el-card><el-card v-if="canManageCitations" shadow="hover" class="course-tool-card" @click="openCalibration"><span class="tool-kicker">教师与管理员工具</span><h3>教材引用校准</h3><p>{{ calibrationSummary }}</p><el-link type="primary" :underline="false">校准章节与页码 →</el-link></el-card></section>
     <KnowledgeGraph v-if="course" id="overview" :course-name="course.name" :chapters="course.chapters" @learn="(chapterId) => startLearning(chapterId, 'preview')" />
@@ -253,3 +274,349 @@ onMounted(loadCourse)
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.course-breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  color: var(--ink-400);
+  font-size: var(--fs-aux);
+}
+
+.course-detail-hero-v2 {
+  margin: 0;
+}
+
+.course-hero-eyebrow {
+  margin: 0;
+  color: rgb(255 255 255 / 72%);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.1em;
+}
+
+.course-hero-copy h1 {
+  max-width: 800px;
+  margin: var(--space-2) 0 var(--space-3);
+  font-size: var(--fs-page-title);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.course-hero-description {
+  max-width: 760px;
+  margin: 0;
+  color: rgb(255 255 255 / 80%);
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.course-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.course-meta span {
+  padding: 6px 10px;
+  color: rgb(255 255 255 / 82%);
+  background: rgb(255 255 255 / 9%);
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: 999px;
+  font-size: var(--fs-meta);
+}
+
+.course-hero-actions {
+  display: flex;
+  margin-top: var(--space-6);
+}
+
+.hero-management-button {
+  color: var(--blue-800);
+  background: #fff;
+  border-color: #fff;
+}
+
+.course-hero-summary {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-2);
+}
+
+.course-hero-summary > div {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: rgb(255 255 255 / 9%);
+  border: 1px solid rgb(255 255 255 / 20%);
+  border-radius: var(--radius-card);
+}
+
+.course-hero-summary strong {
+  min-width: 46px;
+  color: #fff;
+  font-size: var(--fs-page-title);
+}
+
+.course-hero-summary span {
+  color: rgb(255 255 255 / 72%);
+  font-size: var(--fs-aux);
+}
+
+.course-tabs {
+  display: flex;
+  gap: var(--space-1);
+  margin: var(--space-4) 0 0;
+  padding: var(--space-1);
+  overflow-x: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-input);
+  box-shadow: none;
+  scrollbar-width: none;
+}
+
+.course-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.course-tabs a {
+  flex: 1 0 auto;
+  padding: 10px 16px;
+  color: var(--ink-600);
+  border-radius: var(--radius-control);
+  font-size: var(--fs-aux);
+  font-weight: var(--fw-medium);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.course-tabs a:first-child {
+  color: var(--blue-600);
+  background: var(--blue-50);
+}
+
+.course-tools {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: var(--space-3);
+  margin: var(--space-6) 0;
+}
+
+.course-tool-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.course-tool-card:hover {
+  box-shadow: var(--shadow-1);
+  transform: translateY(-2px);
+}
+
+.course-tool-card h3 {
+  margin: var(--space-2) 0;
+  font-size: var(--fs-card-title);
+}
+
+.course-tool-card p {
+  min-height: 44px;
+  margin: 0 0 var(--space-3);
+  color: var(--ink-600);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+}
+
+.tool-kicker {
+  color: var(--blue-600);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+}
+
+.course-detail-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  align-items: start;
+  gap: var(--space-6);
+}
+
+.course-section-heading {
+  margin: var(--space-8) 0 var(--space-4);
+}
+
+.chapter-list {
+  display: grid;
+  gap: var(--space-3);
+}
+
+.chapter-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.chapter-card :deep(.el-card__body) {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-6);
+}
+
+.chapter-number {
+  color: var(--blue-600);
+  font-size: var(--fs-section);
+  font-weight: var(--fw-bold);
+}
+
+.chapter-main {
+  min-width: 0;
+}
+
+.chapter-label {
+  margin-bottom: var(--space-1);
+  color: var(--blue-600);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.08em;
+}
+
+.chapter-main h3 {
+  margin: 0 0 var(--space-2);
+  color: var(--ink-900);
+  font-size: var(--fs-card-title);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+.chapter-main p {
+  margin: 0;
+  color: var(--ink-600);
+  font-size: var(--fs-aux);
+  line-height: 1.7;
+}
+
+.chapter-actions {
+  display: flex;
+  gap: var(--space-2);
+  white-space: nowrap;
+}
+
+.chapter-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.course-side-column {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-8);
+}
+
+.course-side-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+}
+
+.course-note-card {
+  background: var(--blue-50);
+}
+
+:deep(.el-dialog) {
+  max-width: calc(100vw - 32px);
+}
+
+@media (max-width: 1023px) {
+  .course-detail-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .course-side-column {
+    margin-top: 0;
+  }
+}
+
+@media (max-width: 767px) {
+  .course-hero-copy h1 {
+    font-size: 24px;
+  }
+
+  .course-hero-description {
+    font-size: var(--fs-body);
+  }
+
+  .course-hero-summary {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .course-hero-summary > div {
+    grid-template-columns: 1fr;
+    gap: var(--space-1);
+    padding: var(--space-3);
+  }
+
+  .course-hero-summary strong {
+    min-width: 0;
+    font-size: var(--fs-section);
+  }
+
+  .course-tabs {
+    margin-top: var(--space-3);
+  }
+
+  .chapter-card :deep(.el-card__body) {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: start;
+    gap: var(--space-3);
+    padding: var(--space-4);
+  }
+
+  .chapter-number {
+    grid-column: 1;
+    grid-row: 1;
+    display: grid;
+    width: 36px;
+    height: 36px;
+    place-items: center;
+    background: var(--blue-50);
+    border-radius: var(--radius-input);
+    font-size: var(--fs-aux);
+  }
+
+  .chapter-main {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .chapter-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .chapter-actions :deep(.el-button) {
+    width: 100%;
+    min-width: 0;
+    padding-inline: var(--space-2);
+  }
+
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 389px) {
+  .course-hero-summary {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

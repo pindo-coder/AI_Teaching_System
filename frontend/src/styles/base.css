@@ -1,0 +1,59 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  min-width: 320px;
+  color: var(--ink-900);
+  background: var(--bg-page);
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: var(--fs-body);
+  font-weight: var(--fw-regular);
+}
+
+body {
+  min-width: 320px;
+  margin: 0;
+  color: var(--ink-900);
+  background: var(--bg-page);
+  overflow-x: hidden;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+a {
+  color: var(--color-primary);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  color: var(--ink-900);
+  font-weight: var(--fw-bold);
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue-400);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}

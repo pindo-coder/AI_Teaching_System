@@ -1,0 +1,38 @@
+:root {
+  --el-color-primary: var(--blue-600);
+  --el-color-primary-light-3: var(--blue-400);
+  --el-color-primary-light-5: var(--blue-200);
+  --el-color-primary-light-7: var(--blue-100);
+  --el-color-primary-light-8: var(--blue-50);
+  --el-color-primary-light-9: #f4f8fe;
+  --el-color-primary-dark-2: var(--blue-800);
+  --el-color-success: var(--color-success);
+  --el-color-warning: var(--color-warning);
+  --el-color-danger: var(--color-danger);
+  --el-border-radius-base: var(--radius-control);
+  --el-border-radius-small: 4px;
+  --el-border-radius-round: 999px;
+  --el-font-size-base: var(--fs-body);
+  --el-text-color-primary: var(--ink-900);
+  --el-text-color-regular: var(--ink-600);
+  --el-text-color-secondary: var(--ink-400);
+  --el-border-color: var(--line);
+  --el-border-color-light: var(--line);
+  --el-border-color-lighter: #eef1f6;
+  --el-fill-color-light: var(--blue-50);
+  --el-bg-color-page: var(--bg-page);
+}
+
+.el-button {
+  font-weight: var(--fw-medium);
+}
+
+.el-input__wrapper,
+.el-textarea__inner {
+  border-radius: var(--radius-input);
+}
+
+.el-dialog,
+.el-drawer {
+  border-radius: var(--radius-overlay);
+}

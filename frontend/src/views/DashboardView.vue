@@ -5,6 +5,7 @@ import { Bell, ChatDotRound, Collection, Connection, Document, Reading, TrendCha
 import { assignmentApi, type StudentAssignment, type TeacherAssignment } from '@/api/assignments'
 import { learningApi } from '@/api/learning'
 import AiLearningPet from '@/components/AiLearningPet.vue'
+import UiHero from '@/components/ui/UiHero.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { DashboardData, LearningStage } from '@/types'
 import type { AiPetAction, AiPetContext } from '@/types/aiPet'
@@ -81,14 +82,14 @@ onMounted(async () => {
 
 <template>
   <div v-loading="loading" class="dashboard-command-center">
-    <header class="dashboard-hero dashboard-command-hero">
+    <UiHero variant="dashboard">
       <div class="dashboard-hero-copy">
         <div class="dashboard-value-line"><span></span>新时代思想 · AI {{ auth.isTeacher ? '教学' : '学习' }}驾驶舱</div>
         <h1>{{ auth.isTeacher ? '以教材为主线，让每一次教学有迹可循' : `你好，${auth.user?.username}` }}</h1>
         <p>{{ auth.isTeacher ? '围绕教材专题布置任务、组织课堂互动，并通过真实学习行为掌握教学进展。' : '从教材出发，在真实问题中理解新时代中国，让专题、任务、笔记和时政形成一条学习路径。' }}</p>
         <div class="dashboard-hero-actions">
-          <el-button type="warning" size="large" @click="router.push(auth.isTeacher ? '/assignments' : continuePath)">{{ auth.isTeacher ? '布置学习任务' : latestProgress ? '继续当前专题' : '选择学习专题' }}</el-button>
-          <el-button size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>教材知识图谱</el-button>
+          <el-button type="primary" size="large" @click="router.push(auth.isTeacher ? '/assignments' : continuePath)">{{ auth.isTeacher ? '布置学习任务' : latestProgress ? '继续当前专题' : '选择学习专题' }}</el-button>
+          <el-button class="dashboard-secondary-action" size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>教材知识图谱</el-button>
         </div>
         <div class="dashboard-live-context">
           <span><small>{{ auth.isTeacher ? '当前教学内容' : '当前学习专题' }}</small><strong>{{ dashboard?.current_chapter?.title || '尚未选择专题' }}</strong></span>
@@ -96,8 +97,8 @@ onMounted(async () => {
           <span><small>综合进度</small><strong>{{ dashboard?.overall_progress || 0 }}%</strong></span>
         </div>
       </div>
-      <AiLearningPet :context="petContext" :loading="loading" @action="handlePetAction" />
-    </header>
+      <template #visual><AiLearningPet :context="petContext" :loading="loading" @action="handlePetAction" /></template>
+    </UiHero>
 
     <section v-if="!auth.isTeacher" class="dashboard-assignment-window" :class="{ empty: !pendingAssignments.length }">
       <div class="assignment-window-heading"><div><p class="eyebrow">教师布置 · 优先处理</p><h2><el-icon><Bell /></el-icon> 待完成任务 <span>{{ allPendingAssignments.length }}</span></h2><p>完成情况由实际学习行为自动统计，无需手动勾选。</p></div><el-button text type="primary" @click="router.push('/assignments')">查看全部任务 →</el-button></div>
@@ -137,3 +138,505 @@ onMounted(async () => {
     <section class="dashboard-quick-grid"><article v-for="item in quickLinks" :key="item.path" @click="router.push(item.path)"><el-icon :size="27"><component :is="item.icon" /></el-icon><h3>{{ item.title }}</h3><p>{{ item.description }}</p><span>立即进入 →</span></article></section>
   </div>
 </template>
+
+<style scoped>
+.dashboard-command-center {
+  display: grid;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: var(--page-max-width);
+  margin: 0 auto;
+}
+
+.dashboard-hero-copy {
+  max-width: 720px;
+}
+
+.dashboard-value-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: rgb(255 255 255 / 76%);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.1em;
+}
+
+.dashboard-value-line span {
+  width: 28px;
+  height: 2px;
+  background: rgb(255 255 255 / 70%);
+}
+
+.dashboard-hero-copy h1 {
+  max-width: 680px;
+  margin: var(--space-3) 0 var(--space-3);
+  font-size: var(--fs-page-title);
+  line-height: 1.35;
+}
+
+.dashboard-hero-copy > p {
+  max-width: 680px;
+  margin: 0;
+  color: rgb(255 255 255 / 80%);
+  font-size: 16px;
+  line-height: 1.75;
+}
+
+.dashboard-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+}
+
+.dashboard-hero-actions :deep(.el-button) {
+  width: auto;
+  margin-left: 0;
+  white-space: nowrap;
+}
+
+.dashboard-hero-actions :deep(.el-button--primary) {
+  color: var(--blue-800);
+  background: #fff;
+  border-color: #fff;
+}
+
+.dashboard-secondary-action {
+  color: #fff !important;
+  background: rgb(255 255 255 / 8%) !important;
+  border-color: rgb(255 255 255 / 34%) !important;
+}
+
+.dashboard-live-context {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) repeat(2, minmax(100px, 0.55fr));
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+}
+
+.dashboard-live-context > span {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: rgb(18 44 115 / 34%);
+  border: 1px solid rgb(255 255 255 / 18%);
+  border-radius: var(--radius-input);
+}
+
+.dashboard-live-context small {
+  color: rgb(255 255 255 / 65%);
+  font-size: var(--fs-meta);
+}
+
+.dashboard-live-context strong {
+  overflow: hidden;
+  color: #fff;
+  font-size: var(--fs-aux);
+  font-weight: var(--fw-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dashboard-assignment-window {
+  position: relative;
+  margin: 0;
+  padding: var(--space-6);
+  overflow: hidden;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--color-warning);
+  border-radius: var(--radius-card);
+  box-shadow: none;
+}
+
+.dashboard-assignment-window::before {
+  display: none;
+}
+
+.dashboard-assignment-window.empty {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--ink-400);
+}
+
+.assignment-window-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+
+.assignment-window-heading h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: var(--space-1) 0;
+  font-size: var(--fs-section);
+}
+
+.assignment-window-heading h2 span {
+  color: var(--color-warning);
+}
+
+.assignment-window-heading p {
+  margin: 0;
+  color: var(--ink-600);
+}
+
+.dashboard-assignment-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.dashboard-assignment-item {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-input);
+}
+
+.dashboard-assignment-item.urgent {
+  border-left: 3px solid var(--color-warning);
+}
+
+.dashboard-assignment-item.overdue {
+  background: var(--color-danger-bg);
+  border-left: 3px solid var(--color-danger);
+}
+
+.dashboard-assignment-item h3 {
+  margin: var(--space-2) 0;
+  font-size: var(--fs-card-title);
+}
+
+.dashboard-assignment-item p {
+  margin: 0;
+  color: var(--ink-600);
+  font-size: var(--fs-aux);
+  line-height: 1.6;
+}
+
+.assignment-kicker {
+  color: var(--color-warning);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-medium);
+}
+
+.assignment-inline-progress {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.dashboard-context-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) repeat(2, minmax(160px, 0.45fr));
+  gap: var(--space-3);
+  margin: 0;
+}
+
+.dashboard-current-topic,
+.dashboard-data-card,
+.dashboard-learning-path,
+.dashboard-ai-insight {
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: none;
+}
+
+.dashboard-current-topic {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-6);
+}
+
+.dashboard-current-topic h2,
+.dashboard-panel-heading h2,
+.dashboard-ai-insight h2 {
+  margin: var(--space-2) 0 var(--space-1);
+  font-size: var(--fs-section);
+}
+
+.dashboard-current-topic p,
+.dashboard-ai-insight p {
+  margin: 0;
+  color: var(--ink-600);
+  line-height: 1.7;
+}
+
+.dashboard-card-kicker {
+  color: var(--blue-600);
+  font-size: var(--fs-meta);
+  font-weight: var(--fw-bold);
+  letter-spacing: 0.08em;
+}
+
+.dashboard-progress-ring {
+  display: grid;
+  width: 72px;
+  height: 72px;
+  place-items: center;
+  background: conic-gradient(var(--blue-600) var(--dashboard-progress), var(--blue-100) 0);
+  border-radius: 50%;
+}
+
+.dashboard-progress-ring span {
+  display: grid;
+  width: 56px;
+  height: 56px;
+  place-items: center;
+  color: var(--blue-800);
+  background: var(--bg-card);
+  border-radius: 50%;
+  font-weight: var(--fw-bold);
+}
+
+.dashboard-data-card {
+  display: grid;
+  align-content: center;
+  gap: var(--space-1);
+  padding: var(--space-6);
+}
+
+.dashboard-data-card > span,
+.dashboard-data-card small {
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.dashboard-data-card strong {
+  color: var(--blue-800);
+  font-size: var(--fs-page-title);
+}
+
+.dashboard-learning-command {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+  gap: var(--space-4);
+}
+
+.dashboard-learning-path,
+.dashboard-ai-insight {
+  padding: var(--space-6);
+}
+
+.dashboard-panel-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.dashboard-stage-rail {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-6);
+}
+
+.dashboard-stage-rail::before {
+  display: none;
+}
+
+.dashboard-stage-step {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  color: var(--ink-600);
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-input);
+  cursor: pointer;
+  text-align: left;
+}
+
+.dashboard-stage-step::before {
+  display: none;
+}
+
+.dashboard-stage-step:hover,
+.dashboard-stage-step.active {
+  background: var(--blue-50);
+  border-color: var(--blue-400);
+  transform: none;
+}
+
+.dashboard-stage-step.completed {
+  border-left: 3px solid var(--color-success);
+}
+
+.dashboard-stage-step > span,
+.dashboard-stage-step small,
+.dashboard-stage-step em {
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.dashboard-stage-step strong {
+  color: var(--ink-900);
+  font-size: var(--fs-card-title);
+}
+
+.dashboard-stage-step em {
+  color: var(--blue-600);
+  font-style: normal;
+  font-weight: var(--fw-bold);
+}
+
+.dashboard-ai-insight {
+  display: flex;
+  flex-direction: column;
+}
+
+.dashboard-ai-mark {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  color: var(--blue-600);
+  background: var(--blue-50);
+  border-radius: var(--radius-input);
+  font-weight: var(--fw-bold);
+}
+
+.dashboard-ai-insight > div {
+  margin: var(--space-4) 0;
+}
+
+.dashboard-ai-insight > .el-button {
+  align-self: flex-start;
+  margin-top: auto;
+}
+
+.dashboard-module-heading {
+  margin: var(--space-2) 0 0;
+}
+
+.dashboard-quick-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.dashboard-quick-grid article {
+  position: static;
+  padding: var(--space-6);
+  overflow: visible;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  cursor: pointer;
+  transition: transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.dashboard-quick-grid article::after {
+  display: none;
+}
+
+.dashboard-quick-grid article:hover {
+  box-shadow: var(--shadow-1);
+  transform: translateY(-2px);
+}
+
+.dashboard-quick-grid h3 {
+  margin: var(--space-4) 0 var(--space-2);
+  font-size: var(--fs-card-title);
+}
+
+.dashboard-quick-grid p {
+  min-height: 44px;
+  margin: 0 0 var(--space-4);
+  color: var(--ink-600);
+  line-height: 1.6;
+}
+
+.dashboard-quick-grid > article > span {
+  color: var(--blue-600);
+  font-size: var(--fs-aux);
+  font-weight: var(--fw-medium);
+}
+
+@media (max-width: 1023px) {
+  .dashboard-assignment-list,
+  .dashboard-quick-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-context-strip,
+  .dashboard-learning-command {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-context-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .dashboard-current-topic {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 767px) {
+  .dashboard-command-center {
+    gap: var(--space-4);
+  }
+
+  .dashboard-hero-copy h1 {
+    font-size: 24px;
+  }
+
+  .dashboard-hero-copy > p {
+    font-size: var(--fs-body);
+  }
+
+  .dashboard-live-context {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-live-context strong {
+    white-space: normal;
+  }
+
+  .dashboard-assignment-window {
+    padding: var(--space-4);
+  }
+
+  .assignment-window-heading {
+    flex-direction: column;
+  }
+
+  .dashboard-assignment-list,
+  .dashboard-context-strip,
+  .dashboard-quick-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-current-topic {
+    grid-column: auto;
+  }
+
+  .dashboard-stage-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .dashboard-panel-heading,
+  .section-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .dashboard-module-heading > span {
+    display: none;
+  }
+}
+</style>

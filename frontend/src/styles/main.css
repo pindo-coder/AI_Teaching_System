@@ -81,22 +81,12 @@ a { color: var(--primary); text-decoration: none; }
 .course-hero { display: flex; justify-content: space-between; gap: 28px; margin-top: 24px; padding: 34px; color: #fff; background: linear-gradient(125deg, #173b96, #356ae6); border-radius: 18px; }
 .course-hero .eyebrow, .course-hero p { color: #dce7ff !important; }
 .course-breadcrumb { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-.course-detail-hero { position: relative; min-height: 370px; align-items: center; overflow: hidden; background: linear-gradient(115deg, #236ed7 0%, #2a9fdf 50%, #25b6c9 100%); }
-.course-detail-hero::before { position: absolute; inset: -45% 42% auto -8%; height: 500px; content: ''; background: radial-gradient(circle, rgba(117, 203, 255, .42), transparent 65%); }
 .course-hero-copy { position: relative; z-index: 1; flex: 1; min-width: 0; }
 .course-meta { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 20px; color: #e7f5ff; font-size: 13px; }
 .course-intro-card { max-width: 700px; margin-top: 26px; padding: 18px 22px; background: rgba(131, 197, 242, .3); border: 1px solid rgba(255, 255, 255, .36); border-radius: 16px; }
 .intro-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; font-size: 17px; }
 .intro-heading span { color: #def3ff; font-size: 12px; }
 .course-intro-card p { color: #eff9ff; line-height: 1.8; }
-.course-hero-visual { position: relative; flex: 0 0 380px; height: 270px; }
-.hero-orbit { position: absolute; inset: 25px 50px; border: 2px solid rgba(197, 247, 255, .6); border-radius: 50%; box-shadow: 0 0 0 18px rgba(170, 244, 255, .12), 0 0 0 42px rgba(170, 244, 255, .08); }
-.hero-core { position: absolute; top: 88px; left: 145px; display: grid; width: 88px; height: 88px; place-items: center; color: #216bc1; background: linear-gradient(145deg, #fff, #b9eaff); border: 6px solid rgba(255, 255, 255, .7); border-radius: 28px; box-shadow: 0 12px 30px rgba(14, 73, 146, .25); font-size: 19px; font-weight: 800; line-height: 1.1; text-align: center; }
-.hero-metric { position: absolute; display: grid; min-width: 112px; padding: 12px 16px; color: #fff; background: rgba(92, 181, 233, .44); border: 1px solid rgba(255, 255, 255, .3); border-radius: 16px; text-align: center; }
-.hero-metric strong { font-size: 24px; }
-.hero-metric span { margin-top: 4px; color: #e2f7ff; font-size: 12px; }
-.metric-top { top: 0; left: 135px; }.metric-left { top: 126px; left: 0; }.metric-right { top: 126px; right: 0; }
-.hero-admin-actions { position: absolute; top: 24px; right: 26px; z-index: 2; display: flex; gap: 8px; }
 .hero-admin-button { position: static; }
 .hero-management-button { min-width: 142px; height: 42px; padding: 0 20px; color: #1852aa; background: rgba(255, 255, 255, .94); border-color: rgba(255, 255, 255, .8); border-radius: 22px; box-shadow: 0 10px 28px rgba(19, 71, 143, .2); font-weight: 700; }
 .hero-management-button:hover, .hero-management-button:focus { color: #14478f; background: #fff; border-color: #fff; transform: translateY(-1px); }
@@ -383,9 +373,6 @@ a { color: var(--primary); text-decoration: none; }
   .dashboard-assignment-list, .dashboard-quick-grid, .teacher-assignment-summary, .assignment-form-grid { grid-template-columns: 1fr; }
   .assignment-window-heading, .assignment-empty { align-items: flex-start; flex-direction: column; }
   .page-header, .course-hero, .section-heading { align-items: flex-start; flex-direction: column; }
-  .course-detail-hero { flex-direction: column; align-items: stretch; }
-  .course-hero-visual { align-self: center; flex-basis: 230px; transform: scale(.82); transform-origin: top center; margin-bottom: -42px; }
-  .hero-admin-actions { position: static; align-self: flex-start; flex-wrap: wrap; }
   .course-tabs { overflow-x: auto; margin-right: 0; margin-left: 0; }
   .course-tabs a { min-width: 110px; white-space: nowrap; }
   .knowledge-graph-heading { align-items: flex-start; flex-direction: column; }.knowledge-graph-stage { min-height: 720px; }.knowledge-radial { min-height: 620px; }.knowledge-node { width: 100px; height: 100px; padding: 10px; }.knowledge-core { width: 130px; height: 130px; }.knowledge-core strong { font-size: 17px; }

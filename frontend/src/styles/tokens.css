@@ -1,0 +1,59 @@
+:root {
+  --blue-50: #eef4fd;
+  --blue-100: #d7e5fa;
+  --blue-200: #aecbf4;
+  --blue-400: #6d9fe8;
+  --blue-600: #2857d7;
+  --blue-800: #1c40a4;
+  --blue-900: #122c73;
+
+  --ink-900: #172236;
+  --ink-600: #526073;
+  --ink-400: #718096;
+  --line: #e6eaf0;
+  --bg-page: #f5f7fb;
+  --bg-card: #fff;
+
+  --color-primary: var(--blue-600);
+  --color-success: #15803d;
+  --color-success-bg: #eaf3de;
+  --color-warning: #b45309;
+  --color-warning-bg: #faeada;
+  --color-danger: #dc2626;
+  --color-danger-bg: #fcebeb;
+  --color-party: #b91c1c;
+
+  --fs-page-title: 28px;
+  --fs-section: 20px;
+  --fs-card-title: 16px;
+  --fs-body: 14px;
+  --fs-aux: 13px;
+  --fs-meta: 12px;
+  --fw-regular: 400;
+  --fw-medium: 500;
+  --fw-bold: 700;
+
+  --radius-control: 6px;
+  --radius-input: 10px;
+  --radius-card: 14px;
+  --radius-overlay: 20px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --page-padding: clamp(16px, 4vw, 40px);
+  --page-max-width: 1280px;
+
+  --shadow-1: 0 1px 3px rgb(23 34 54 / 6%);
+  --shadow-2: 0 8px 24px rgb(23 34 54 / 10%);
+  --hero-gradient: linear-gradient(120deg, var(--blue-800), var(--blue-600));
+
+  /* 旧页面兼容别名，在所有页面迁移完成前保留。 */
+  --primary: var(--color-primary);
+  --muted: var(--ink-400);
+  --border: var(--line);
+  --danger: var(--color-danger);
+}

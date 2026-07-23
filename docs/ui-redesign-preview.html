@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>思政智教 · UI 改造效果预览</title>
+<style>
+/* ===== tokens.css（与 docs/ui-design-guide.md 一致） ===== */
+:root {
+  --blue-50:#EEF4FD; --blue-100:#D7E5FA; --blue-200:#AECBF4; --blue-400:#6D9FE8;
+  --blue-600:#2857D7; --blue-800:#1C40A4; --blue-900:#122C73;
+  --ink-900:#172236; --ink-600:#526073; --ink-400:#718096;
+  --line:#E6EAF0; --bg-page:#F5F7FB; --bg-card:#FFFFFF;
+  --color-success:#15803D; --color-success-bg:#EAF3DE;
+  --color-warning:#B45309; --color-warning-bg:#FAEEDA;
+  --color-danger:#DC2626;  --color-danger-bg:#FCEBEB;
+  --color-party:#B91C1C;
+  --fs-page-title:28px; --fs-section:20px; --fs-card-title:16px;
+  --fs-body:14px; --fs-aux:13px; --fs-meta:12px;
+  --radius-control:6px; --radius-input:10px; --radius-card:14px; --radius-overlay:20px;
+  --space-1:4px; --space-2:8px; --space-3:12px; --space-4:16px; --space-6:24px; --space-8:32px;
+  --shadow-1:0 1px 3px rgba(23,34,54,.06);
+  --shadow-2:0 8px 24px rgba(23,34,54,.10);
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body {
+  font-family:Inter,"PingFang SC","Microsoft YaHei",sans-serif;
+  background:var(--bg-page); color:var(--ink-900);
+  font-size:var(--fs-body); line-height:1.6;
+}
+button { font-family:inherit; cursor:pointer; }
+:focus-visible { outline:2px solid var(--blue-400); outline-offset:2px; }
+
+/* ===== 预览切换条（非产品部分） ===== */
+.preview-bar {
+  display:flex; align-items:center; gap:12px;
+  padding:10px 20px; background:var(--ink-900); color:#fff;
+  font-size:var(--fs-meta); position:sticky; top:0; z-index:50; overflow-x:auto;
+}
+.preview-bar strong,.preview-bar .seg,.preview-bar span.hint { flex:none; }
+.preview-bar .seg { display:flex; background:rgba(255,255,255,.12); border-radius:999px; padding:3px; }
+.preview-bar .seg button {
+  border:0; background:transparent; color:#C6D0E0; font-size:var(--fs-meta);
+  padding:5px 16px; border-radius:999px;
+}
+.preview-bar .seg button.on { background:#fff; color:var(--ink-900); font-weight:500; }
+.preview-bar span.hint { color:#8A96A9; }
+
+/* ===== 顶栏：64px、白底、1px 边线 ===== */
+.topbar {
+  height:64px; background:#fff; border-bottom:1px solid var(--line);
+  display:flex; align-items:center; gap:36px;
+  padding:0 clamp(16px,4vw,40px);
+}
+.brand { display:flex; flex-direction:column; line-height:1.15; }
+.brand strong { font-size:17px; font-weight:700; color:var(--blue-800); }
+.brand small { font-size:11px; color:var(--ink-400); letter-spacing:1.5px; }
+.topbar nav { display:flex; gap:26px; margin-left:auto; }
+.topbar nav a {
+  font-size:var(--fs-body); color:var(--ink-600); text-decoration:none; padding:4px 0;
+}
+.topbar nav a.on { color:var(--blue-600); font-weight:500; box-shadow:inset 0 -2px var(--blue-600); }
+.user-chip { font-size:var(--fs-aux); color:var(--ink-600); border:1px solid var(--line); border-radius:999px; padding:6px 14px; background:#fff; }
+
+.page { max-width:1280px; margin:0 auto; padding:28px clamp(16px,4vw,40px) 64px; }
+.eyebrow { font-size:var(--fs-meta); font-weight:500; color:var(--blue-600); letter-spacing:1px; }
+.page-title { font-size:var(--fs-page-title); font-weight:700; line-height:1.3; margin:6px 0 4px; }
+.page-sub { font-size:var(--fs-aux); color:var(--ink-600); }
+
+/* ===== Hero：全页唯一渐变 ===== */
+.hero {
+  margin-top:24px; border-radius:var(--radius-card); color:#fff;
+  background:linear-gradient(120deg, var(--blue-800), var(--blue-600));
+  padding:28px 32px; display:flex; align-items:center; justify-content:space-between; gap:28px;
+}
+.hero h2 { font-size:20px; font-weight:700; margin:4px 0 6px; }
+.hero p { font-size:var(--fs-aux); color:#D7E5FA; }
+.hero .progress { margin-top:14px; max-width:420px; }
+.progress { height:6px; background:rgba(255,255,255,.25); border-radius:3px; overflow:hidden; }
+.progress > i { display:block; height:100%; background:#fff; border-radius:3px; }
+.progress-label { font-size:var(--fs-meta); color:#D7E5FA; margin-top:6px; display:block; }
+.btn {
+  border-radius:8px; font-size:var(--fs-body); padding:9px 20px; border:1px solid transparent;
+  transition:transform .15s ease, box-shadow .15s ease;
+}
+.btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-1); }
+.btn-primary { background:var(--blue-600); color:#fff; }
+.btn-white { background:#fff; color:var(--blue-800); font-weight:500; }
+.btn-plain { background:#fff; color:var(--blue-600); border-color:var(--blue-200); }
+.btn-ghost { background:#fff; color:var(--ink-600); border-color:var(--line); }
+
+/* ===== 指标卡：灰底无框 ===== */
+.stat-grid { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:24px; }
+.stat {
+  background:#EDF1F7; border-radius:var(--radius-card); padding:16px 18px;
+}
+.stat span { font-size:var(--fs-aux); color:var(--ink-600); display:block; }
+.stat strong { font-size:24px; font-weight:500; display:block; margin-top:4px; }
+.stat strong small { font-size:var(--fs-meta); color:var(--ink-400); font-weight:400; margin-left:4px; }
+
+/* ===== 区块标题 ===== */
+.section-head { display:flex; align-items:baseline; justify-content:space-between; margin:36px 0 14px; }
+.section-head h3 { font-size:var(--fs-section); font-weight:700; }
+.section-head a { font-size:var(--fs-aux); color:var(--blue-600); text-decoration:none; }
+
+/* ===== 任务窗口：白卡 + 左侧语义色条 ===== */
+.panel { background:#fff; border:1px solid var(--line); border-radius:var(--radius-card); }
+.assign-panel { padding:20px 22px; border-left:3px solid var(--color-warning); }
+.assign-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; }
+.assign-head h4 { font-size:var(--fs-card-title); font-weight:500; display:flex; align-items:center; gap:8px; }
+.count-pill { background:var(--color-warning); color:#fff; border-radius:999px; font-size:var(--fs-meta); padding:1px 9px; }
+.assign-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.assign-item { border:1px solid var(--line); border-radius:12px; padding:14px 16px; display:grid; gap:8px; }
+.assign-item h5 { font-size:var(--fs-body); font-weight:500; }
+.assign-item p { font-size:var(--fs-meta); color:var(--ink-400); }
+.assign-item .progress { background:#EEF1F6; }
+.assign-item .progress > i { background:var(--blue-600); }
+.assign-foot { display:flex; justify-content:space-between; align-items:center; font-size:var(--fs-meta); color:var(--ink-600); }
+
+/* ===== 语义标签 ===== */
+.tag { font-size:var(--fs-meta); border-radius:var(--radius-control); padding:2px 9px; white-space:nowrap; }
+.tag-success { color:var(--color-success); background:var(--color-success-bg); }
+.tag-warning { color:var(--color-warning); background:var(--color-warning-bg); }
+.tag-danger  { color:var(--color-danger);  background:var(--color-danger-bg); }
+.tag-primary { color:var(--blue-800); background:var(--blue-50); }
+.tag-info    { color:var(--ink-600); background:#EDF1F7; }
+.tag-party   { color:#fff; background:var(--color-party); }
+
+/* ===== 课程卡 ===== */
+.course-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:16px; }
+.course-card {
+  background:#fff; border:1px solid var(--line); border-radius:var(--radius-card);
+  padding:18px 20px; transition:transform .15s ease, box-shadow .15s ease; cursor:pointer;
+}
+.course-card:hover { transform:translateY(-2px); box-shadow:var(--shadow-1); }
+.course-top { display:flex; justify-content:space-between; align-items:center; }
+.course-top .kicker { font-size:var(--fs-meta); font-weight:500; color:var(--blue-600); }
+.course-card h4 { font-size:var(--fs-card-title); font-weight:500; margin:8px 0 4px; }
+.course-card .meta { font-size:var(--fs-aux); color:var(--ink-600); }
+.course-card .progress { background:#EEF1F6; margin-top:14px; }
+.course-card .progress > i { background:var(--blue-600); }
+.course-foot { display:flex; justify-content:space-between; margin-top:8px; font-size:var(--fs-meta); color:var(--ink-400); }
+
+/* ===== 复习卡 ===== */
+.review-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; }
+.review-card { background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }
+.review-card h5 { font-size:var(--fs-body); font-weight:500; margin:6px 0 2px; }
+.review-card p { font-size:var(--fs-meta); color:var(--ink-400); }
+.review-foot { display:flex; justify-content:space-between; align-items:center; margin-top:12px; }
+
+/* ===== 时政条（思政红点睛） ===== */
+.news-strip {
+  margin-top:24px; display:flex; align-items:center; gap:12px;
+  background:#fff; border:1px solid var(--line); border-radius:12px; padding:12px 16px;
+}
+.news-strip b { font-size:var(--fs-aux); font-weight:500; }
+.news-strip span { font-size:var(--fs-aux); color:var(--ink-600); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+/* ===== 课程详情：章节列表 ===== */
+.crumb { font-size:var(--fs-aux); color:var(--ink-400); }
+.crumb a { color:var(--ink-600); text-decoration:none; }
+.topic-list { display:grid; gap:10px; margin-top:16px; }
+.topic {
+  background:#fff; border:1px solid var(--line); border-radius:12px;
+  padding:14px 18px; display:flex; align-items:center; gap:16px;
+}
+.topic .no {
+  width:34px; height:34px; border-radius:10px; background:var(--blue-50); color:var(--blue-800);
+  display:grid; place-items:center; font-size:var(--fs-aux); font-weight:500; flex:none;
+}
+.topic .t { flex:1; min-width:0; }
+.topic .t b { font-size:var(--fs-body); font-weight:500; display:block; }
+.topic .t span { font-size:var(--fs-meta); color:var(--ink-400); }
+.stage-btns { display:flex; gap:8px; }
+.stage-btns .btn { padding:6px 14px; font-size:var(--fs-aux); }
+
+.detail-grid { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(300px,.9fr); gap:16px; margin-top:16px; align-items:start; }
+/* 知识图谱：全站唯一沉浸式深色区（保留） */
+.graph {
+  background:#0B2246; border-radius:var(--radius-card); color:#fff; padding:18px 20px 22px;
+  position:relative; overflow:hidden; min-height:380px;
+}
+.graph h4 { font-size:var(--fs-card-title); font-weight:500; }
+.graph p { font-size:var(--fs-meta); color:#A9C4EC; margin-top:2px; }
+.graph .stage { position:relative; height:300px; margin-top:8px; }
+.bubble {
+  position:absolute; border-radius:50%; display:grid; place-items:center; text-align:center;
+  background:#133564; border:1.5px solid #3E8FE0; color:#BFE0FF; font-size:11px; padding:8px;
+}
+.bubble.core { background:#B45309; border-color:#EF9F27; color:#FFF3DD; font-weight:500; }
+
+/* ===== 登录页 ===== */
+.login-wrap { min-height:calc(100vh - 64px - 41px); display:grid; place-items:center; padding:32px 16px; }
+.login-card { width:min(100%,380px); background:#fff; border:1px solid var(--line); border-radius:var(--radius-overlay); padding:36px 34px; }
+.login-card .brand { align-items:center; margin-bottom:6px; }
+.login-card h2 { font-size:var(--fs-section); font-weight:700; text-align:center; margin:14px 0 4px; }
+.login-card .sub { font-size:var(--fs-aux); color:var(--ink-600); text-align:center; margin-bottom:24px; }
+.field { margin-bottom:14px; }
+.field label { font-size:var(--fs-aux); color:var(--ink-600); display:block; margin-bottom:6px; }
+.field input {
+  width:100%; height:42px; border:1px solid var(--line); border-radius:var(--radius-input);
+  padding:0 14px; font-size:var(--fs-body); font-family:inherit; color:var(--ink-900); background:#fff;
+}
+.field input:focus { outline:2px solid var(--blue-400); outline-offset:1px; border-color:var(--blue-400); }
+.login-card .btn-primary { width:100%; height:44px; font-weight:500; margin-top:6px; }
+.login-links { display:flex; justify-content:space-between; margin-top:16px; font-size:var(--fs-aux); }
+.login-links a { color:var(--blue-600); text-decoration:none; }
+
+/* ===== 悬浮 AI 助教 ===== */
+.ai-fab {
+  position:fixed; right:24px; bottom:24px; width:52px; height:52px; border-radius:50%;
+  background:var(--blue-600); color:#fff; border:0; font-size:20px; box-shadow:var(--shadow-2);
+  display:grid; place-items:center;
+}
+.view { display:none; } .view.on { display:block; }
+@media (max-width:1024px) {
+  .stat-grid,.course-grid { grid-template-columns:repeat(2,1fr); }
+  .assign-grid,.review-grid { grid-template-columns:1fr; }
+  .detail-grid { grid-template-columns:1fr; }
+  .topbar nav { display:none; }
+}
+@media (max-width:767px) {
+  .preview-bar { padding-inline:12px; }
+  .preview-bar span.hint { display:none; }
+  .page { padding-top:20px; }
+  .hero {
+    align-items:stretch !important;
+    flex-direction:column;
+    padding:24px 20px;
+  }
+  .hero h2,.hero h2[style] { font-size:24px !important; overflow-wrap:anywhere; }
+  .hero .btn { align-self:flex-start; width:auto; white-space:nowrap; }
+  .stat-grid,.course-grid { grid-template-columns:1fr; }
+  .topic {
+    display:grid;
+    grid-template-columns:34px minmax(0,1fr);
+    align-items:start;
+    gap:10px 12px;
+    padding:14px;
+  }
+  .topic .t { overflow-wrap:anywhere; word-break:normal; }
+  .topic > .tag { grid-column:2; justify-self:start; }
+  .stage-btns {
+    grid-column:1 / -1;
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    width:100%;
+  }
+  .stage-btns .btn { width:100%; min-width:0; padding-inline:8px; }
+  .login-card { padding:30px 24px; }
+}
+</style>
+</head>
+<body>
+
+<div class="preview-bar">
+  <strong style="font-size:13px;">UI 改造预览</strong>
+  <div class="seg">
+    <button class="on" data-view="dashboard">学习工作台</button>
+    <button data-view="course">课程详情</button>
+    <button data-view="login">登录页</button>
+  </div>
+  <span class="hint">静态高保真稿 · 应用 docs/ui-design-guide.md 设计令牌</span>
+</div>
+
+<!-- ================= 学习工作台 ================= -->
+<div class="view on" id="view-dashboard">
+  <header class="topbar">
+    <div class="brand"><strong>思政智教</strong><small>AI TEACHING</small></div>
+    <nav>
+      <a href="#">教学班</a><a href="#" class="on">课程中心</a><a href="#">资料中心</a>
+      <a href="#">学习任务</a><a href="#">笔记空间</a><a href="#">今日复习</a><a href="#">课堂互动</a>
+    </nav>
+    <span class="user-chip">张同学 · 学生</span>
+  </header>
+
+  <main class="page">
+    <span class="eyebrow">学习工作台</span>
+    <h1 class="page-title">早上好，张同学</h1>
+    <p class="page-sub">今天有 6 项复习到期，1 个学习任务明天截止。</p>
+
+    <section class="hero">
+      <div>
+        <span class="eyebrow" style="color:#AECBF4;">继续学习</span>
+        <h2>马克思主义基本原理 · 专题三：实践与认识</h2>
+        <p>上次读到「实践是检验真理的唯一标准」，教材第 58—62 页</p>
+        <div class="progress"><i style="width:65%"></i></div>
+        <span class="progress-label">本专题已完成 65%</span>
+      </div>
+      <button class="btn btn-white">继续学习</button>
+    </section>
+
+    <div class="stat-grid">
+      <div class="stat"><span>连续学习</span><strong>12<small>天</small></strong></div>
+      <div class="stat"><span>已完成任务点</span><strong>38<small>/ 52</small></strong></div>
+      <div class="stat"><span>今日待复习</span><strong>6<small>项</small></strong></div>
+      <div class="stat"><span>我的笔记</span><strong>24<small>篇</small></strong></div>
+    </div>
+
+    <div class="section-head"><h3>学习任务</h3><a href="#">全部任务</a></div>
+    <section class="panel assign-panel">
+      <div class="assign-head">
+        <h4>近期待完成 <span class="count-pill">3</span></h4>
+        <span style="font-size:var(--fs-meta);color:var(--ink-400);">按截止时间排序</span>
+      </div>
+      <div class="assign-grid">
+        <div class="assign-item">
+          <div style="display:flex;justify-content:space-between;"><span class="tag tag-warning">明天截止</span><span class="tag tag-primary">预习</span></div>
+          <h5>专题三预习：通读教材并标记疑问</h5>
+          <p>马克思主义基本原理 · 王老师</p>
+          <div class="progress"><i style="width:70%"></i></div>
+          <div class="assign-foot"><span>进度 70%</span><span>7 月 24 日截止</span></div>
+        </div>
+        <div class="assign-item">
+          <div style="display:flex;justify-content:space-between;"><span class="tag tag-danger">已逾期</span><span class="tag tag-primary">巩固</span></div>
+          <h5>专题二巩固练习：AI 问答 3 轮</h5>
+          <p>马克思主义基本原理 · 王老师</p>
+          <div class="progress"><i style="width:40%"></i></div>
+          <div class="assign-foot"><span>进度 40%</span><span>7 月 21 日截止</span></div>
+        </div>
+        <div class="assign-item">
+          <div style="display:flex;justify-content:space-between;"><span class="tag tag-info">7 月 28 日截止</span><span class="tag tag-primary">笔记</span></div>
+          <h5>整理「认识的辩证过程」专题笔记</h5>
+          <p>马克思主义基本原理 · 王老师</p>
+          <div class="progress"><i style="width:15%"></i></div>
+          <div class="assign-foot"><span>进度 15%</span><span>7 月 28 日截止</span></div>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-head"><h3>我的课程</h3><a href="#">课程中心</a></div>
+    <div class="course-grid">
+      <article class="course-card">
+        <div class="course-top"><span class="kicker">必修 · 2026 春</span><span class="tag tag-success">已发布</span></div>
+        <h4>马克思主义基本原理</h4>
+        <div class="meta">12 专题 · 已完成 65%</div>
+        <div class="progress"><i style="width:65%"></i></div>
+        <div class="course-foot"><span>学到：专题三</span><span>65%</span></div>
+      </article>
+      <article class="course-card">
+        <div class="course-top"><span class="kicker">必修 · 2026 春</span><span class="tag tag-success">已发布</span></div>
+        <h4>毛泽东思想和中国特色社会主义理论体系概论</h4>
+        <div class="meta">14 专题 · 已完成 30%</div>
+        <div class="progress"><i style="width:30%"></i></div>
+        <div class="course-foot"><span>学到：专题四</span><span>30%</span></div>
+      </article>
+      <article class="course-card">
+        <div class="course-top"><span class="kicker">必修 · 2026 春</span><span class="tag tag-info">未开始</span></div>
+        <h4>中国近现代史纲要</h4>
+        <div class="meta">10 专题 · 8 月开课</div>
+        <div class="progress"><i style="width:0%"></i></div>
+        <div class="course-foot"><span>—</span><span>0%</span></div>
+      </article>
+    </div>
+
+    <div class="section-head"><h3>今日复习 · 间隔记忆</h3><a href="#">复习计划</a></div>
+    <div class="review-grid">
+      <div class="review-card">
+        <div style="display:flex;justify-content:space-between;"><span class="tag tag-primary">第 2 次复习</span><span class="tag tag-warning">待复习</span></div>
+        <h5>实践的基本特征</h5><p>专题三 · 上次复习 2 天前</p>
+        <div class="review-foot"><span style="font-size:var(--fs-meta);color:var(--ink-400);">间隔 1→2→4→7→15→30 天</span><button class="btn btn-plain" style="padding:5px 14px;font-size:var(--fs-aux);">开始</button></div>
+      </div>
+      <div class="review-card">
+        <div style="display:flex;justify-content:space-between;"><span class="tag tag-primary">第 4 次复习</span><span class="tag tag-warning">待复习</span></div>
+        <h5>感性认识与理性认识</h5><p>专题三 · 上次复习 7 天前</p>
+        <div class="review-foot"><span style="font-size:var(--fs-meta);color:var(--ink-400);">笔记 3 篇关联</span><button class="btn btn-plain" style="padding:5px 14px;font-size:var(--fs-aux);">开始</button></div>
+      </div>
+      <div class="review-card">
+        <div style="display:flex;justify-content:space-between;"><span class="tag tag-primary">第 1 次复习</span><span class="tag tag-success">已完成</span></div>
+        <h5>真理的绝对性与相对性</h5><p>专题二 · 今早 08:12 完成</p>
+        <div class="review-foot"><span style="font-size:var(--fs-meta);color:var(--ink-400);">下次：2 天后</span><button class="btn btn-ghost" style="padding:5px 14px;font-size:var(--fs-aux);">回顾</button></div>
+      </div>
+    </div>
+
+    <div class="news-strip">
+      <span class="tag tag-party">时政</span>
+      <b>每日要闻</b>
+      <span>国务院常务会议部署高校毕业生就业创业工作 · 人民网 10 分钟前</span>
+      <button class="btn btn-ghost" style="margin-left:auto;padding:5px 14px;font-size:var(--fs-aux);flex:none;">查看全部</button>
+    </div>
+  </main>
+  <button class="ai-fab" title="AI 助教">AI</button>
+</div>
+
+<!-- ================= 课程详情 ================= -->
+<div class="view" id="view-course">
+  <header class="topbar">
+    <div class="brand"><strong>思政智教</strong><small>AI TEACHING</small></div>
+    <nav>
+      <a href="#">教学班</a><a href="#" class="on">课程中心</a><a href="#">资料中心</a>
+      <a href="#">学习任务</a><a href="#">笔记空间</a><a href="#">今日复习</a><a href="#">课堂互动</a>
+    </nav>
+    <span class="user-chip">张同学 · 学生</span>
+  </header>
+
+  <main class="page">
+    <div class="crumb"><a href="#">课程中心</a> / 马克思主义基本原理</div>
+
+    <section class="hero" style="align-items:flex-start;">
+      <div>
+        <span class="eyebrow" style="color:#AECBF4;">必修 · 2026 春 · 3 学分</span>
+        <h2 style="font-size:28px;">马克思主义基本原理</h2>
+        <p style="max-width:640px;">本课程系统讲授马克思主义哲学、政治经济学和科学社会主义的基本原理，帮助学生掌握科学的世界观和方法论。</p>
+        <p style="margin-top:12px;font-size:var(--fs-meta);color:#AECBF4;">主讲：王老师 · 12 专题 · 教材《马克思主义基本原理（2023 年版）》</p>
+      </div>
+      <button class="btn btn-white">继续学习</button>
+    </section>
+
+    <div class="detail-grid">
+      <div>
+        <div class="section-head" style="margin-top:24px;"><h3>专题列表</h3><a href="#">知识图谱</a></div>
+        <div class="topic-list">
+          <div class="topic">
+            <span class="no">01</span>
+            <div class="t"><b>导论：马克思主义的时代价值</b><span>教材第 1—14 页 · 8 个知识点</span></div>
+            <span class="tag tag-success">已掌握</span>
+            <div class="stage-btns"><button class="btn btn-ghost">预习</button><button class="btn btn-ghost">巩固</button><button class="btn btn-ghost">冲刺</button></div>
+          </div>
+          <div class="topic">
+            <span class="no">02</span>
+            <div class="t"><b>世界的物质性及其发展规律</b><span>教材第 15—46 页 · 12 个知识点</span></div>
+            <span class="tag tag-success">已掌握</span>
+            <div class="stage-btns"><button class="btn btn-ghost">预习</button><button class="btn btn-ghost">巩固</button><button class="btn btn-ghost">冲刺</button></div>
+          </div>
+          <div class="topic" style="border-color:var(--blue-200);background:var(--blue-50);">
+            <span class="no" style="background:#fff;">03</span>
+            <div class="t"><b>实践与认识及其发展规律</b><span>教材第 47—78 页 · 10 个知识点 · 上次学到第 62 页</span></div>
+            <span class="tag tag-primary">学习中 65%</span>
+            <div class="stage-btns"><button class="btn btn-primary">继续</button><button class="btn btn-plain">巩固</button><button class="btn btn-ghost">冲刺</button></div>
+          </div>
+          <div class="topic">
+            <span class="no">04</span>
+            <div class="t"><b>人类社会及其发展规律</b><span>教材第 79—110 页 · 11 个知识点</span></div>
+            <span class="tag tag-info">未开始</span>
+            <div class="stage-btns"><button class="btn btn-plain">预习</button><button class="btn btn-ghost">巩固</button><button class="btn btn-ghost">冲刺</button></div>
+          </div>
+          <div class="topic">
+            <span class="no">05</span>
+            <div class="t"><b>资本主义的本质及规律</b><span>教材第 111—148 页 · 13 个知识点</span></div>
+            <span class="tag tag-info">未开始</span>
+            <div class="stage-btns"><button class="btn btn-plain">预习</button><button class="btn btn-ghost">巩固</button><button class="btn btn-ghost">冲刺</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="graph">
+        <h4>章节知识图谱</h4>
+        <p>全站唯一沉浸式深色场景（设计规范保留项）</p>
+        <div class="stage">
+          <span class="bubble core" style="width:104px;height:104px;left:50%;top:44%;transform:translate(-50%,-50%);">马克思主义<br>基本原理</span>
+          <span class="bubble" style="width:74px;height:74px;left:16%;top:16%;">导论</span>
+          <span class="bubble" style="width:74px;height:74px;left:74%;top:12%;">物质<br>规律</span>
+          <span class="bubble" style="width:84px;height:84px;left:70%;top:64%;border-width:2px;">实践<br>认识</span>
+          <span class="bubble" style="width:74px;height:74px;left:14%;top:66%;">社会<br>发展</span>
+          <span class="bubble" style="width:66px;height:66px;left:44%;top:82%;">资本<br>主义</span>
+        </div>
+        <p style="color:#7EA6D8;">点击气泡进入对应专题学习</p>
+      </div>
+    </div>
+  </main>
+  <button class="ai-fab" title="AI 助教">AI</button>
+</div>
+
+<!-- ================= 登录页 ================= -->
+<div class="view" id="view-login">
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="brand"><strong>思政智教</strong><small>AI TEACHING</small></div>
+      <h2>欢迎回来</h2>
+      <p class="sub">高校思政课 AI 智能教学辅助平台</p>
+      <div class="field"><label for="preview-account">账号</label><input id="preview-account" type="text" placeholder="学号 / 工号 / 用户名"></div>
+      <div class="field"><label for="preview-password">密码</label><input id="preview-password" type="password" placeholder="请输入密码"></div>
+      <button class="btn btn-primary">登 录</button>
+      <div class="login-links"><a href="#">注册账号</a><a href="#">忘记密码？</a></div>
+    </div>
+  </div>
+</div>
+
+<script>
+document.querySelectorAll('.preview-bar .seg button').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    document.querySelectorAll('.preview-bar .seg button').forEach(function (b) { b.classList.remove('on'); });
+    document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('on'); });
+    btn.classList.add('on');
+    document.getElementById('view-' + btn.dataset.view).classList.add('on');
+  });
+});
+</script>
+</body>
+</html>
