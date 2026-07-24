@@ -1,6 +1,8 @@
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.dialects import mysql
 
 from app.db.base import Base
+from app.models.citation import DocumentPage
 
 
 def test_all_mvp_tables_are_registered() -> None:
@@ -52,3 +54,8 @@ def test_all_mvp_tables_are_registered() -> None:
             "material_import_batches",
             "material_import_items",
         }
+
+
+def test_document_page_uses_longtext_on_mysql() -> None:
+    column_type = DocumentPage.__table__.c.text.type.dialect_impl(mysql.dialect())
+    assert isinstance(column_type, mysql.LONGTEXT)

@@ -168,6 +168,12 @@ function normalizePreviewDate(value: string) {
 function validateBatchRow(row: MaterialPreviewRow) {
   const errors: string[] = []
   if (!/^https:\/\/[^\s]+$/i.test(row.source_url.trim())) errors.push('网址必须是 HTTPS 地址')
+  else if (row.source_url.trim().length > 1000) errors.push('网址超过1000字符，请使用规范原文地址')
+  if (row.source_title.length > 255) errors.push('标题不能超过255字符')
+  if (row.publisher.length > 255) errors.push('发布机关不能超过255字符')
+  if (row.applicable_scope.length > 500) errors.push('适用范围不能超过500字符')
+  if (row.version_label.length > 100) errors.push('版本标识不能超过100字符')
+  if (row.knowledge_tags.length > 30) errors.push('知识点标签不能超过30个')
   const preserved: string[] = row.warnings.filter((item) => item === '文件内重复网址')
   if (!row.source_title.trim()) preserved.push('标题将尝试从网页识别')
   if (!row.publisher.trim()) preserved.push('发布机关将尝试从网页识别')

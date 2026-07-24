@@ -46,6 +46,20 @@ def test_excel_preview_detects_header_after_description_rows() -> None:
     assert preview.sheets[0].rows[0].source_title == "全过程人民民主"
 
 
+def test_preview_normalizes_metadata_to_persisted_field_lengths() -> None:
+    long_title = "题" * 300
+    long_publisher = "来源" * 150
+    content = (
+        "标题,网址,来源,适用范围,版本\n"
+        f"{long_title},https://example.com/normalized,{long_publisher},{'范围' * 300},{'版本' * 80}\n"
+    ).encode()
+    row = preview_material_file("long-fields.csv", content).sheets[0].rows[0]
+    assert len(row.source_title) == 255
+    assert len(row.publisher) == 255
+    assert len(row.applicable_scope) == 500
+    assert len(row.version_label) == 100
+
+
 def test_webpage_metadata_can_fill_optional_spreadsheet_fields() -> None:
     parser = _ArticleTextParser()
     parser.feed("""

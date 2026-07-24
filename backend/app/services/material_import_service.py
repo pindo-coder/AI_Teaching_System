@@ -194,6 +194,8 @@ def preview_material_file(filename: str, content: bytes) -> MaterialBatchPreview
                 errors.append("缺少原文网址")
             elif not _looks_url(source_url):
                 errors.append("网址必须是 HTTPS 公网地址")
+            elif len(source_url) > 1000:
+                errors.append("原文网址超过1000字符，请使用规范原文地址")
             elif source_url in seen_urls:
                 warnings.append("文件内重复网址")
             if not value("source_title"):
@@ -206,9 +208,9 @@ def preview_material_file(filename: str, content: bytes) -> MaterialBatchPreview
             tags = [item.strip() for item in re.split(r"[，,、;；|\n]", value("knowledge_tags")) if item.strip()]
             preview_rows.append(MaterialPreviewRow(
                 row_number=offset, selected=not errors and not warnings, source_url=source_url,
-                source_title=value("source_title"), publisher=value("publisher"),
-                published_date=published_date, applicable_scope=value("applicable_scope"),
-                version_label=value("version_label"), knowledge_tags=tags[:30],
+                source_title=value("source_title")[:255], publisher=value("publisher")[:255],
+                published_date=published_date, applicable_scope=value("applicable_scope")[:500],
+                version_label=value("version_label")[:100], knowledge_tags=tags[:30],
                 raw_data=raw_data, errors=errors, warnings=warnings,
             ))
         sheets.append(MaterialPreviewSheet(
@@ -217,7 +219,7 @@ def preview_material_file(filename: str, content: bytes) -> MaterialBatchPreview
         ))
     if not sheets:
         raise HTTPException(status_code=400, detail="文件中没有可预览的数据")
-    return MaterialBatchPreview(filename=filename, sheets=sheets)
+    return MaterialBatchPreview(filename=filename[:255], sheets=sheets)
 
 
 class MaterialBatchService:

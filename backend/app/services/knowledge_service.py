@@ -29,6 +29,20 @@ class KnowledgeService:
         self.courses = CourseRepository(db)
         self.chapters = ChapterRepository(db)
 
+    def _mark_index_failed(self, document_id: int) -> None:
+        """从失败事务中恢复，并把文档保留为可重试的明确状态。"""
+        self.db.rollback()
+        try:
+            delete_document_vectors(document_id)
+        except Exception:
+            logger.exception("knowledge_vector_cleanup_failed document_id=%s", document_id)
+        document = self.db.get(KnowledgeDocument, document_id)
+        if document is not None:
+            self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
+            document.status = "failed"
+            document.chunk_count = 0
+            self.db.commit()
+
     def ingest(
         self,
         *,
@@ -133,9 +147,18 @@ class KnowledgeService:
             status="processing",
             chunk_count=0,
         )
-        self.db.add_all([DocumentPage(document_id=document.id, pdf_page=page.pdf_page, text=page.text,
-                                      width=page.width, height=page.height, text_blocks=[]) for page in pages])
-        self.db.commit()
+        document_id = document.id
+        try:
+            self.db.add_all([DocumentPage(document_id=document.id, pdf_page=page.pdf_page, text=page.text,
+                                          width=page.width, height=page.height, text_blocks=[]) for page in pages])
+            self.db.commit()
+        except Exception as exc:
+            logger.exception("knowledge_page_persist_failed document_id=%s", document_id)
+            self._mark_index_failed(document_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="原文保存失败，请稍后重试或联系管理员检查数据库容量",
+            ) from exc
         if defer_index:
             return document
         try:
@@ -172,12 +195,11 @@ class KnowledgeService:
             ])
             document.status = "ready"
             document.chunk_count = len(chunks)
+            saved = self.documents.save(document)
         except Exception as exc:
-            logger.exception("knowledge_ingest_failed document_id=%s", document.id)
-            document.status = "failed"
-            self.documents.save(document)
+            logger.exception("knowledge_ingest_failed document_id=%s", document_id)
+            self._mark_index_failed(document_id)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="文档向量化失败") from exc
-        saved = self.documents.save(document)
         logger.info(
             "knowledge_ingested document_id=%s course_id=%s chapter_id=%s chunks=%s",
             saved.id,
@@ -264,12 +286,14 @@ class KnowledgeService:
             ])
             document.status = "ready"
             document.chunk_count = len(chunks)
+            return self.documents.save(document)
         except Exception as exc:
-            logger.exception("knowledge_reindex_failed document_id=%s", document.id)
-            document.status = "failed"
-            self.documents.save(document)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="重新索引失败") from exc
-        return self.documents.save(document)
+            logger.exception("knowledge_reindex_failed document_id=%s", document_id)
+            self._mark_index_failed(document_id)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="重新索引失败，请稍后重试",
+            ) from exc
 
     def search(self, question: str, *, course_id: int, chapter_id: int | None, top_k: int) -> list[RetrievedChunk]:
         if self.courses.get(course_id) is None:

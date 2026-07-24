@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -26,7 +27,8 @@ class DocumentPage(Base):
     document_id: Mapped[int] = mapped_column(ForeignKey("knowledge_documents.id", ondelete="CASCADE"), index=True)
     pdf_page: Mapped[int] = mapped_column(Integer, nullable=False)
     printed_page_label: Mapped[str | None] = mapped_column(String(30))
-    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # 网页材料通常只有一个逻辑“页”，长篇中文正文很容易超过 MySQL TEXT 的 65KB 上限。
+    text: Mapped[str] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"), default="", nullable=False)
     width: Mapped[float | None] = mapped_column(Float)
     height: Mapped[float | None] = mapped_column(Float)
     text_blocks: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)

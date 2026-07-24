@@ -38,12 +38,19 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.warning(
+            "validation_error request_id=%s path=%s errors=%s",
+            request_id,
+            request.url.path,
+            jsonable_encoder(exc.errors()),
+        )
         return JSONResponse(
             status_code=422,
             content=error_payload(
                 message="请求参数校验失败",
                 error_code="VALIDATION_ERROR",
-                request_id=getattr(request.state, "request_id", "unknown"),
+                request_id=request_id,
                 detail=jsonable_encoder(exc.errors()),
             ),
         )
