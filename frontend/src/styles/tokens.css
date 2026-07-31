@@ -1,27 +1,40 @@
 :root {
-  --blue-50: #eef4fd;
-  --blue-100: #d7e5fa;
-  --blue-200: #aecbf4;
-  --blue-400: #6d9fe8;
-  --blue-600: #2857d7;
-  --blue-800: #1c40a4;
-  --blue-900: #122c73;
+  --blue-50: #eef4f8;
+  --blue-100: #dbe8ef;
+  --blue-200: #b8cfdd;
+  --blue-400: #6f97af;
+  --blue-600: #1f4d78;
+  --blue-800: #173c60;
+  --blue-900: #102c48;
 
-  --ink-900: #172236;
-  --ink-600: #526073;
-  --ink-400: #718096;
-  --line: #e6eaf0;
-  --bg-page: #f5f7fb;
-  --bg-card: #fff;
+  --ink-900: #202124;
+  --ink-600: #5f6368;
+  --ink-400: #7b8188;
+  --line: #e0e3e7;
+  --line-strong: #cbd0d6;
+  --surface-page: #f7f8fa;
+  --surface-card: #fff;
+  --surface-muted: #f2f4f6;
+  --bg-page: var(--surface-page);
+  --bg-card: var(--surface-card);
 
   --color-primary: var(--blue-600);
-  --color-success: #15803d;
-  --color-success-bg: #eaf3de;
-  --color-warning: #b45309;
-  --color-warning-bg: #faeada;
-  --color-danger: #dc2626;
-  --color-danger-bg: #fcebeb;
-  --color-party: #b91c1c;
+  --action-blue: #1f4d78;
+  --action-soft: #eef4f8;
+  --action-line: #b8cfdd;
+  --authority-red: #b71c1c;
+  --authority-soft: #fdf0f0;
+  --authority-line: #edb9b9;
+  --highlight-gold: #8a5a13;
+  --highlight-soft: #fff7e5;
+  --highlight-line: #ead39f;
+  --color-success: #137333;
+  --color-success-bg: #e9f5ec;
+  --color-warning: var(--highlight-gold);
+  --color-warning-bg: var(--highlight-soft);
+  --color-danger: #c5221f;
+  --color-danger-bg: #fce8e6;
+  --color-party: var(--authority-red);
 
   --fs-page-title: 28px;
   --fs-section: 20px;
@@ -33,10 +46,10 @@
   --fw-medium: 500;
   --fw-bold: 700;
 
-  --radius-control: 6px;
-  --radius-input: 10px;
-  --radius-card: 14px;
-  --radius-overlay: 20px;
+  --radius-control: 8px;
+  --radius-input: 8px;
+  --radius-card: 12px;
+  --radius-overlay: 16px;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -45,11 +58,11 @@
   --space-6: 24px;
   --space-8: 32px;
   --page-padding: clamp(16px, 4vw, 40px);
-  --page-max-width: 1280px;
+  --page-max-width: 1200px;
 
-  --shadow-1: 0 1px 3px rgb(23 34 54 / 6%);
-  --shadow-2: 0 8px 24px rgb(23 34 54 / 10%);
-  --hero-gradient: linear-gradient(120deg, var(--blue-800), var(--blue-600));
+  --shadow-1: 0 2px 8px rgb(32 33 36 / 8%);
+  --shadow-2: 0 12px 28px rgb(32 33 36 / 12%);
+  --hero-gradient: linear-gradient(120deg, #173c60, #1f4d78);
 
   /* 旧页面兼容别名，在所有页面迁移完成前保留。 */
   --primary: var(--color-primary);

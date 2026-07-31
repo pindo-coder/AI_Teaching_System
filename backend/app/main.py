@@ -13,6 +13,7 @@ from app.db.init_db import init_db
 from app.db.session import engine
 from app.exceptions import register_exception_handlers
 from app.services.material_import_service import recover_material_batches
+from app.services.agent_service import recover_agent_runs
 
 
 configure_logging()
@@ -25,6 +26,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     recovered = recover_material_batches(engine)
     if recovered:
         logger.info("recovered material import batches count=%s", recovered)
+    interrupted_agents = recover_agent_runs(engine)
+    if interrupted_agents:
+        logger.warning("marked interrupted agent runs as failed count=%s", interrupted_agents)
     yield
 
 

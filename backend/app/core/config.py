@@ -36,6 +36,18 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1024
     chroma_persist_directory: str = "../knowledge_base/chroma"
     knowledge_upload_directory: str = "../knowledge_base/uploads"
+    generated_artifact_directory: str = "../knowledge_base/generated_artifacts"
+    presentation_node_binary: str = "node"
+    presentation_node_modules: str | None = None
+    ppt_multimodal_enabled: bool = True
+    ppt_multimodal_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("PPT_MULTIMODAL_API_KEY", "DASHSCOPE_API_KEY"),
+    )
+    ppt_multimodal_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
+    ppt_multimodal_model: str = "wan2.7-image"
+    ppt_multimodal_max_images: int = 3
+    ppt_multimodal_timeout_seconds: int = 180
     rag_collection_name: str = "ideology_course_kb"
     rag_active_collection: str | None = None
     rag_top_k: int = 4

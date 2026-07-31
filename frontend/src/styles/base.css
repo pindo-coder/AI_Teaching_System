@@ -21,6 +21,10 @@ body {
   overflow-x: hidden;
 }
 
+#app {
+  min-height: 100vh;
+}
+
 button,
 input,
 textarea,

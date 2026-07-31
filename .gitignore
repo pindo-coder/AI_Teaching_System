@@ -9,6 +9,7 @@ __pycache__/
 frontend/node_modules/
 frontend/dist/
 frontend/.env.local
+backend/presentation_runtime/node_modules/
 .pnpm-store/
 
 # Backend runtime data
@@ -16,6 +17,7 @@ backend/data/*.db
 backend/data/*.sqlite3
 knowledge_base/uploads/*
 knowledge_base/chroma/*
+knowledge_base/generated_artifacts/*
 !knowledge_base/uploads/.gitkeep
 !knowledge_base/chroma/.gitkeep
 

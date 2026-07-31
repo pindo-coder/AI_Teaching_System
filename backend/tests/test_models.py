@@ -53,6 +53,10 @@ def test_all_mvp_tables_are_registered() -> None:
             "document_knowledge_tags",
             "material_import_batches",
             "material_import_items",
+            "agent_runs",
+            "agent_steps",
+            "presentation_templates",
+            "lesson_publications",
         }
 
 

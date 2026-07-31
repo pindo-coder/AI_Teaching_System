@@ -1,33 +1,39 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
-import { Menu } from '@element-plus/icons-vue'
-import { useAuthStore } from '@/stores/auth'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { Bell, Clock, Menu, Search } from '@element-plus/icons-vue'
 import FloatingAiAssistant from '@/components/FloatingAiAssistant.vue'
+import StatusChip from '@/components/ui/StatusChip.vue'
+import { navigationForRole, type NavigationItem } from '@/config/navigation'
+import { useAuthStore } from '@/stores/auth'
+import { useWorkspaceStore } from '@/stores/workspace'
+import { agentApi, type AgentRun } from '@/api/agents'
 
 const auth = useAuthStore()
+const workspace = useWorkspaceStore()
+const route = useRoute()
 const router = useRouter()
 const mobileNavVisible = ref(false)
-const navigationItems = computed(() => {
-  const items = [
-    { label: '课程中心', path: '/courses' },
-    { label: '学习任务', path: '/assignments' },
-    { label: '笔记空间', path: '/notes' },
-    { label: '今日复习', path: '/reviews' },
-    { label: '时政要点', path: '/current-affairs' },
-    { label: '课堂互动', path: '/interaction' },
-  ]
-  if (auth.user?.role === 'teacher' || auth.user?.role === 'admin') {
-    items.unshift({ label: '教学班', path: '/classes' })
-  }
-  if (auth.canManageKnowledge) {
-    items.push({ label: '资料中心', path: '/knowledge' })
-  }
-  return items
-})
+const messageVisible = ref(false)
+const taskVisible = ref(false)
+const taskLoading = ref(false)
+const agentRuns = ref<AgentRun[]>([])
+
+const navigationItems = computed(() => navigationForRole(auth.user?.role))
 const roleLabel = computed(() => ({ student: '学生', teacher: '教师', admin: '管理员' }[auth.user?.role || 'student']))
+const contextTitle = computed(() => workspace.currentCourse?.name || workspace.currentClass?.name || '高校思政课')
+const contextDetail = computed(() => {
+  if (auth.user?.role === 'student') return workspace.currentChapter?.title || '今日学习'
+  return workspace.currentClass?.name || '当前教学空间'
+})
+
+function isActive(item: NavigationItem) {
+  if (item.path === '/') return route.path === '/'
+  return (item.match || [item.path]).some((path) => route.path === path || route.path.startsWith(`${path}/`))
+}
 
 function logout() {
+  workspace.clear()
   auth.logout()
   router.push('/login')
 }
@@ -36,218 +42,256 @@ function navigate(path: string) {
   mobileNavVisible.value = false
   router.push(path)
 }
+
+onMounted(() => workspace.initialize())
+
+async function loadAgentRuns() {
+  if (auth.user?.role === 'student') return
+  taskLoading.value = true
+  try {
+    const response = await agentApi.list(20)
+    agentRuns.value = response.data.data
+  } finally {
+    taskLoading.value = false
+  }
+}
+
+function agentStatus(run: AgentRun) {
+  const labels: Record<string, string> = {
+    queued: '等待执行',
+    running: '运行中',
+    waiting_confirmation: '等待确认',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return labels[run.status] || run.status
+}
+
+function openAgentRun() {
+  taskVisible.value = false
+  router.push('/lesson-prep')
+}
+
+watch(taskVisible, (visible) => {
+  if (visible) void loadAgentRuns()
+})
 </script>
 
 <template>
-  <el-container class="app-layout">
-    <el-container>
-      <el-header class="topbar">
-        <router-link to="/" class="brand" aria-label="返回首页"><span>思政智教</span><small>AI TEACHING</small></router-link>
-        <nav class="topbar-links desktop-only" aria-label="主导航">
-          <router-link v-for="item in navigationItems" :key="item.path" :to="item.path">{{ item.label }}</router-link>
-        </nav>
-        <el-button
-          class="mobile-menu-trigger mobile-only"
-          :icon="Menu"
-          aria-label="打开主菜单"
-          :aria-expanded="mobileNavVisible"
-          @click="mobileNavVisible = true"
+  <div class="app-shell">
+    <aside class="app-sidebar desktop-shell-nav" aria-label="角色主导航">
+      <router-link to="/" class="brand" aria-label="返回工作台">
+        <span class="brand-mark" aria-hidden="true">思</span>
+        <span><strong>思政智教</strong><small>AI TEACHING</small></span>
+      </router-link>
+      <div class="role-identity">
+        <span>{{ roleLabel }}空间</span>
+        <strong>{{ auth.user?.username }}</strong>
+      </div>
+      <nav class="sidebar-navigation">
+        <button
+          v-for="item in navigationItems"
+          :key="item.path"
+          type="button"
+          :class="{ active: isActive(item) }"
+          @click="navigate(item.path)"
         >
-          菜单
-        </el-button>
-        <el-dropdown class="desktop-user-menu">
-          <span class="user-menu">{{ auth.user?.username }} · {{ roleLabel }}</span>
-          <template #dropdown><el-dropdown-menu><el-dropdown-item @click="logout">退出登录</el-dropdown-item></el-dropdown-menu></template>
-        </el-dropdown>
-      </el-header>
-      <el-main class="page"><router-view /></el-main>
-      <FloatingAiAssistant />
-      <el-drawer
-        v-model="mobileNavVisible"
-        title="功能导航"
-        direction="rtl"
-        size="min(86vw, 360px)"
-        class="mobile-navigation-drawer"
-      >
-        <nav class="mobile-navigation" aria-label="移动端主导航">
-          <button
-            v-for="item in navigationItems"
-            :key="item.path"
-            type="button"
-            :class="{ active: router.currentRoute.value.path === item.path }"
-            @click="navigate(item.path)"
-          >
-            {{ item.label }}
-          </button>
-        </nav>
-        <div class="mobile-user-panel">
-          <span>{{ auth.user?.username }}</span>
-          <small>{{ roleLabel }}</small>
-          <el-button plain type="danger" @click="logout">退出登录</el-button>
+          <el-icon><component :is="item.icon" /></el-icon>
+          <span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span>
+        </button>
+      </nav>
+      <div class="sidebar-footer">
+        <span>当前角色</span>
+        <strong>{{ roleLabel }}</strong>
+      </div>
+    </aside>
+
+    <div class="app-content">
+      <header class="context-topbar">
+        <el-button class="mobile-menu-trigger mobile-shell-nav" :icon="Menu" text aria-label="打开主菜单" @click="mobileNavVisible = true" />
+        <div class="context-copy">
+          <strong>{{ contextTitle }}</strong>
+          <span>{{ contextDetail }}</span>
         </div>
-      </el-drawer>
-    </el-container>
-  </el-container>
+        <div class="global-actions" aria-label="全局工具">
+          <el-tooltip content="搜索课程与资料">
+            <el-button circle text :icon="Search" aria-label="搜索课程与资料" @click="router.push('/courses')" />
+          </el-tooltip>
+          <el-tooltip content="后台任务">
+            <el-button circle text :icon="Clock" aria-label="查看后台任务" @click="taskVisible = true" />
+          </el-tooltip>
+          <el-tooltip content="消息提醒">
+            <el-button circle text :icon="Bell" aria-label="查看消息提醒" @click="messageVisible = true" />
+          </el-tooltip>
+          <el-dropdown>
+            <button type="button" class="user-avatar" aria-label="打开用户菜单">{{ auth.user?.username?.slice(0, 1).toUpperCase() }}</button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item disabled>{{ auth.user?.username }} · {{ roleLabel }}</el-dropdown-item>
+                <el-dropdown-item divided @click="logout">退出登录</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
+      </header>
+
+      <main class="page"><router-view /></main>
+      <FloatingAiAssistant />
+    </div>
+
+    <el-drawer v-model="mobileNavVisible" title="功能导航" direction="ltr" size="min(88vw, 340px)">
+      <div class="mobile-brand"><strong>思政智教</strong><span>{{ roleLabel }}空间</span></div>
+      <nav class="mobile-navigation" aria-label="移动端主导航">
+        <button
+          v-for="item in navigationItems"
+          :key="item.path"
+          type="button"
+          :class="{ active: isActive(item) }"
+          @click="navigate(item.path)"
+        >
+          <el-icon><component :is="item.icon" /></el-icon>
+          <span><strong>{{ item.label }}</strong><small>{{ item.description }}</small></span>
+        </button>
+      </nav>
+      <el-button class="mobile-logout" plain type="danger" @click="logout">退出登录</el-button>
+    </el-drawer>
+
+    <el-drawer v-model="messageVisible" title="消息提醒" size="min(92vw, 420px)">
+      <div class="utility-drawer-content">
+        <span class="utility-mark"><el-icon><Bell /></el-icon></span>
+        <h3>暂无新的教学提醒</h3>
+        <p>第一阶段已预留统一消息入口。后续中央文件更新、任务截止和审核结果会集中显示在这里。</p>
+      </div>
+    </el-drawer>
+
+    <el-drawer v-model="taskVisible" title="后台任务" size="min(92vw, 420px)">
+      <div v-loading="taskLoading" class="agent-task-center">
+        <template v-if="agentRuns.length">
+          <button v-for="run in agentRuns" :key="run.id" type="button" class="agent-task-item" @click="openAgentRun">
+            <span>
+              <strong>课程备课 #{{ run.id }}</strong>
+              <small>{{ new Date(run.updated_time).toLocaleString() }}</small>
+            </span>
+            <StatusChip
+              :label="agentStatus(run)"
+              :status="run.status === 'failed' ? 'danger' : run.status === 'completed' ? 'success' : run.status === 'waiting_confirmation' ? 'warning' : 'info'"
+            />
+          </button>
+          <el-button plain type="primary" @click="loadAgentRuns">刷新任务状态</el-button>
+        </template>
+        <div v-else class="utility-drawer-content">
+          <span class="utility-mark"><el-icon><Clock /></el-icon></span>
+          <h3>当前没有智能任务记录</h3>
+          <p v-if="auth.user?.role === 'student'">学生的学习向导将在后续阶段接入，这里将统一显示需要较长时间完成的任务。</p>
+          <p v-else>从课程备课创建任务后，可以离开页面并在这里查看进度。</p>
+          <el-button v-if="auth.user?.role !== 'student'" type="primary" @click="openAgentRun">开始课程备课</el-button>
+        </div>
+      </div>
+    </el-drawer>
+  </div>
 </template>
 
 <style scoped>
-.app-layout {
+.app-shell {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
   min-width: 0;
   min-height: 100vh;
+  background: var(--surface-page);
 }
 
-.topbar {
+.app-sidebar {
   position: sticky;
-  z-index: 100;
+  z-index: 120;
   top: 0;
-  display: flex;
-  height: 64px;
-  align-items: center;
+  display: grid;
+  height: 100vh;
+  grid-template-rows: auto auto 1fr auto;
   gap: var(--space-6);
-  padding: 0 var(--page-padding);
-  background: rgb(255 255 255 / 96%);
-  border-bottom: 1px solid var(--line);
-  backdrop-filter: blur(10px);
+  padding: var(--space-6) var(--space-3);
+  color: #fff;
+  background: var(--blue-900);
 }
 
 .brand {
-  display: grid;
-  flex: none;
-  color: var(--blue-800);
-  text-decoration: none;
-}
-
-.brand span {
-  font-size: 19px;
-  font-weight: var(--fw-bold);
-  line-height: 1.1;
-}
-
-.brand small {
-  margin-top: 4px;
-  color: var(--ink-400);
-  font-size: var(--fs-meta);
-  letter-spacing: 0.16em;
-}
-
-.topbar-links {
   display: flex;
-  min-width: 0;
   align-items: center;
-  justify-content: flex-end;
-  gap: clamp(12px, 1.5vw, 22px);
-  margin-left: auto;
-}
-
-.topbar-links a {
-  position: relative;
-  padding: 22px 0 19px;
-  color: var(--ink-600);
-  font-size: var(--fs-body);
+  gap: var(--space-3);
+  padding: 0 var(--space-2);
+  color: #fff;
   text-decoration: none;
-  white-space: nowrap;
 }
 
-.topbar-links a::after {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 2px;
-  content: "";
-  background: transparent;
-}
-
-.topbar-links a.router-link-active {
-  color: var(--blue-600);
+.brand-mark {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: var(--authority-red);
+  background: #fff;
+  border-radius: var(--radius-input);
+  font-size: 18px;
   font-weight: var(--fw-bold);
 }
 
-.topbar-links a.router-link-active::after {
-  background: var(--blue-600);
-}
-
-.desktop-user-menu {
-  flex: none;
-}
-
-.user-menu {
-  color: var(--ink-600);
-  cursor: pointer;
-  font-size: var(--fs-aux);
-  white-space: nowrap;
-}
-
-.page {
+.brand > span:last-child,
+.context-copy,
+.sidebar-navigation button span,
+.mobile-navigation button span {
+  display: grid;
   min-width: 0;
-  width: min(100%, calc(var(--page-max-width) + var(--page-padding) * 2));
-  margin: 0 auto;
-  padding: var(--space-8) var(--page-padding) 48px;
-  overflow: visible;
 }
 
-.mobile-menu-trigger {
-  margin-left: auto;
-}
-
-.mobile-navigation {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.mobile-navigation button {
-  width: 100%;
-  padding: 13px 14px;
-  color: var(--ink-600);
-  background: transparent;
-  border: 0;
-  border-radius: var(--radius-input);
-  cursor: pointer;
-  text-align: left;
-}
-
-.mobile-navigation button:hover,
-.mobile-navigation button.active {
-  color: var(--blue-600);
-  background: var(--blue-50);
-  font-weight: var(--fw-medium);
-}
-
-.mobile-user-panel {
-  display: grid;
-  gap: var(--space-2);
-  margin-top: var(--space-8);
-  padding-top: var(--space-6);
-  border-top: 1px solid var(--line);
-}
-
-.mobile-user-panel span {
-  color: var(--ink-900);
-  font-weight: var(--fw-medium);
-}
-
-.mobile-user-panel small {
-  color: var(--ink-400);
-}
-
-.mobile-user-panel .el-button {
-  justify-self: start;
-  margin-top: var(--space-2);
-}
+.brand strong { font-size: 18px; }
+.brand small { margin-top: 3px; color: rgb(255 255 255 / 62%); font-size: 10px; letter-spacing: .16em; }
+.role-identity { display: grid; gap: 3px; margin: 0 var(--space-2); padding: var(--space-3); background: rgb(255 255 255 / 7%); border: 1px solid rgb(255 255 255 / 10%); border-radius: var(--radius-card); }
+.role-identity span, .sidebar-footer span { color: rgb(255 255 255 / 60%); font-size: var(--fs-meta); }
+.role-identity strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-navigation { display: grid; align-content: start; gap: var(--space-2); }
+.sidebar-navigation button, .mobile-navigation button { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: var(--space-2); width: 100%; padding: 11px 10px; color: rgb(255 255 255 / 72%); background: transparent; border: 0; border-radius: var(--radius-input); cursor: pointer; text-align: left; }
+.sidebar-navigation button:hover, .sidebar-navigation button.active { color: #fff; background: rgb(255 255 255 / 12%); }
+.sidebar-navigation button.active { box-shadow: inset 3px 0 0 var(--authority-red); }
+.sidebar-navigation .el-icon { width: 34px; height: 34px; font-size: 18px; }
+.sidebar-navigation small, .mobile-navigation small { margin-top: 2px; color: inherit; font-size: 10px; opacity: .68; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-footer { display: flex; justify-content: space-between; padding: var(--space-3) var(--space-2) 0; border-top: 1px solid rgb(255 255 255 / 12%); font-size: var(--fs-meta); }
+.app-content { min-width: 0; }
+.context-topbar { position: sticky; z-index: 110; top: 0; display: flex; height: 64px; align-items: center; gap: var(--space-3); padding: 0 var(--page-padding); background: rgb(255 255 255 / 96%); border-bottom: 1px solid var(--line); backdrop-filter: blur(10px); }
+.context-copy { gap: 2px; }
+.context-copy strong { max-width: min(54vw, 560px); color: var(--ink-900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-copy span { color: var(--ink-400); font-size: var(--fs-meta); }
+.global-actions { display: flex; align-items: center; gap: var(--space-1); margin-left: auto; }
+.user-avatar { display: grid; width: 34px; height: 34px; margin-left: var(--space-1); place-items: center; color: #fff; background: var(--action-blue); border: 0; border-radius: 50%; cursor: pointer; font-weight: var(--fw-bold); }
+.page { width: min(100%, calc(var(--page-max-width) + var(--page-padding) * 2)); min-width: 0; margin: 0 auto; padding: var(--space-8) var(--page-padding) 48px; overflow: visible; }
+.mobile-shell-nav { display: none; }
+.mobile-brand { display: grid; gap: var(--space-1); margin-bottom: var(--space-6); }
+.mobile-brand strong { color: var(--blue-800); font-size: 20px; }
+.mobile-brand span { color: var(--ink-400); }
+.mobile-navigation { display: grid; gap: var(--space-2); }
+.mobile-navigation button { color: var(--ink-600); }
+.mobile-navigation button:hover, .mobile-navigation button.active { color: var(--action-blue); background: var(--action-soft); }
+.mobile-navigation .el-icon { width: 34px; height: 34px; }
+.mobile-logout { margin-top: var(--space-8); }
+.utility-drawer-content { display: grid; min-height: 320px; place-items: center; align-content: center; gap: var(--space-3); text-align: center; }
+.utility-drawer-content h3, .utility-drawer-content p { max-width: 320px; margin: 0; }
+.utility-drawer-content p { color: var(--ink-600); line-height: 1.7; }
+.utility-mark { display: grid; width: 48px; height: 48px; place-items: center; color: var(--action-blue); background: var(--action-soft); border-radius: var(--radius-card); font-size: 22px; }
+.agent-task-center { display: grid; gap: var(--space-3); min-height: 220px; align-content: start; }
+.agent-task-item { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); color: var(--ink-900); background: var(--surface-card); border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
+.agent-task-item:hover { background: var(--action-soft); border-color: var(--action-line); }
+.agent-task-item > span { display: grid; min-width: 0; gap: var(--space-1); }
+.agent-task-item small { color: var(--ink-400); }
 
 @media (max-width: 1023px) {
-  .topbar {
-    gap: var(--space-3);
-  }
-
-  .desktop-user-menu {
-    display: none;
-  }
+  .app-shell { display: block; }
+  .desktop-shell-nav { display: none; }
+  .mobile-shell-nav { display: inline-flex; }
+  .context-topbar { padding: 0 var(--space-3); }
+  .page { padding-top: var(--space-6); }
 }
 
-@media (max-width: 767px) {
-  .page {
-    padding-top: var(--space-6);
-  }
+@media (max-width: 479px) {
+  .context-copy strong { max-width: 42vw; }
+  .global-actions > :first-child { display: none; }
 }
 </style>

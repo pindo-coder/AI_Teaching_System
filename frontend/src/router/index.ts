@@ -10,7 +10,9 @@ const router = createRouter({
     {
       path: '/', component: () => import('@/layouts/MainLayout.vue'),
       children: [
-        { path: '', name: 'dashboard', component: () => import('@/views/DashboardView.vue') },
+        { path: '', name: 'dashboard', component: () => import('@/views/WorkspaceHomeView.vue') },
+        { path: 'lesson-prep', name: 'lesson-prep', component: () => import('@/views/LessonPrepWorkspaceView.vue'), meta: { roles: ['teacher', 'admin'] } },
+        { path: 'material-review', name: 'material-review', component: () => import('@/views/MaterialReviewView.vue'), meta: { roles: ['teacher', 'admin'] } },
         { path: 'courses', name: 'courses', component: () => import('@/views/CourseListView.vue') },
         { path: 'courses/:id', name: 'course-detail', component: () => import('@/views/CourseDetailView.vue') },
         { path: 'current-affairs', name: 'current-affairs', component: () => import('@/views/CurrentAffairsView.vue') },

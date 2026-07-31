@@ -8,10 +8,12 @@ import type { CourseDetail } from '@/types'
 import { useAuthStore } from '@/stores/auth'
 import { classroomApi, type ClassroomActivity } from '@/api/classroom'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
+import { agentApi, type LessonPublication } from '@/api/agents'
 
 const loading = ref(true)
 const auth = useAuthStore()
 const activities = ref<ClassroomActivity[]>([])
+const publications = ref<LessonPublication[]>([])
 const responseText = ref<Record<number, string>>({})
 const route = useRoute()
 const textbook = ref<CourseDetail | null>(null)
@@ -21,6 +23,9 @@ const selectedClassId = ref<number>()
 const activity = reactive({ question: '中国式现代化为什么既有各国现代化的共同特征，又有基于自己国情的中国特色？', minutes: 8 })
 const firstChapter = computed(() => textbook.value?.chapters.find((item) => item.id === selectedChapterId.value) || textbook.value?.chapters[0] || null)
 const visibleActivities = computed(() => selectedClassId.value ? activities.value.filter((item) => item.teaching_class_id === selectedClassId.value) : activities.value)
+const visiblePublications = computed(() => selectedClassId.value
+  ? publications.value.filter((item) => item.teaching_class_id === selectedClassId.value)
+  : publications.value)
 const patterns = [
   { title: '随堂问答', desc: '围绕一个核心概念生成递进式提问。', icon: QuestionFilled },
   { title: '观点辨析', desc: '给出正误判断、理由说明和追问。', icon: ChatDotRound },
@@ -36,6 +41,7 @@ onMounted(async () => {
     const newsTitle = typeof route.query.news_title === 'string' ? route.query.news_title : ''
     if (newsTitle) activity.question = `围绕时政“${newsTitle}”，联系教材专题开展课堂讨论。`
     activities.value = (await classroomApi.list()).data.data
+    publications.value = (await agentApi.publications()).data.data
   } finally { loading.value = false }
 })
 
@@ -61,6 +67,16 @@ async function submitResponse(item: ClassroomActivity) {
   responseText.value[item.id] = ''
   ElMessage.success('观点提交成功')
 }
+
+async function downloadPublishedPpt(item: LessonPublication) {
+  const response = await agentApi.downloadPublicationPpt(item.id)
+  const url = URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = item.ppt_file_name || `${item.title}.pptx`
+  link.click()
+  URL.revokeObjectURL(url)
+}
 </script>
 
 <template>
@@ -75,6 +91,33 @@ async function submitResponse(item: ClassroomActivity) {
 
     <section class="interaction-layout interaction-layout-single">
       <div>
+        <el-card shadow="never" class="published-lessons">
+          <template #header>
+            <div class="content-heading">
+              <span>教师发布的课程成果</span>
+              <el-tag type="success">{{ visiblePublications.length }} 项</el-tag>
+            </div>
+          </template>
+          <div v-if="visiblePublications.length" class="lesson-publication-list">
+            <article v-for="item in visiblePublications" :key="item.id" class="lesson-publication">
+              <div>
+                <small>{{ item.chapter_title }} · {{ item.teacher_name }}</small>
+                <h3>{{ item.title }}</h3>
+                <p>{{ item.description || '教师已发布本专题教学成果。' }}</p>
+              </div>
+              <el-button
+                v-if="item.ppt_available"
+                type="primary"
+                plain
+                @click="downloadPublishedPpt(item)"
+              >
+                下载教学 PPT
+              </el-button>
+            </article>
+          </div>
+          <el-empty v-else description="当前教学班尚未发布课程成果" :image-size="80" />
+        </el-card>
+
         <section class="module-grid interaction-patterns">
           <el-card v-for="item in patterns" :key="item.title" shadow="never" class="module-card quiet-card">
             <el-icon :size="24"><component :is="item.icon" /></el-icon>
@@ -114,3 +157,17 @@ async function submitResponse(item: ClassroomActivity) {
     </section>
   </div>
 </template>
+
+<style scoped>
+.published-lessons { margin-bottom: 20px; }
+.lesson-publication-list { display: grid; gap: 12px; }
+.lesson-publication { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px; background: linear-gradient(130deg, #f7faff, #fff9f1); border: 1px solid var(--line); border-left: 4px solid var(--authority-red); border-radius: var(--radius-card); }
+.lesson-publication h3, .lesson-publication p { margin: 0; }
+.lesson-publication h3 { margin: 4px 0 8px; }
+.lesson-publication small { color: var(--action-blue); font-weight: 700; }
+.lesson-publication p { color: var(--ink-500); line-height: 1.6; }
+@media (max-width: 767px) {
+  .lesson-publication { align-items: flex-start; flex-direction: column; }
+  .lesson-publication :deep(.el-button) { width: 100%; }
+}
+</style>

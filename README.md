@@ -25,6 +25,9 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cd presentation_runtime
+pnpm install
+cd ..
 cp .env.example .env
 uvicorn app.main:app --reload
 ```
@@ -79,6 +82,46 @@ LLM_MODEL=your-model-name
 ```
 
 AI 请求必须携带课程、章节和学习阶段。存在已入库资料时，系统优先使用 Chroma 检索结果；尚未上传资料时回退到章节正文。
+
+## 教师备课 Agent 与教学成果
+
+教师备课工作区采用“设置任务—构建证据—生成课纲—生成成果—预览发布”流程，每次只展示一个阶段，避免把任务、证据、课纲和成果挤在同一窗口。证据快照需要教师确认后才能生成课纲；课纲确认后可以生成可编辑的 PPTX、Word 教案和课堂活动设计。成果生成后仍保持草稿，只有教师在最后一步勾选确认，才会发布到指定教学班。
+
+PPTX 由公开可部署的 PptxGenJS 运行时生成，需要 Node.js 20+：
+
+```bash
+cd backend/presentation_runtime
+pnpm install
+```
+
+如果后端服务进程找不到 `node`，在 `backend/.env` 中配置绝对路径：
+
+```env
+GENERATED_ARTIFACT_DIRECTORY=../knowledge_base/generated_artifacts
+PRESENTATION_NODE_BINARY=/usr/bin/node
+```
+
+课纲、PPT 内容、教案和课堂活动共用现有 `LLM_API_KEY`；教材检索继续使用现有 Embedding 配置，不需要新增 API Key。PPT 可见页面不展示资料编号或“资料依据”，来源信息仅保留在演讲者备注和后台元数据中，供教师核验。
+
+PPT 采用“教学内容策划 Agent + 视觉设计 Agent”二阶段生成。第一阶段形成逐页教学叙事，第二阶段根据本次专题提炼独有视觉母题、配色和自由画布坐标，再由 PptxGenJS 使用 PowerPoint 原生图形生成可编辑文件。固定版式仅在视觉设计结果校验失败时作为安全回退；程序仍会控制字数、边界和合法颜色，避免自由生成造成文件损坏。
+
+教师还可以在生成前设置使用场景、视觉风格、内容密度、精确页数和课堂互动偏好。页数支持 6～30 页加减或直接输入，内容 Agent 与服务端会共同保证最终文件页数准确。系统在内容与视觉生成后继续执行质量审查，标记文字拥挤、内容遗漏、画布异常等问题；教师可只修改指定页面，或恢复最近 10 个 PPT 版本，不必每次整套重做。
+
+可选的阿里云百炼多模态能力会为 1～3 个适合视觉表达的正文页生成无文字辅助插图，并在模型调用后立即把临时图片下载到本地课件目录。标题页、总结页、政策文件原文页和政治人物肖像不参与自动配图；任何单页生成失败都会自动回退为 PowerPoint 原生图形，不阻断整套课件。配置示例：
+
+```env
+PPT_MULTIMODAL_ENABLED=true
+# 可复用 DASHSCOPE_API_KEY；如需隔离额度，也可设置独立 Key。
+PPT_MULTIMODAL_API_KEY=your-dashscope-key
+PPT_MULTIMODAL_BASE_URL=https://dashscope.aliyuncs.com/api/v1
+PPT_MULTIMODAL_MODEL=wan2.7-image
+PPT_MULTIMODAL_MAX_IMAGES=3
+PPT_MULTIMODAL_TIMEOUT_SECONDS=180
+```
+
+最后一步支持一次确认后同时发布 PPT 和选定课堂讨论。PPT 会复制到独立发布目录，学生可从课堂互动页下载；讨论会成为该教学班的课堂活动。发布接口不会被 Agent 自动调用，重复向同一教学班发布同一个备课任务会被拒绝。
+
+支持上传 `.pptx` 作为风格参考。首版会提取模板的画幅比例、主题色、字体和版式名称，并交给视觉设计 Agent 使用；上传文件仅对本人可见，管理员可按需设为共享。该能力目前不等同于完整复制 PowerPoint 母版、动画和复杂对象，如需严格沿用学校统一母版，应在导出后通过 PowerPoint 替换主题并人工复核。
 
 ## 资料中心与 Embedding
 
@@ -152,6 +195,8 @@ PYTHONPATH=. python -m scripts.bootstrap_default_class
 PYTHONPATH=. python -m scripts.migrate_existing_citations
 PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
 ```
+
+`20260730_01` 迁移会创建 PPT 风格模板表，`20260731_01` 会创建教学成果发布记录表。升级完成后重启 FastAPI，教师即可在“课程备课 → PPT 生成偏好”上传并选择模板，并在最终核验后发布 PPT 与课堂讨论。
 
 迁移后，管理员应进入“资料中心 → 教材正文 → 引用校准”，确认自动识别的章、节、知识点、PDF 页和印刷页码，再发布教材版本；中央材料需要确认教材/专题关联后才能发布。升级前无法识别层级的补充资料进入“待分类”，不会直接参与新回答。教学班支持主讲教师、协作教师、名单导入、入班审批、分组和同课程同学期唯一在班规则。
 
