@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search, Setting, Warning } from '@element-plus/icons-vue'
-import { knowledgeApi, type AuthoritySource, type DiscoveryJob, type MaterialCandidate, type PolicyChange } from '@/api/knowledge'
+import { knowledgeApi, type AuthoritySource, type CandidateDecisionSummary, type CandidateTopicGroup, type DiscoveryJob, type MaterialCandidate, type PolicyChange } from '@/api/knowledge'
 import { courseApi } from '@/api/courses'
 import type { Course } from '@/types'
 import UiCard from '@/components/ui/UiCard.vue'
@@ -17,6 +17,9 @@ const running = ref(false)
 const sources = ref<AuthoritySource[]>([])
 const jobs = ref<DiscoveryJob[]>([])
 const candidates = ref<MaterialCandidate[]>([])
+const candidateSummary = ref<CandidateDecisionSummary>({ pending_review: 0, high_priority: 0, observed: 0, filtered: 0 })
+const topicGroups = ref<CandidateTopicGroup[]>([])
+const selectedCandidateIds = ref<number[]>([])
 const policyChanges = ref<PolicyChange[]>([])
 const courses = ref<Course[]>([])
 const keyword = ref('')
@@ -29,8 +32,18 @@ const editingSourceId = ref<number | null>(null)
 const sourceForm = ref({ name: '', domain: '', source_level: 'A' as AuthoritySource['source_level'], adapter_type: 'html_list' as AuthoritySource['adapter_type'], entry_url: '', fetch_interval_minutes: 360, request_interval_seconds: 3, allow_full_text: true, allow_alert: true, is_enabled: true })
 const activeFilter = ref('pending_review')
 const selectedCandidate = computed(() => candidates.value.find((item) => item.id === selectedCandidateId.value) || candidates.value[0] || null)
+const candidateAnalysisState = computed(() => {
+  const candidate = selectedCandidate.value
+  if (!candidate) return { label: '等待分析', status: 'neutral' as const, retry: true }
+  if (candidate.analysis_reason?.includes('自动关联/差异分析失败')) {
+    return { label: '自动分析失败', status: 'danger' as const, retry: true }
+  }
+  if (candidate.suggested_course_ids !== null && candidate.suggested_chapter_ids !== null) {
+    return { label: '自动分析完成', status: 'success' as const, retry: false }
+  }
+  return { label: '等待分析', status: 'warning' as const, retry: true }
+})
 const runningJob = computed(() => jobs.value.find((item) => ['queued', 'running'].includes(item.status)))
-const pendingCount = computed(() => candidates.value.filter((item) => item.status === 'pending_review').length)
 let jobPollTimer: ReturnType<typeof setTimeout> | undefined
 
 async function loadPolicyChanges(candidateId: number | null) {
@@ -44,20 +57,27 @@ async function loadPolicyChanges(candidateId: number | null) {
 async function load() {
   loading.value = true
   try {
-    const [sourceResult, jobResult, candidateResult, courseResult] = await Promise.all([
+    const [sourceResult, jobResult, candidateResult, summaryResult, groupResult, courseResult] = await Promise.all([
       knowledgeApi.authoritySources(), knowledgeApi.discoveryJobs(30),
-      knowledgeApi.discoveryCandidates({ status: activeFilter.value, limit: 200 }), courseApi.list(),
+      knowledgeApi.discoveryCandidates({ status: activeFilter.value, limit: 200 }),
+      knowledgeApi.candidateDecisionSummary(), knowledgeApi.candidateTopicGroups(), courseApi.list(),
     ])
     sources.value = sourceResult.data.data
     jobs.value = jobResult.data.data
     candidates.value = candidateResult.data.data
+    candidateSummary.value = summaryResult.data.data
+    topicGroups.value = groupResult.data.data
+    selectedCandidateIds.value = selectedCandidateIds.value.filter((id) => candidates.value.some((item) => item.id === id))
     courses.value = courseResult.data.data
     if (!selectedSources.value.length) selectedSources.value = sources.value.filter((item) => item.is_enabled).map((item) => item.id)
-    if (!selectedCandidateId.value) {
-      const requested = Number(route.query.candidate)
-      selectedCandidateId.value = candidates.value.some((item) => item.id === requested) ? requested : (candidates.value[0]?.id || null)
+    const requested = Number(route.query.candidate)
+    if (!candidates.value.some((item) => item.id === selectedCandidateId.value)) {
+      selectedCandidateId.value = candidates.value.some((item) => item.id === requested)
+        ? requested
+        : (candidates.value[0]?.id || null)
     }
     await loadPolicyChanges(selectedCandidateId.value)
+    window.dispatchEvent(new Event('notifications-changed'))
   } catch (error: unknown) {
     ElMessage.error(getErrorMessage(error, '资料动态加载失败'))
   } finally { loading.value = false }
@@ -150,6 +170,15 @@ async function cancelJob(job: DiscoveryJob) {
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '任务停止失败')) }
 }
 
+async function deleteJob(job: DiscoveryJob) {
+  await ElMessageBox.confirm(`确定删除任务 #${job.id} 的执行记录吗？候选材料会保留。`, '删除发现任务', { type: 'warning' })
+  try {
+    await knowledgeApi.deleteDiscoveryJob(job.id)
+    ElMessage.success('任务记录已删除')
+    await load()
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '删除任务失败')) }
+}
+
 async function analyze() {
   if (!selectedCandidate.value) return
   try {
@@ -183,8 +212,73 @@ async function review(action: 'reject' | 'duplicate') {
   const title = action === 'reject' ? '驳回候选材料' : '标记为重复材料'
   await ElMessageBox.confirm(`确定要${title}“${selectedCandidate.value.title}”吗？`, title, { type: 'warning' })
   await knowledgeApi.reviewDiscoveryCandidate(selectedCandidate.value.id, { action })
+  window.dispatchEvent(new Event('notifications-changed'))
   ElMessage.success('审核状态已更新')
   await load()
+}
+
+async function deleteCandidate() {
+  if (!selectedCandidate.value) return
+  await ElMessageBox.confirm(`确定永久删除候选材料“${selectedCandidate.value.title}”吗？相关正文快照和差异证据也会删除。`, '删除候选材料', { type: 'warning' })
+  try {
+    await knowledgeApi.deleteDiscoveryCandidate(selectedCandidate.value.id)
+    window.dispatchEvent(new Event('notifications-changed'))
+    selectedCandidateId.value = null
+    ElMessage.success('候选材料已删除')
+    await load()
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '删除候选材料失败')) }
+}
+
+function toggleCandidate(candidateId: number, selected: boolean | string | number) {
+  selectedCandidateIds.value = Boolean(selected)
+    ? [...new Set([...selectedCandidateIds.value, candidateId])]
+    : selectedCandidateIds.value.filter((id) => id !== candidateId)
+}
+
+function selectAllCandidates(selected: boolean | string | number) {
+  selectedCandidateIds.value = Boolean(selected) ? candidates.value.map((item) => item.id) : []
+}
+
+async function batchCandidates(action: 'reject' | 'observe' | 'delete') {
+  if (!selectedCandidateIds.value.length) return ElMessage.warning('请先选择候选材料')
+  const label = action === 'reject' ? '批量忽略' : action === 'observe' ? '批量加入观察' : '批量删除'
+  const detail = action === 'delete' ? '正文快照和差异证据也会永久删除。' : '这些材料将退出待决策列表。'
+  await ElMessageBox.confirm(`确定${label}所选 ${selectedCandidateIds.value.length} 条材料吗？${detail}`, label, { type: 'warning' })
+  try {
+    await knowledgeApi.batchDiscoveryCandidates({ candidate_ids: selectedCandidateIds.value, action })
+    selectedCandidateIds.value = []
+    selectedCandidateId.value = null
+    window.dispatchEvent(new Event('notifications-changed'))
+    ElMessage.success(`${label}完成`)
+    await load()
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, `${label}失败`)) }
+}
+
+async function retainTopicPrimary(group: CandidateTopicGroup) {
+  const secondaryIds = group.candidate_ids.filter((id) => id !== group.primary_candidate_id)
+  if (!secondaryIds.length) return
+  await ElMessageBox.confirm(
+    `保留“${group.title}”作为主材料，并将其余 ${secondaryIds.length} 条标记为同议题旁证吗？主材料仍需单独确认发布。`,
+    '归并同类材料',
+    { type: 'warning' },
+  )
+  try {
+    await knowledgeApi.batchDiscoveryCandidates({
+      candidate_ids: secondaryIds,
+      action: 'duplicate',
+      note: `同议题旁证已归并到候选 #${group.primary_candidate_id}`,
+    })
+    selectedCandidateId.value = group.primary_candidate_id
+    selectedCandidateIds.value = []
+    window.dispatchEvent(new Event('notifications-changed'))
+    ElMessage.success(`已保留主材料，并归并 ${secondaryIds.length} 条旁证`)
+    await load()
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '同类材料归并失败')) }
+}
+
+function openTopicPrimary(group: CandidateTopicGroup) {
+  selectedCandidateId.value = group.primary_candidate_id
+  document.querySelector('.candidate-layout')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 async function publish() {
@@ -197,6 +291,7 @@ async function publish() {
       source_title: selectedCandidate.value.title, publisher: selectedCandidate.value.publisher || undefined,
       published_date: selectedCandidate.value.published_date || undefined,
     })
+    window.dispatchEvent(new Event('notifications-changed'))
     ElMessage.success('候选材料已发布并进入中央知识库')
     publishCourseId.value = undefined
     await load()
@@ -213,6 +308,16 @@ function jobChipStatus(job: DiscoveryJob) {
   return 'info'
 }
 function importanceLabel(level: string) { return ({ high: '重要', medium: '重点', observe: '观察' } as Record<string, string>)[level] || '待评估' }
+function changeSuggestion(change: PolicyChange) {
+  if (change.change_type.includes('新增') || change.similarity_score < 0.35) return '建议补充知识点'
+  if (change.old_document_id || change.old_chapter_id) return '建议修订既有表述'
+  return '建议加入教学案例'
+}
+function formatDateTime(value: string | null | undefined) {
+  if (!value) return '—'
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`
+  return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
+}
 
 onMounted(async () => {
   await load()
@@ -246,7 +351,7 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
 
     <section class="discovery-metrics">
       <UiCard><span>启用来源</span><strong>{{ sources.filter(item => item.is_enabled).length }}</strong><small>仅白名单来源参与抓取</small></UiCard>
-      <UiCard><span>待审核候选</span><strong>{{ pendingCount }}</strong><small>需要管理员确认后发布</small></UiCard>
+      <UiCard><span>待人工决策</span><strong>{{ candidateSummary.pending_review }}</strong><small>其中 {{ candidateSummary.high_priority }} 条为高优先级</small></UiCard>
       <UiCard><span>后台任务</span><strong>{{ runningJob ? '运行中' : '空闲' }}</strong><small>{{ runningJob?.progress_stage || '可启动新的发现任务' }}</small></UiCard>
     </section>
 
@@ -268,8 +373,8 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
         <template #title><div><p class="eyebrow">DISCOVERY JOBS</p><h2>发现任务</h2></div></template>
         <div class="job-list">
           <div v-for="job in jobs.slice(0, 8)" :key="job.id" class="job-item">
-            <div class="job-main"><strong>任务 #{{ job.id }} · {{ jobTitle(job) }}</strong><small>{{ job.trigger_type === 'scheduled' ? '自动巡检' : job.trigger_type === 'retry' ? '失败重试' : '管理员手动' }} · {{ jobSources(job) }}</small><small>{{ job.progress_stage }} · {{ new Date(job.created_time).toLocaleString() }}</small><div class="job-steps"><span :class="{ active: job.discovered_count > 0 }">读取来源</span><span :class="{ active: job.extraction_failed_count + job.fetched_count > 0 }">提取正文</span><span :class="{ active: job.filtered_count > 0 || job.pending_review_count > 0 }">相关性过滤</span><span :class="{ active: job.pending_review_count > 0 }">待审核</span></div></div>
-            <div class="job-side"><StatusChip :label="jobStatusLabel(job.status)" :status="jobChipStatus(job)" /><small>{{ job.fetched_count }} 条正文 · {{ job.pending_review_count }} 条待审</small><small>过滤 {{ job.filtered_count }} · 去重 {{ job.deduped_count }} · 失败 {{ job.failed_count }}</small><small v-if="job.error_message" class="job-error" :title="job.error_message">已完成但有 {{ job.failed_count }} 项异常</small><el-button v-if="job.status === 'failed'" text type="primary" size="small" @click="retryJob(job)">重试</el-button><el-button v-if="['queued', 'running'].includes(job.status)" text type="danger" size="small" @click="cancelJob(job)">停止</el-button></div>
+            <div class="job-main"><strong>任务 #{{ job.id }} · {{ jobTitle(job) }}</strong><small>{{ job.trigger_type === 'scheduled' ? '自动巡检' : job.trigger_type === 'retry' ? '失败重试' : '管理员手动' }} · {{ jobSources(job) }}</small><small>{{ job.progress_stage }} · 创建于 {{ formatDateTime(job.created_time) }}</small><small v-if="job.started_time || job.finished_time">开始于 {{ formatDateTime(job.started_time) }} · {{ job.finished_time ? `完成于 ${formatDateTime(job.finished_time)}` : '尚未完成' }}</small><div class="job-steps"><span :class="{ active: job.discovered_count > 0 }">读取来源</span><span :class="{ active: job.extraction_failed_count + job.fetched_count > 0 }">提取正文</span><span :class="{ active: job.filtered_count > 0 || job.pending_review_count > 0 }">相关性过滤</span><span :class="{ active: job.pending_review_count > 0 }">待审核</span></div></div>
+            <div class="job-side"><StatusChip :label="jobStatusLabel(job.status)" :status="jobChipStatus(job)" /><small>{{ job.fetched_count }} 条正文 · {{ job.pending_review_count }} 条待审</small><small>过滤 {{ job.filtered_count }} · 去重 {{ job.deduped_count }} · 失败 {{ job.failed_count }}</small><small v-if="job.error_message" class="job-error" :title="job.error_message">{{ job.error_message }}</small><el-button v-if="job.status === 'failed'" text type="primary" size="small" @click="retryJob(job)">重试</el-button><el-button v-if="['queued', 'running'].includes(job.status)" text type="danger" size="small" @click="cancelJob(job)">停止</el-button><el-button v-if="!['queued', 'running'].includes(job.status)" text type="danger" size="small" @click="deleteJob(job)">删除</el-button></div>
           </div>
           <div v-if="!jobs.length" class="empty-line">尚未执行发现任务</div>
         </div>
@@ -283,23 +388,47 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
           <el-radio-button label="pending_review">待审核</el-radio-button>
           <el-radio-button label="published">已发布</el-radio-button>
           <el-radio-button label="rejected">已驳回</el-radio-button>
+          <el-radio-button label="observed">观察中</el-radio-button>
           <el-radio-button label="filtered">已过滤</el-radio-button>
         </el-radio-group>
       </template>
+      <section v-if="activeFilter === 'pending_review' && topicGroups.length" class="topic-groups" aria-label="同类材料议题包">
+        <div class="topic-groups-heading"><div><p class="eyebrow">TOPIC GROUPS</p><h3>同类材料议题包</h3></div><span>{{ topicGroups.length }} 组可合并审核</span></div>
+        <div class="topic-group-list">
+          <article v-for="group in topicGroups" :key="group.group_key" class="topic-group-item">
+            <div class="topic-group-copy">
+              <div><StatusChip label="推荐主材料" status="authority" /><strong>{{ group.title }}</strong></div>
+              <span>{{ group.member_count }} 条材料 · {{ group.members.map(member => member.publisher || `${member.source_level}级来源`).join('、') }}</span>
+              <small>{{ group.reason }}</small>
+            </div>
+            <div class="topic-group-actions"><el-button size="small" @click="openTopicPrimary(group)">查看主材料</el-button><el-button size="small" type="primary" plain @click="retainTopicPrimary(group)">保留主材料</el-button></div>
+          </article>
+        </div>
+      </section>
+      <div v-if="activeFilter === 'pending_review'" class="batch-toolbar">
+        <el-checkbox
+          :model-value="Boolean(candidates.length) && selectedCandidateIds.length === candidates.length"
+          :indeterminate="selectedCandidateIds.length > 0 && selectedCandidateIds.length < candidates.length"
+          @change="selectAllCandidates"
+        >全选当前列表</el-checkbox>
+        <span>已选择 {{ selectedCandidateIds.length }} 条</span>
+        <el-button size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('observe')">加入观察</el-button>
+        <el-button size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('reject')">批量忽略</el-button>
+        <el-button size="small" type="danger" plain :disabled="!selectedCandidateIds.length" @click="batchCandidates('delete')">批量删除</el-button>
+      </div>
       <div v-if="candidates.length" class="candidate-layout">
         <div class="candidate-list">
-          <button v-for="item in candidates" :key="item.id" type="button" :class="['candidate-item', { active: selectedCandidate?.id === item.id }]" @click="selectedCandidateId = item.id">
-            <div class="candidate-badges"><StatusChip :label="sourceLevelLabel(item.source_level)" :status="item.source_level === 'A' ? 'authority' : 'info'" /><StatusChip :label="`${importanceLabel(item.importance_level)} ${Math.round(item.importance_score * 100)}%`" :status="item.importance_level === 'high' ? 'danger' : item.importance_level === 'medium' ? 'warning' : 'neutral'" /></div>
-            <strong>{{ item.title }}</strong>
-            <span>{{ item.publisher || '来源待确认' }} · {{ item.published_date || '日期待确认' }}</span>
-          </button>
+          <div v-for="item in candidates" :key="item.id" :class="['candidate-item', { active: selectedCandidate?.id === item.id }]" @click="selectedCandidateId = item.id">
+            <el-checkbox v-if="activeFilter === 'pending_review'" :model-value="selectedCandidateIds.includes(item.id)" @click.stop @change="toggleCandidate(item.id, $event)" />
+            <div class="candidate-copy"><div class="candidate-badges"><StatusChip :label="sourceLevelLabel(item.source_level)" :status="item.source_level === 'A' ? 'authority' : 'info'" /><StatusChip :label="`${importanceLabel(item.importance_level)} ${Math.round(item.importance_score * 100)}%`" :status="item.importance_level === 'high' ? 'danger' : item.importance_level === 'medium' ? 'warning' : 'neutral'" /></div><strong>{{ item.title }}</strong><span>{{ item.publisher || '来源待确认' }} · {{ item.published_date || '日期待确认' }}</span><span>抓取于 {{ formatDateTime(item.created_time) }}</span></div>
+          </div>
         </div>
         <div v-if="selectedCandidate" class="candidate-detail">
-          <div class="candidate-heading"><div><StatusChip label="正文快照" status="success" /><h3>{{ selectedCandidate.title }}</h3></div><a :href="selectedCandidate.source_url" target="_blank" rel="noreferrer">查看原文 ↗</a></div>
+          <div class="candidate-heading"><div><StatusChip label="正文快照" status="success" /><h3>{{ selectedCandidate.title }}</h3></div><div class="candidate-heading-actions"><a :href="selectedCandidate.source_url" target="_blank" rel="noreferrer">查看原文 ↗</a><el-button v-if="selectedCandidate.status !== 'published'" text type="danger" size="small" @click="deleteCandidate">删除候选</el-button></div></div>
           <p class="candidate-preview">{{ selectedCandidate.content_preview || '暂无正文预览' }}</p>
-          <dl class="candidate-meta"><div><dt>来源等级</dt><dd>{{ sourceLevelLabel(selectedCandidate.source_level) }}</dd></div><div><dt>主题相关度</dt><dd>{{ selectedCandidate.relevance_score ? `${Math.round(selectedCandidate.relevance_score * 100)}%` : '全量巡检，未设单一主题' }}</dd></div><div><dt>教材关联度</dt><dd>{{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</dd></div><div><dt>正文质量</dt><dd>{{ Math.round((selectedCandidate.extraction_quality_score || 0) * 100) }}%</dd></div><div><dt>教学重要度</dt><dd>{{ importanceLabel(selectedCandidate.importance_level) }} · {{ Math.round((selectedCandidate.importance_score || 0) * 100) }}%</dd></div><div><dt>分析说明</dt><dd>{{ selectedCandidate.analysis_reason || selectedCandidate.importance_reason || '待补充' }}</dd></div></dl>
+          <dl class="candidate-meta"><div><dt>抓取时间</dt><dd>{{ formatDateTime(selectedCandidate.created_time) }}</dd></div><div><dt>来源等级</dt><dd>{{ sourceLevelLabel(selectedCandidate.source_level) }}</dd></div><div><dt>主题相关度</dt><dd>{{ selectedCandidate.relevance_score ? `${Math.round(selectedCandidate.relevance_score * 100)}%` : '全量巡检，未设单一主题' }}</dd></div><div><dt>教材关联度</dt><dd>{{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</dd></div><div><dt>正文质量</dt><dd>{{ Math.round((selectedCandidate.extraction_quality_score || 0) * 100) }}%</dd></div><div><dt>教学重要度</dt><dd>{{ importanceLabel(selectedCandidate.importance_level) }} · {{ Math.round((selectedCandidate.importance_score || 0) * 100) }}%</dd></div><div><dt>分析说明</dt><dd>{{ selectedCandidate.analysis_reason || selectedCandidate.importance_reason || '待补充' }}</dd></div></dl>
           <section class="association-panel">
-            <div class="panel-heading"><div><p class="eyebrow">SCOPE & EVIDENCE</p><h4>教材关联与政策变化</h4></div><el-button size="small" :loading="running" @click="analyze">重新分析</el-button></div>
+            <div class="panel-heading"><div><p class="eyebrow">SCOPE & EVIDENCE</p><h4>教材关联与政策变化</h4></div><div class="analysis-actions"><StatusChip :label="candidateAnalysisState.label" :status="candidateAnalysisState.status" /><el-button size="small" :loading="running" @click="analyze">{{ candidateAnalysisState.retry ? '重试分析' : '重新分析' }}</el-button></div></div>
             <div class="association-summary">
               <span>建议置信度 {{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</span>
               <span>{{ selectedCandidate.suggested_chapter_ids?.length || 0 }} 个专题</span>
@@ -308,7 +437,7 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
             <p class="association-reason">{{ selectedCandidate.association_reason || '尚未完成自动关联，请点击重新分析。' }}</p>
             <div v-if="policyChanges.length" class="change-list">
               <article v-for="change in policyChanges" :key="change.id" class="change-item">
-                <div class="change-title"><strong>{{ change.change_type }}</strong><StatusChip :label="change.importance === 'high' ? '建议提醒' : change.importance === 'medium' ? '重点关注' : '观察'" :status="change.importance === 'high' ? 'danger' : 'info'" /></div>
+                <div class="change-title"><div><strong>{{ change.change_type }}</strong><small>{{ changeSuggestion(change) }}</small></div><StatusChip :label="change.importance === 'high' ? '建议提醒' : change.importance === 'medium' ? '重点关注' : '观察'" :status="change.importance === 'high' ? 'danger' : 'info'" /></div>
                 <p class="change-source">旧依据：{{ change.old_source_title || '教材原文' }} · 相似度 {{ Math.round(change.similarity_score * 100) }}%</p>
                 <div class="evidence-grid"><div><small>既有原文</small><blockquote>{{ change.old_excerpt }}</blockquote></div><div><small>新材料原文</small><blockquote>{{ change.new_excerpt }}</blockquote></div></div>
                 <p class="change-explanation">{{ change.ai_explanation }}</p>
@@ -378,15 +507,31 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
 .job-steps span.active { color: var(--action-blue); background: var(--action-soft); }
 .source-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .empty-line { display: flex; justify-content: center; align-items: center; gap: var(--space-2); min-height: 100px; color: var(--ink-400); }
+.topic-groups { display: grid; gap: var(--space-3); margin-bottom: var(--space-4); padding-bottom: var(--space-4); border-bottom: 1px solid var(--line); }
+.topic-groups-heading, .topic-group-item, .topic-group-actions { display: flex; align-items: center; gap: var(--space-3); }
+.topic-groups-heading { justify-content: space-between; }
+.topic-groups-heading h3 { margin: 2px 0 0; font-size: var(--fs-body); }
+.topic-groups-heading > span { color: var(--ink-400); font-size: var(--fs-meta); }
+.topic-group-list { display: grid; gap: 0; border-top: 1px solid var(--line); }
+.topic-group-item { justify-content: space-between; padding: var(--space-3) 0; border-bottom: 1px solid var(--line); }
+.topic-group-copy { display: grid; min-width: 0; gap: 5px; }
+.topic-group-copy > div { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+.topic-group-copy > span, .topic-group-copy > small { color: var(--ink-500); }
+.topic-group-copy > small { line-height: 1.5; }
+.topic-group-actions { flex: 0 0 auto; }
+.batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); padding: var(--space-3); color: var(--ink-500); background: var(--surface-page); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.batch-toolbar > span { margin-right: auto; font-size: var(--fs-meta); }
 .candidate-layout { display: grid; grid-template-columns: minmax(250px, .7fr) minmax(0, 1.3fr); gap: var(--space-4); }
 .candidate-list { display: grid; gap: var(--space-2); max-height: 650px; overflow: auto; }
-.candidate-item { display: grid; justify-items: start; gap: var(--space-2); width: 100%; padding: var(--space-3); color: var(--ink-900); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
+.candidate-item { display: flex; align-items: start; gap: var(--space-2); width: 100%; padding: var(--space-3); color: var(--ink-900); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
+.candidate-copy { display: grid; justify-items: start; min-width: 0; gap: var(--space-2); flex: 1; }
 .candidate-item:hover, .candidate-item.active { background: var(--action-soft); border-color: var(--action-line); }
 .candidate-item span:last-child { color: var(--ink-400); font-size: var(--fs-meta); }
 .candidate-badges { display: flex; flex-wrap: wrap; gap: 6px; }
 .candidate-detail { display: grid; gap: var(--space-3); min-width: 0; }
 .candidate-heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); }
 .candidate-heading > div { display: grid; gap: var(--space-2); }
+.candidate-heading > .candidate-heading-actions { display: flex; align-items: center; gap: var(--space-3); }
 .candidate-heading h3 { margin: 0; font-size: 21px; line-height: 1.5; }
 .candidate-heading a { color: var(--action-blue); white-space: nowrap; }
 .candidate-preview { max-height: 300px; margin: 0; padding: var(--space-4); overflow: auto; color: var(--ink-700); background: var(--surface-page); border-radius: var(--radius-input); line-height: 1.8; white-space: pre-wrap; }
@@ -397,13 +542,16 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
 .decision-area { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-top: var(--space-2); }
 .association-panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--action-line); border-radius: var(--radius-card); background: color-mix(in srgb, var(--action-soft) 45%, white); }
 .panel-heading, .change-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.analysis-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .panel-heading h4 { margin: 0; font-size: 18px; }
 .association-summary { display: flex; flex-wrap: wrap; gap: var(--space-2); color: var(--action-blue); font-size: var(--fs-meta); }
 .association-summary span { padding: 5px 9px; background: white; border: 1px solid var(--line); border-radius: 999px; }
 .association-reason, .change-source, .change-explanation { margin: 0; color: var(--ink-600); line-height: 1.65; }
 .change-list { display: grid; gap: var(--space-3); }
 .change-item { display: grid; gap: var(--space-2); padding: var(--space-3); background: white; border: 1px solid var(--line); border-radius: var(--radius-input); }
+.change-title > div { display: grid; gap: 3px; }
 .change-title strong { color: var(--ink-900); }
+.change-title small { color: var(--action-blue); }
 .change-source { font-size: var(--fs-meta); }
 .evidence-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); }
 .evidence-grid > div { min-width: 0; padding: var(--space-2); background: var(--surface-page); border-radius: var(--radius-input); }
@@ -414,5 +562,5 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
 .sync-state { color: var(--action-blue); }
 .empty-evidence { padding: var(--space-3); color: var(--ink-400); background: white; border-radius: var(--radius-input); }
 @media (max-width: 900px) { .discovery-grid, .candidate-layout { grid-template-columns: 1fr; } }
-@media (max-width: 767px) { .discovery-metrics, .source-form-grid { grid-template-columns: 1fr; } .candidate-heading { display: grid; } .evidence-grid { grid-template-columns: 1fr; } }
+@media (max-width: 767px) { .discovery-metrics, .source-form-grid { grid-template-columns: 1fr; } .candidate-heading, .topic-group-item { display: grid; } .topic-group-actions { justify-content: start; } .evidence-grid { grid-template-columns: 1fr; } }
 </style>

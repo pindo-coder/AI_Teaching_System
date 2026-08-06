@@ -100,6 +100,41 @@ class CandidateReview(BaseModel):
     review_notes: str | None = Field(default=None, max_length=2000)
 
 
+class CandidateBatchAction(BaseModel):
+    candidate_ids: list[int] = Field(min_length=1, max_length=200)
+    action: Literal["reject", "observe", "duplicate", "delete"]
+    note: str | None = Field(default=None, max_length=2000)
+
+
+class CandidateDecisionSummary(BaseModel):
+    pending_review: int
+    high_priority: int
+    observed: int
+    filtered: int
+
+
+class CandidateTopicMember(BaseModel):
+    id: int
+    title: str
+    publisher: str | None
+    source_level: str
+    published_date: date | None
+    importance_score: float
+    association_confidence: float
+
+
+class CandidateTopicGroup(BaseModel):
+    group_key: str
+    title: str
+    primary_candidate_id: int
+    candidate_ids: list[int]
+    member_count: int
+    suggested_course_ids: list[int]
+    suggested_chapter_ids: list[int]
+    reason: str
+    members: list[CandidateTopicMember]
+
+
 class MaterialCandidateRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

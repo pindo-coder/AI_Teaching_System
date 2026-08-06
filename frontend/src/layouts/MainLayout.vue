@@ -9,6 +9,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { agentApi, type AgentRun } from '@/api/agents'
 import { notificationApi, type TeachingNotification } from '@/api/notifications'
+import { knowledgeApi } from '@/api/knowledge'
 
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
@@ -21,6 +22,7 @@ const taskLoading = ref(false)
 const agentRuns = ref<AgentRun[]>([])
 const notifications = ref<TeachingNotification[]>([])
 const notificationLoading = ref(false)
+const actionableCandidateCount = ref(0)
 let notificationTimer: number | undefined
 
 const navigationItems = computed(() => navigationForRole(auth.user?.role))
@@ -50,14 +52,17 @@ function navigate(path: string) {
 onMounted(() => {
   workspace.initialize()
   void loadNotifications()
+  window.addEventListener('notifications-changed', loadNotifications)
   notificationTimer = window.setInterval(() => void loadNotifications(), 60_000)
 })
 
 onUnmounted(() => {
+  window.removeEventListener('notifications-changed', loadNotifications)
   if (notificationTimer) window.clearInterval(notificationTimer)
 })
 
 const unreadNotificationCount = computed(() => notifications.value.filter((item) => !item.is_read).length)
+const headerBadgeCount = computed(() => auth.user?.role === 'admin' ? actionableCandidateCount.value : unreadNotificationCount.value)
 
 async function loadNotifications() {
   if (!auth.user) return
@@ -65,6 +70,9 @@ async function loadNotifications() {
   try {
     const response = await notificationApi.list(false, 80)
     notifications.value = response.data.data
+    if (auth.user?.role === 'admin') {
+      actionableCandidateCount.value = (await knowledgeApi.candidateDecisionSummary()).data.data.pending_review
+    }
   } finally {
     notificationLoading.value = false
   }
@@ -112,6 +120,14 @@ function agentStatus(run: AgentRun) {
 function openAgentRun() {
   taskVisible.value = false
   router.push('/lesson-prep')
+}
+
+function openHeaderAlerts() {
+  if (auth.user?.role === 'admin') router.push('/material-discovery')
+  else {
+    messageVisible.value = true
+    void loadNotifications()
+  }
 }
 
 watch(taskVisible, (visible) => {
@@ -166,9 +182,9 @@ watch(() => auth.user?.id, () => {
           <el-tooltip content="后台任务">
             <el-button circle text :icon="Clock" aria-label="查看后台任务" @click="taskVisible = true" />
           </el-tooltip>
-          <el-tooltip content="消息提醒">
-            <el-badge :value="unreadNotificationCount" :hidden="unreadNotificationCount === 0" :max="99" class="notification-badge">
-              <el-button circle text :icon="Bell" aria-label="查看消息提醒" @click="messageVisible = true; void loadNotifications()" />
+          <el-tooltip :content="auth.user?.role === 'admin' ? `待人工决策：${actionableCandidateCount} 条` : (unreadNotificationCount ? `未读消息：${unreadNotificationCount} 条` : '暂无未读消息')">
+            <el-badge :value="headerBadgeCount" :hidden="headerBadgeCount === 0" :max="99" class="notification-badge">
+              <el-button circle text :icon="Bell" aria-label="查看待处理提醒" @click="openHeaderAlerts" />
             </el-badge>
           </el-tooltip>
           <el-dropdown>

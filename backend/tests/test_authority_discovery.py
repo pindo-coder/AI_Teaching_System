@@ -12,7 +12,8 @@ from app.models.knowledge_document import KnowledgeDocument
 from app.models.material_scope import DocumentCourseScope
 from app.models.user import User
 from app.models.teaching_notification import TeachingNotification
-from app.schemas.authority_discovery import DiscoveryJobCreate
+from app.core.security import create_access_token
+from app.schemas.authority_discovery import CandidateBatchAction, DiscoveryJobCreate
 from app.services import authority_discovery_service as discovery
 from app.services.authority_discovery_service import AuthorityDiscoveryService, _process_discovery_job
 from app.services.authority_discovery_service import _estimate_content_quality, _score
@@ -21,6 +22,12 @@ from app.services.material_center_service import _ArticleTextParser
 
 
 def test_discovery_job_creates_pending_candidate_and_snapshot(db, monkeypatch) -> None:
+    course = Course(name="思想政治理论课", description="")
+    db.add(course); db.flush()
+    db.add(Chapter(
+        course_id=course.id, title="全过程人民民主",
+        content="全过程人民民主是社会主义民主政治的重要内容。这是用于测试的权威材料正文。",
+    ))
     admin = User(username="discovery-admin", password_hash="hash", role="admin")
     db.add(admin)
     db.commit()
@@ -33,10 +40,12 @@ def test_discovery_job_creates_pending_candidate_and_snapshot(db, monkeypatch) -
     monkeypatch.setattr(discovery, "_candidate_links", lambda *_: [
         ("https://www.gov.cn/zhengce/2026-01/01/content_1.htm", "全过程人民民主新部署"),
     ])
-    monkeypatch.setattr(discovery, "_default_fetch", lambda *_: (
-        "这是用于测试的权威材料正文。" * 20,
+    monkeypatch.setattr(discovery, "_fetch_source_article", lambda *_: (
+        ("全过程人民民主是社会主义民主政治的重要内容。"
+         "要健全全过程人民民主制度体系，扩大人民有序政治参与。") * 12,
         "https://www.gov.cn/zhengce/2026-01/01/content_1.htm",
         "全过程人民民主新部署", "中国政府网", date(2026, 1, 2),
+        "authority-gov-cn-v1",
     ))
 
     _process_discovery_job(job.id, db.get_bind())
@@ -47,6 +56,11 @@ def test_discovery_job_creates_pending_candidate_and_snapshot(db, monkeypatch) -
     assert candidate.recommended_material_type == "central"
     assert candidate.content_hash == snapshot.content_hash
     assert snapshot.candidate_id == candidate.id
+    assert candidate.suggested_course_ids == [course.id]
+    assert candidate.suggested_chapter_ids
+    assert candidate.association_confidence > 0
+    assert "差异证据" in candidate.analysis_reason
+    assert db.query(PolicyChange).filter_by(candidate_id=candidate.id).count() > 0
     db.expire_all()
     refreshed = db.get(type(job), job.id)
     assert refreshed.status == "completed"
@@ -128,16 +142,17 @@ def test_discovery_rejects_irrelevant_full_text_even_for_a_level_source(db, monk
     source = service.list_sources()[0]
     job = service.create_job(admin, DiscoveryJobCreate(keywords=["思政课建设"], source_ids=[source.id]))
     monkeypatch.setattr(discovery, "_candidate_links", lambda *_: [("https://www.gov.cn/unrelated", "最新发布")])
-    monkeypatch.setattr(discovery, "_default_fetch", lambda *_: (
+    monkeypatch.setattr(discovery, "_fetch_source_article", lambda *_: (
         "这是一篇与检索主题无关的公共信息。", "https://www.gov.cn/unrelated",
         "公共服务通知", "中国政府网", date(2026, 8, 1),
+        "authority-gov-cn-v1",
     ))
 
     _process_discovery_job(job.id, db.get_bind())
 
     assert db.query(MaterialCandidate).count() == 0
     db.expire_all()
-    assert db.get(type(job), job.id).fetched_count == 0
+    assert db.get(type(job), job.id).fetched_count == 1
 
 
 def test_discovery_manual_job_is_cooled_down_and_queue_is_bounded(db, monkeypatch) -> None:
@@ -275,3 +290,247 @@ def test_source_can_disable_teacher_alerts(db) -> None:
 
     assert NotificationService(db).create_policy_change_notifications(change) == []
     assert db.query(TeachingNotification).count() == 0
+
+
+def test_source_failure_is_visible_on_job(db, monkeypatch) -> None:
+    admin = User(username="failure-admin", password_hash="hash", role="admin")
+    db.add(admin); db.commit()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    job = service.create_job(admin, DiscoveryJobCreate(keywords=["思政课"], source_ids=[source.id]))
+    monkeypatch.setattr(discovery, "_candidate_links", lambda *_: (_ for _ in ()).throw(RuntimeError("TLS 连接失败")))
+
+    _process_discovery_job(job.id, db.get_bind())
+
+    db.expire_all()
+    failed = service.require_job(job.id)
+    assert failed.status == "failed"
+    assert failed.progress_stage == "执行失败"
+    assert "中国政府网" in failed.error_message
+    assert "TLS 连接失败" in failed.error_message
+
+
+def test_delete_finished_job_keeps_candidate(db) -> None:
+    admin = User(username="delete-job-admin", password_hash="hash", role="admin")
+    db.add(admin); db.commit()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    job = service.create_job(admin, DiscoveryJobCreate(keywords=["思政课"], source_ids=[source.id]))
+    job.status = "completed"
+    candidate = MaterialCandidate(
+        discovery_job_id=job.id, source_registry_id=source.id, title="待保留候选",
+        source_url="https://www.gov.cn/keep", canonical_url="https://www.gov.cn/keep",
+        source_level="A", status="pending_review", recommended_material_type="central",
+    )
+    db.add(candidate); db.commit(); candidate_id = candidate.id
+
+    assert service.delete_job(job.id) == job.id
+    db.expire_all()
+    assert db.get(MaterialCandidate, candidate_id) is not None
+    assert db.get(MaterialCandidate, candidate_id).discovery_job_id is None
+
+
+def test_delete_unpublished_candidate_removes_evidence_but_published_is_protected(db) -> None:
+    admin = User(username="delete-candidate-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    source = AuthorityDiscoveryService(db).list_sources()[0]
+    candidate = MaterialCandidate(
+        source_registry_id=source.id, title="低关联候选", source_url="https://www.gov.cn/low",
+        canonical_url="https://www.gov.cn/low", source_level="A", status="filtered",
+        recommended_material_type="central", content_hash="e" * 64,
+    )
+    db.add(candidate); db.flush()
+    db.add(MaterialSnapshot(
+        candidate_id=candidate.id, fetched_url=candidate.source_url, content="低关联正文",
+        content_hash="e" * 64, fetched_time=discovery._now(),
+    ))
+    db.add(PolicyChange(
+        candidate_id=candidate.id, change_type="新增重要表述", old_excerpt="旧", new_excerpt="新",
+        importance="low", review_status="pending",
+    ))
+    db.commit(); candidate_id = candidate.id
+
+    assert AuthorityDiscoveryService(db).delete_candidate(candidate_id) == candidate_id
+    assert db.get(MaterialCandidate, candidate_id) is None
+    assert db.query(MaterialSnapshot).filter_by(candidate_id=candidate_id).count() == 0
+    assert db.query(PolicyChange).filter_by(candidate_id=candidate_id).count() == 0
+
+    published = MaterialCandidate(
+        source_registry_id=source.id, title="已发布候选", source_url="https://www.gov.cn/published",
+        canonical_url="https://www.gov.cn/published", source_level="A", status="published",
+        recommended_material_type="central",
+    )
+    db.add(published); db.commit()
+    with pytest.raises(HTTPException) as protected:
+        AuthorityDiscoveryService(db).delete_candidate(published.id)
+    assert protected.value.status_code == 409
+
+
+def test_low_association_candidate_is_filtered_and_review_notification_is_resolved(db) -> None:
+    admin = User(username="filter-notification-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    source = AuthorityDiscoveryService(db).list_sources()[0]
+    candidate = MaterialCandidate(
+        source_registry_id=source.id, title="历史低关联材料", source_url="https://www.gov.cn/legacy-low",
+        canonical_url="https://www.gov.cn/legacy-low", source_level="A", status="pending_review",
+        recommended_material_type="central", association_confidence=0.6, relevance_score=0.35,
+    )
+    db.add(candidate); db.flush()
+    notification = TeachingNotification(
+        recipient_user_id=admin.id, notification_type="material_review", level="important",
+        title="待审核权威材料", content="请审核", action_url=f"/material-discovery?candidate={candidate.id}",
+    )
+    db.add(notification); db.commit()
+
+    pending = AuthorityDiscoveryService(db).list_candidates(status="pending_review")
+
+    assert candidate not in pending
+    db.refresh(candidate); db.refresh(notification)
+    assert candidate.status == "filtered"
+    assert "主题相关度" in candidate.analysis_reason
+    assert notification.is_read is True
+
+
+def test_batch_candidate_actions_reduce_manual_decision_count(db) -> None:
+    admin = User(username="batch-candidate-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    candidates = [MaterialCandidate(
+        source_registry_id=source.id, title=f"批量候选 {index}",
+        source_url=f"https://www.gov.cn/batch-{index}", canonical_url=f"https://www.gov.cn/batch-{index}",
+        source_level="A", status="pending_review", recommended_material_type="central",
+        association_confidence=0.8, relevance_score=0.8,
+    ) for index in range(3)]
+    db.add_all(candidates); db.commit()
+
+    assert service.candidate_decision_summary()["pending_review"] == 3
+    updated = service.batch_candidates(admin, CandidateBatchAction(
+        candidate_ids=[candidates[0].id, candidates[1].id], action="observe",
+    ))
+    assert updated == 2
+    assert service.candidate_decision_summary()["pending_review"] == 1
+    assert service.candidate_decision_summary()["observed"] == 2
+
+    deleted_id = candidates[2].id
+    assert service.batch_candidates(admin, CandidateBatchAction(
+        candidate_ids=[deleted_id], action="delete",
+    )) == 1
+    assert db.get(MaterialCandidate, deleted_id) is None
+    assert service.candidate_decision_summary()["pending_review"] == 0
+
+
+def test_candidate_topic_groups_choose_authoritative_primary_and_keep_unrelated_separate(db) -> None:
+    service = AuthorityDiscoveryService(db)
+    sources = service.list_sources()
+    government = next(item for item in sources if item.source_level == "A")
+    media = next(item for item in sources if item.source_level == "B")
+    related = [
+        MaterialCandidate(
+            source_registry_id=media.id, title="全过程人民民主制度建设最新部署",
+            source_url="https://www.qstheory.cn/topic-1", canonical_url="https://www.qstheory.cn/topic-1",
+            publisher="求是网", source_level="B", status="pending_review",
+            recommended_material_type="central", suggested_course_ids=[1], suggested_chapter_ids=[11],
+            association_confidence=0.86, relevance_score=0.82, importance_score=0.91,
+        ),
+        MaterialCandidate(
+            source_registry_id=government.id, title="关于加强全过程人民民主制度建设的意见",
+            source_url="https://www.gov.cn/topic-2", canonical_url="https://www.gov.cn/topic-2",
+            publisher="中国政府网", source_level="A", status="pending_review",
+            recommended_material_type="central", suggested_course_ids=[1], suggested_chapter_ids=[11],
+            association_confidence=0.78, relevance_score=0.84, importance_score=0.80,
+        ),
+    ]
+    unrelated = MaterialCandidate(
+        source_registry_id=government.id, title="高校毕业生就业服务专项行动通知",
+        source_url="https://www.gov.cn/unrelated-topic", canonical_url="https://www.gov.cn/unrelated-topic",
+        publisher="中国政府网", source_level="A", status="pending_review",
+        recommended_material_type="central", suggested_course_ids=[1], suggested_chapter_ids=[11],
+        association_confidence=0.75, relevance_score=0.8, importance_score=0.8,
+    )
+    db.add_all([*related, unrelated]); db.commit()
+
+    groups = service.candidate_topic_groups()
+
+    assert len(groups) == 1
+    assert groups[0]["candidate_ids"] == sorted(item.id for item in related)
+    assert groups[0]["primary_candidate_id"] == related[1].id
+    assert unrelated.id not in groups[0]["candidate_ids"]
+
+
+def test_batch_duplicate_resolves_topic_group_secondaries(db) -> None:
+    admin = User(username="topic-group-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    secondary = MaterialCandidate(
+        source_registry_id=source.id, title="同议题旁证材料",
+        source_url="https://www.gov.cn/topic-secondary", canonical_url="https://www.gov.cn/topic-secondary",
+        source_level="A", status="pending_review", recommended_material_type="central",
+        association_confidence=0.8, relevance_score=0.8,
+    )
+    db.add(secondary); db.commit()
+
+    assert service.batch_candidates(admin, CandidateBatchAction(
+        candidate_ids=[secondary.id], action="duplicate", note="同议题旁证已归并到主材料",
+    )) == 1
+    db.refresh(secondary)
+    assert secondary.status == "duplicate"
+    assert secondary.review_notes == "同议题旁证已归并到主材料"
+
+
+def test_candidate_summary_and_batch_api_use_static_routes(client, db) -> None:
+    admin = User(username="batch-candidate-api-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    candidates = [MaterialCandidate(
+        source_registry_id=source.id, title=f"接口批量候选 {index}",
+        source_url=f"https://www.gov.cn/api-batch-{index}",
+        canonical_url=f"https://www.gov.cn/api-batch-{index}",
+        source_level="A", status="pending_review", recommended_material_type="central",
+        association_confidence=0.8, relevance_score=0.8,
+    ) for index in range(2)]
+    db.add_all(candidates); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(admin.id))}"}
+
+    summary = client.get("/api/v1/knowledge/discovery/candidates/summary", headers=headers)
+    assert summary.status_code == 200
+    assert summary.json()["data"]["pending_review"] == 2
+    groups = client.get("/api/v1/knowledge/discovery/candidates/groups", headers=headers)
+    assert groups.status_code == 200
+    assert groups.json()["data"] == []
+
+    observed = client.post(
+        "/api/v1/knowledge/discovery/candidates/batch", headers=headers,
+        json={"candidate_ids": [candidates[0].id], "action": "observe"},
+    )
+    assert observed.status_code == 200
+    assert observed.json()["data"]["updated"] == 1
+
+    summary = client.get("/api/v1/knowledge/discovery/candidates/summary", headers=headers)
+    assert summary.json()["data"] == {
+        "pending_review": 1, "high_priority": 1, "observed": 1, "filtered": 0,
+    }
+
+
+def test_batch_delete_rejects_published_candidate(db) -> None:
+    admin = User(username="protected-batch-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    service = AuthorityDiscoveryService(db)
+    source = service.list_sources()[0]
+    published = MaterialCandidate(
+        source_registry_id=source.id, title="批量删除保护材料",
+        source_url="https://www.gov.cn/protected-batch",
+        canonical_url="https://www.gov.cn/protected-batch",
+        source_level="A", status="published", recommended_material_type="central",
+    )
+    db.add(published); db.commit()
+
+    with pytest.raises(HTTPException) as protected:
+        service.batch_candidates(admin, CandidateBatchAction(
+            candidate_ids=[published.id], action="delete",
+        ))
+
+    assert protected.value.status_code == 409
+    assert db.get(MaterialCandidate, published.id) is not None

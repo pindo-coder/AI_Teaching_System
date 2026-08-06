@@ -139,6 +139,35 @@ export interface MaterialCandidate {
   updated_time: string
 }
 
+export interface CandidateDecisionSummary {
+  pending_review: number
+  high_priority: number
+  observed: number
+  filtered: number
+}
+
+export interface CandidateTopicMember {
+  id: number
+  title: string
+  publisher: string | null
+  source_level: string
+  published_date: string | null
+  importance_score: number
+  association_confidence: number
+}
+
+export interface CandidateTopicGroup {
+  group_key: string
+  title: string
+  primary_candidate_id: number
+  candidate_ids: number[]
+  member_count: number
+  suggested_course_ids: number[]
+  suggested_chapter_ids: number[]
+  reason: string
+  members: CandidateTopicMember[]
+}
+
 export interface PolicyChange {
   id: number
   candidate_id: number
@@ -355,8 +384,16 @@ export const knowledgeApi = {
     http.post<ApiResponse<DiscoveryJob>>('/knowledge/discovery/jobs', payload),
   retryDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/retry`),
   cancelDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/cancel`),
+  deleteDiscoveryJob: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/knowledge/discovery/jobs/${id}`),
   discoveryCandidates: (params?: { status?: string; source_level?: string; limit?: number }) =>
     http.get<ApiResponse<MaterialCandidate[]>>('/knowledge/discovery/candidates', { params }),
+  candidateDecisionSummary: () =>
+    http.get<ApiResponse<CandidateDecisionSummary>>('/knowledge/discovery/candidates/summary'),
+  candidateTopicGroups: () =>
+    http.get<ApiResponse<CandidateTopicGroup[]>>('/knowledge/discovery/candidates/groups'),
+  batchDiscoveryCandidates: (payload: { candidate_ids: number[]; action: 'reject' | 'observe' | 'duplicate' | 'delete'; note?: string }) =>
+    http.post<ApiResponse<{ updated: number }>>('/knowledge/discovery/candidates/batch', payload),
+  deleteDiscoveryCandidate: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/knowledge/discovery/candidates/${id}`),
   analyzeDiscoveryCandidate: (id: number) =>
     http.post<ApiResponse<MaterialCandidate>>(`/knowledge/discovery/candidates/${id}/analyze`, undefined, { timeout: 120_000 }),
   policyChanges: (params?: { status?: string; importance?: string; candidate_id?: number; limit?: number }) =>

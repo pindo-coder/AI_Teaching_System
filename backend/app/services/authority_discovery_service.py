@@ -4,7 +4,6 @@ from datetime import date, datetime, timedelta
 from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from email.utils import parsedate_to_datetime
-from html.parser import HTMLParser
 import hashlib
 import ipaddress
 import json
@@ -21,7 +20,7 @@ import httpx
 from fastapi import HTTPException
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from sqlalchemy import Engine, delete, func, or_, select, update
+from sqlalchemy import Engine, and_, delete, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -36,11 +35,13 @@ from app.models.citation import DocumentPage, KnowledgeChunk
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.material_scope import DocumentCourseScope
 from app.models.user import User
+from app.models.teaching_notification import TeachingNotification
 from app.schemas.authority_discovery import (
-    AuthoritySourceCreate, AuthoritySourceUpdate, CandidateReview, DiscoveryJobCreate,
+    AuthoritySourceCreate, AuthoritySourceUpdate, CandidateBatchAction, CandidateReview, DiscoveryJobCreate,
 )
-from app.services.material_center_service import _assert_public_https, _default_fetch
+from app.services.material_center_service import _assert_public_https
 from app.services.material_center_service import MaterialCenterService
+from app.services.authority_source_adapters import get_source_adapter
 from app.services.knowledge_service import KnowledgeService
 from app.services.notification_service import NotificationService
 from app.services.llm_compat import clean_model_text
@@ -78,42 +79,25 @@ DEFAULT_SOURCES = (
 )
 
 
-class _LinkParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__()
-        self.links: list[tuple[str, str]] = []
-        self._href: str | None = None
-        self._text: list[str] = []
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag.lower() != "a":
-            return
-        values = {key.lower(): (value or "").strip() for key, value in attrs}
-        self._href = values.get("href") or None
-        self._text = []
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag.lower() != "a" or not self._href:
-            return
-        title = " ".join(" ".join(self._text).split())
-        self.links.append((self._href, title))
-        self._href = None
-        self._text = []
-
-    def handle_data(self, data: str) -> None:
-        if self._href is not None and data.strip():
-            self._text.append(data.strip())
-
-
 def _domain_matches(hostname: str | None, domain: str) -> bool:
     host = (hostname or "").lower().rstrip(".")
     wanted = domain.lower().removeprefix("www.").rstrip(".")
     return host == wanted or host.endswith(f".{wanted}")
 
 
-def _validate_source_url(url: str, domain: str) -> None:
-    _assert_public_https(url)
+def _validate_source_url(url: str, domain: str, *, allow_http: bool = False) -> None:
     parsed = urlparse(url)
+    if parsed.scheme == "https":
+        _assert_public_https(url)
+    elif allow_http and parsed.scheme == "http" and parsed.hostname and not parsed.username and not parsed.password:
+        try:
+            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 80)}
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail="权威来源网址无法解析") from exc
+        if any(not ipaddress.ip_address(address).is_global for address in addresses):
+            raise HTTPException(status_code=400, detail="权威来源网址不能指向本机或内网地址")
+    else:
+        raise HTTPException(status_code=400, detail="权威来源必须使用 HTTPS")
     if not _domain_matches(parsed.hostname, domain):
         raise HTTPException(status_code=400, detail="来源入口网址必须属于配置的白名单域名")
 
@@ -205,17 +189,69 @@ def _importance_score(*, source_level: str, relevance: float, association: float
     return score, level, reason
 
 
-def _read_listing(source: AuthoritySourceRegistry) -> list[tuple[str, str]]:
-    _validate_source_url(source.entry_url, source.domain)
+def _fetch_source_bytes(
+    source: AuthoritySourceRegistry, url: str, *, limit: int,
+) -> tuple[bytes, str, dict[str, str], str]:
+    """Fetch one allowlisted URL without inheriting workstation proxy settings.
+
+    Some official sites currently redirect their own HTTPS URL to HTTP. A
+    downgrade is accepted only for the exact same public hostname after an
+    HTTPS request; arbitrary HTTP source entries and cross-host downgrades stay
+    forbidden.
+    """
+    _validate_source_url(url, source.domain)
     headers = {"User-Agent": "AI-Teaching-Authority-Discovery/1.0"}
-    with httpx.Client(timeout=25, follow_redirects=True, headers=headers) as client:
-        response = client.get(source.entry_url)
-        response.raise_for_status()
-        _validate_source_url(str(response.url), source.domain)
-        content_type = response.headers.get("content-type", "").lower()
-        body = response.content[:5 * 1024 * 1024]
-        encoding = response.encoding or "utf-8"
-        text = body.decode(encoding, errors="replace")
+    current_url = url
+    original_host = (urlparse(url).hostname or "").lower()
+    downgraded = False
+    transient_errors = (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError)
+    with httpx.Client(timeout=25, follow_redirects=False, headers=headers, trust_env=False) as client:
+        for redirect_count in range(6):
+            for attempt in range(3):
+                try:
+                    with client.stream("GET", current_url) as response:
+                        if response.is_redirect and response.headers.get("location"):
+                            target = urljoin(current_url, response.headers["location"])
+                            target_parsed = urlparse(target)
+                            if target_parsed.scheme == "http":
+                                if (target_parsed.hostname or "").lower() != original_host:
+                                    raise HTTPException(status_code=400, detail="权威来源禁止跨域降级到 HTTP")
+                                downgraded = True
+                            _validate_source_url(target, source.domain, allow_http=downgraded)
+                            current_url = target
+                            break
+                        if response.status_code >= 400:
+                            if response.status_code in {408, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524} and attempt < 2:
+                                time.sleep(0.6 * (attempt + 1))
+                                continue
+                            raise HTTPException(
+                                status_code=400, detail=f"权威原文访问失败（HTTP {response.status_code}）",
+                            )
+                        chunks: list[bytes] = []
+                        size = 0
+                        for chunk in response.iter_bytes():
+                            size += len(chunk)
+                            if size > limit:
+                                raise HTTPException(status_code=413, detail="权威原文超过系统允许的资料大小")
+                            chunks.append(chunk)
+                        return b"".join(chunks), str(response.url), dict(response.headers), response.encoding or "utf-8"
+                except transient_errors:
+                    if attempt == 2:
+                        raise
+                    time.sleep(0.4 * (attempt + 1))
+            else:
+                continue
+            # A redirect updates current_url and exits the retry loop.
+            continue
+    raise HTTPException(status_code=400, detail="权威来源重定向次数过多")
+
+
+def _read_listing(source: AuthoritySourceRegistry) -> list[tuple[str, str]]:
+    body, final_url, response_headers, encoding = _fetch_source_bytes(
+        source, source.entry_url, limit=5 * 1024 * 1024,
+    )
+    content_type = response_headers.get("content-type", "").lower()
+    text = body.decode(encoding, errors="replace")
     if source.adapter_type in {"rss", "sitemap"} or "xml" in content_type or text.lstrip().startswith("<rss"):
         try:
             root = ET.fromstring(text)
@@ -231,9 +267,32 @@ def _read_listing(source: AuthoritySourceRegistry) -> list[tuple[str, str]]:
             if link:
                 items.append((link, values.get("title", "")))
         return items
-    parser = _LinkParser()
-    parser.feed(text)
-    return parser.links
+    return get_source_adapter(source.domain).parse_listing(text, final_url)
+
+
+def _fetch_source_article(
+    source: AuthoritySourceRegistry, url: str,
+) -> tuple[str, str, str | None, str | None, date | None, str]:
+    """Fetch and parse a detail page with its registered source adapter."""
+    limit = settings.max_upload_size_mb * 1024 * 1024
+    body, final_url, response_headers, encoding = _fetch_source_bytes(source, url, limit=limit)
+    content_type = response_headers.get("content-type", "").lower()
+    raw = body.decode(encoding, errors="replace")
+    adapter = get_source_adapter(source.domain)
+    if "html" in content_type or "<html" in raw[:1000].lower():
+        parsed = adapter.parse_article(raw)
+        content = parsed.content
+        title = parsed.title
+        publisher = parsed.publisher
+        published_date = parsed.published_date
+        parser_version = parsed.parser_version
+    else:
+        content = raw.strip()
+        title = publisher = published_date = None
+        parser_version = "authority-plain-text-v1"
+    if len(re.sub(r"\s+", "", content)) < 80:
+        raise HTTPException(status_code=400, detail="未能从权威网页提取有效正文")
+    return content, final_url, title, publisher, published_date, parser_version
 
 
 def _candidate_links(source: AuthoritySourceRegistry, keywords: list[str]) -> list[tuple[str, str]]:
@@ -243,8 +302,12 @@ def _candidate_links(source: AuthoritySourceRegistry, keywords: list[str]) -> li
     for href, title in _read_listing(source):
         absolute = urljoin(source.entry_url, href)
         parsed = urlparse(absolute)
-        if parsed.scheme != "https" or not _domain_matches(parsed.hostname, source.domain):
+        if not _domain_matches(parsed.hostname, source.domain) or parsed.scheme not in {"http", "https"}:
             continue
+        # Keep stored and queued URLs on HTTPS. The fetcher may follow a
+        # same-host downgrade only when the official server explicitly sends it.
+        if parsed.scheme == "http":
+            absolute = urlunparse(("https", parsed.netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
         canonical = _canonical_url(absolute)
         if canonical in seen:
             continue
@@ -376,7 +439,48 @@ class AuthorityDiscoveryService:
         self.db.commit(); self.db.refresh(job)
         return job
 
+    def delete_job(self, job_id: int) -> int:
+        job = self.require_job(job_id)
+        if job.status in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="运行中或排队中的任务不能删除，请先停止任务")
+        self.db.execute(update(MaterialCandidate).where(
+            MaterialCandidate.discovery_job_id == job.id,
+        ).values(discovery_job_id=None))
+        self.db.delete(job)
+        self.db.commit()
+        return job_id
+
+    def _normalize_pending_candidates(self) -> int:
+        threshold = float(settings.authority_discovery_min_association_score)
+        relevance_threshold = float(settings.authority_discovery_min_relevance_score)
+        low_association = list(self.db.scalars(select(MaterialCandidate).where(
+            MaterialCandidate.status == "pending_review",
+            or_(
+                MaterialCandidate.association_confidence < threshold,
+                and_(
+                    MaterialCandidate.relevance_score > 0,
+                    MaterialCandidate.relevance_score < relevance_threshold,
+                ),
+            ),
+        )).all())
+        if low_association:
+            notifications = NotificationService(self.db)
+            for candidate in low_association:
+                candidate.status = "filtered"
+                if 0 < candidate.relevance_score < relevance_threshold:
+                    candidate.analysis_reason = (
+                        f"主题相关度 {candidate.relevance_score:.0%} 低于审核阈值 {relevance_threshold:.0%}，已自动过滤。"
+                    )
+                else:
+                    candidate.analysis_reason = (
+                        f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {threshold:.0%}，已自动过滤。"
+                    )
+                notifications.resolve_candidate_review_notifications(candidate.id, commit=False)
+            self.db.commit()
+        return len(low_association)
+
     def list_candidates(self, *, status: str | None = None, source_level: str | None = None, limit: int = 100) -> list[MaterialCandidate]:
+        self._normalize_pending_candidates()
         query = select(MaterialCandidate).order_by(MaterialCandidate.importance_score.desc(), MaterialCandidate.created_time.desc())
         if status:
             query = query.where(MaterialCandidate.status == status)
@@ -384,11 +488,140 @@ class AuthorityDiscoveryService:
             query = query.where(MaterialCandidate.source_level == source_level)
         return list(self.db.scalars(query.limit(limit)).all())
 
+    def candidate_decision_summary(self) -> dict[str, int]:
+        self._normalize_pending_candidates()
+        counts = {
+            status: int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+                MaterialCandidate.status == status,
+            )) or 0)
+            for status in ("pending_review", "observed", "filtered")
+        }
+        high_priority = int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+            MaterialCandidate.status == "pending_review",
+            or_(MaterialCandidate.importance_level == "high", MaterialCandidate.source_level == "A"),
+        )) or 0)
+        return {
+            "pending_review": counts["pending_review"],
+            "high_priority": high_priority,
+            "observed": counts["observed"],
+            "filtered": counts["filtered"],
+        }
+
+    def _same_candidate_topic(self, left: MaterialCandidate, right: MaterialCandidate) -> bool:
+        left_chapters = set(left.suggested_chapter_ids or [])
+        if not left_chapters.intersection(right.suggested_chapter_ids or []):
+            return False
+        if left.published_date and right.published_date:
+            if abs((left.published_date - right.published_date).days) > 120:
+                return False
+        left_grams, right_grams = self._grams(left.title), self._grams(right.title)
+        return len(left_grams & right_grams) / max(1, len(left_grams | right_grams)) >= 0.30
+
+    def candidate_topic_groups(self) -> list[dict]:
+        """Conservatively group pending candidates that describe the same textbook topic."""
+        candidates = self.list_candidates(status="pending_review", limit=500)
+        components: list[list[MaterialCandidate]] = []
+        for candidate in candidates:
+            # Complete-link grouping avoids transitive chains that can merge unrelated endpoints.
+            matching = next((group for group in components if all(
+                self._same_candidate_topic(candidate, member) for member in group
+            )), None)
+            if matching is None:
+                components.append([candidate])
+            else:
+                matching.append(candidate)
+        source_rank = {"A": 0, "B": 1, "C": 2, "D": 3}
+        groups: list[dict] = []
+        for members in components:
+            if len(members) < 2:
+                continue
+            members.sort(key=lambda item: (
+                source_rank.get(item.source_level, 9),
+                -float(item.importance_score or 0),
+                -float(item.association_confidence or 0),
+                -(item.published_date.toordinal() if item.published_date else 0),
+                item.id,
+            ))
+            primary = members[0]
+            ids = sorted(item.id for item in members)
+            digest = hashlib.sha1(",".join(map(str, ids)).encode("ascii")).hexdigest()[:12]
+            groups.append({
+                "group_key": f"topic-{digest}",
+                "title": primary.title,
+                "primary_candidate_id": primary.id,
+                "candidate_ids": ids,
+                "member_count": len(members),
+                "suggested_course_ids": sorted({course_id for item in members for course_id in (item.suggested_course_ids or [])}),
+                "suggested_chapter_ids": sorted({chapter_id for item in members for chapter_id in (item.suggested_chapter_ids or [])}),
+                "reason": "共享教材专题且标题表述高度相近；已按来源等级、重要度和关联置信度推荐主材料。",
+                "members": [{
+                    "id": item.id,
+                    "title": item.title,
+                    "publisher": item.publisher,
+                    "source_level": item.source_level,
+                    "published_date": item.published_date,
+                    "importance_score": item.importance_score,
+                    "association_confidence": item.association_confidence,
+                } for item in members],
+            })
+        groups.sort(key=lambda item: (-item["member_count"], item["primary_candidate_id"]))
+        return groups
+
+    def batch_candidates(self, user: User, payload: CandidateBatchAction) -> int:
+        candidate_ids = list(dict.fromkeys(payload.candidate_ids))
+        candidates = list(self.db.scalars(select(MaterialCandidate).where(
+            MaterialCandidate.id.in_(candidate_ids),
+        )).all())
+        if len(candidates) != len(candidate_ids):
+            raise HTTPException(status_code=400, detail="批量操作包含不存在的候选材料")
+        if payload.action in {"reject", "observe", "duplicate"}:
+            invalid = [item for item in candidates if item.status not in {"pending_review", "fetched", "analyzed"}]
+            if invalid:
+                raise HTTPException(status_code=409, detail="批量审核只适用于尚未处理的候选材料")
+            now = _now()
+            for candidate in candidates:
+                candidate.status = {
+                    "reject": "rejected", "observe": "observed", "duplicate": "duplicate",
+                }[payload.action]
+                candidate.reviewed_by = user.id
+                candidate.reviewed_time = now
+                candidate.review_notes = payload.note
+                NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
+            self.db.commit()
+            return len(candidates)
+        if any(item.status == "published" or item.document_id is not None for item in candidates):
+            raise HTTPException(status_code=409, detail="批量删除中包含已发布材料，请改为前往资料中心归档")
+        for candidate in candidates:
+            self._delete_candidate_records(candidate)
+        self.db.commit()
+        return len(candidates)
+
     def require_candidate(self, candidate_id: int) -> MaterialCandidate:
         candidate = self.db.get(MaterialCandidate, candidate_id)
         if candidate is None:
             raise HTTPException(status_code=404, detail="候选材料不存在")
         return candidate
+
+    def delete_candidate(self, candidate_id: int) -> int:
+        candidate = self.require_candidate(candidate_id)
+        if candidate.status == "published" or candidate.document_id is not None:
+            raise HTTPException(status_code=409, detail="已发布材料不能从候选池删除，请前往资料中心归档")
+        self._delete_candidate_records(candidate)
+        self.db.commit()
+        return candidate_id
+
+    def _delete_candidate_records(self, candidate: MaterialCandidate) -> None:
+        NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
+        change_ids = list(self.db.scalars(select(PolicyChange.id).where(
+            PolicyChange.candidate_id == candidate.id,
+        )).all())
+        if change_ids:
+            self.db.execute(update(TeachingNotification).where(
+                TeachingNotification.policy_change_id.in_(change_ids),
+            ).values(policy_change_id=None))
+        self.db.execute(delete(PolicyChange).where(PolicyChange.candidate_id == candidate.id))
+        self.db.execute(delete(MaterialSnapshot).where(MaterialSnapshot.candidate_id == candidate.id))
+        self.db.delete(candidate)
 
     def snapshots(self, candidate_id: int) -> list[MaterialSnapshot]:
         return list(self.db.scalars(select(MaterialSnapshot).where(
@@ -404,10 +637,12 @@ class AuthorityDiscoveryService:
         candidate.review_notes = payload.review_notes
         if payload.action == "reject":
             candidate.status = "rejected"
+            NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
             self.db.commit()
             return candidate
         if payload.action == "duplicate":
             candidate.status = "duplicate"
+            NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
             self.db.commit()
             return candidate
         if not payload.course_ids and not payload.chapter_ids:
@@ -441,6 +676,7 @@ class AuthorityDiscoveryService:
         candidate.course_ids = list(dict.fromkeys(payload.course_ids))
         candidate.chapter_ids = list(dict.fromkeys(payload.chapter_ids))
         candidate.knowledge_tags = list(dict.fromkeys(payload.knowledge_tags))
+        NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
         self.db.commit()
         self.db.refresh(candidate)
         # 候选材料发布后，继续处理此前已确认但等待发布的政策变化。
@@ -944,6 +1180,8 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                 source.consecutive_failures += 1
                 source.last_error = str(exc)[:1000]
                 job.failed_count += 1
+                summary = f"{source.name}：{str(exc)[:300]}"
+                job.error_message = "；".join(filter(None, [job.error_message, summary]))[-1000:]
                 job.processed_sources += 1
                 db.commit()
                 continue
@@ -965,7 +1203,10 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                     if last_request_time and wait_seconds > 0:
                         time.sleep(wait_seconds)
                     last_request_time = time.monotonic()
-                    content, final_url, title, publisher, published_date = _default_fetch(source_url)
+                    content, final_url, title, publisher, published_date, parser_version = _fetch_source_article(
+                        source, source_url,
+                    )
+                    job.fetched_count += 1
                     canonical = _canonical_url(final_url)
                     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                     existing = db.scalar(select(MaterialCandidate).where(
@@ -1011,15 +1252,17 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                     db.flush()
                     db.add(MaterialSnapshot(
                         candidate_id=candidate.id, fetched_url=final_url, content=content,
-                        content_hash=content_hash, parser_version="authority-v2", fetched_time=_now(),
+                        content_hash=content_hash, parser_version=parser_version, fetched_time=_now(),
                     ))
                     db.commit()
                     candidate = db.get(MaterialCandidate, candidate.id)
                     try:
+                        job.progress_stage = f"关联教材并对比原文：{title[:18]}"
+                        db.commit()
                         discovery_service = AuthorityDiscoveryService(db)
                         discovery_service.associate_candidate(candidate.id)
                         candidate = db.get(MaterialCandidate, candidate.id)
-                        if candidate.suggested_chapter_ids and candidate.association_confidence < float(settings.authority_discovery_min_association_score):
+                        if candidate.association_confidence < float(settings.authority_discovery_min_association_score):
                             candidate.status = "filtered"
                             candidate.analysis_reason = f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {settings.authority_discovery_min_association_score:.0%}，已自动过滤。"
                             job.filtered_count += 1
@@ -1035,21 +1278,26 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                         candidate = db.get(MaterialCandidate, candidate.id)
                         candidate.analysis_reason = f"正文已抓取，自动关联/差异分析失败：{str(analysis_exc)[:800]}"
                         candidate.status = "pending_review"
-                    job.fetched_count += 1
                     if candidate.status == "pending_review":
                         job.pending_review_count += 1
                     daily_fetch_count += 1
                 except Exception as exc:
                     job.failed_count += 1
-                    job.error_message = str(exc)[:1000]
+                    summary = f"{source.name} {source_url}：{str(exc)[:240]}"
+                    job.error_message = "；".join(filter(None, [job.error_message, summary]))[-1000:]
                 db.commit()
             source.last_success_time = _now()
             source.consecutive_failures = 0
             source.last_error = None
             job.processed_sources += 1
             db.commit()
-        job.status = "failed" if job.failed_count and not job.fetched_count else "completed"
-        if not daily_limit_reached:
+        handled_count = job.fetched_count + job.filtered_count + job.deduped_count
+        job.status = "failed" if job.failed_count and not handled_count else "completed"
+        if job.status == "failed":
+            job.progress_stage = "执行失败"
+        elif job.failed_count:
+            job.progress_stage = "部分成功，等待人工审核"
+        elif not daily_limit_reached:
             job.progress_stage = "等待人工审核"
         if daily_limit_reached:
             job.error_message = f"已达到每日抓取上限 {daily_limit}，剩余来源将在下一次任务处理"

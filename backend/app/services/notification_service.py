@@ -5,6 +5,7 @@ from datetime import datetime
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.authority_discovery import AuthoritySourceRegistry, MaterialCandidate, PolicyChange
 from app.models.teaching_class import TeachingClass, TeachingClassMaterial, TeachingClassTeacher
 from app.models.teaching_notification import TeachingNotification
@@ -120,7 +121,59 @@ class NotificationService:
                 self.db.refresh(item)
         return created
 
+    def resolve_candidate_review_notifications(self, candidate_id: int, *, commit: bool = True) -> int:
+        items = list(self.db.scalars(select(TeachingNotification).where(
+            TeachingNotification.notification_type == "material_review",
+            TeachingNotification.action_url == f"/material-discovery?candidate={candidate_id}",
+            TeachingNotification.is_read.is_(False),
+        )).all())
+        now = datetime.utcnow()
+        for item in items:
+            item.is_read = True
+            item.read_time = now
+        if items and commit:
+            self.db.commit()
+        return len(items)
+
+    def _resolve_stale_candidate_review_notifications(self, user_id: int) -> int:
+        items = list(self.db.scalars(select(TeachingNotification).where(
+            TeachingNotification.recipient_user_id == user_id,
+            TeachingNotification.notification_type == "material_review",
+            TeachingNotification.is_read.is_(False),
+        )).all())
+        resolved = 0
+        now = datetime.utcnow()
+        threshold = float(settings.authority_discovery_min_association_score)
+        relevance_threshold = float(settings.authority_discovery_min_relevance_score)
+        for item in items:
+            prefix = "/material-discovery?candidate="
+            candidate_id = int(item.action_url.removeprefix(prefix)) if item.action_url and item.action_url.removeprefix(prefix).isdigit() else None
+            candidate = self.db.get(MaterialCandidate, candidate_id) if candidate_id else None
+            low_relevance = bool(
+                candidate is not None and 0 < candidate.relevance_score < relevance_threshold
+            )
+            if candidate is not None and candidate.status == "pending_review" and (
+                candidate.association_confidence < threshold or low_relevance
+            ):
+                candidate.status = "filtered"
+                if low_relevance:
+                    candidate.analysis_reason = (
+                        f"主题相关度 {candidate.relevance_score:.0%} 低于审核阈值 {relevance_threshold:.0%}，已自动过滤。"
+                    )
+                else:
+                    candidate.analysis_reason = (
+                        f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {threshold:.0%}，已自动过滤。"
+                    )
+            if candidate is None or candidate.status != "pending_review":
+                item.is_read = True
+                item.read_time = now
+                resolved += 1
+        if resolved:
+            self.db.commit()
+        return resolved
+
     def list_for_user(self, user_id: int, *, unread_only: bool = False, limit: int = 50) -> list[TeachingNotification]:
+        self._resolve_stale_candidate_review_notifications(user_id)
         query = select(TeachingNotification).where(
             TeachingNotification.recipient_user_id == user_id
         ).order_by(TeachingNotification.created_time.desc()).limit(limit)

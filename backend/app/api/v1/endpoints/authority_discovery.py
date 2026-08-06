@@ -8,8 +8,8 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.authority_discovery import (
     AuthoritySourceCreate, AuthoritySourceRead, AuthoritySourceUpdate,
-    CandidateReview, DiscoveryJobCreate, DiscoveryJobRead, MaterialCandidateRead,
-    MaterialSnapshotRead, PolicyChangeRead, PolicyChangeReview,
+    CandidateBatchAction, CandidateDecisionSummary, CandidateReview, CandidateTopicGroup, DiscoveryJobCreate,
+    DiscoveryJobRead, MaterialCandidateRead, MaterialSnapshotRead, PolicyChangeRead, PolicyChangeReview,
 )
 from app.schemas.common import ApiResponse
 from app.services.authority_discovery_service import (
@@ -109,6 +109,16 @@ def cancel_job(
     return ApiResponse(message="发现任务已停止", data=DiscoveryJobRead.model_validate(job))
 
 
+@router.delete("/jobs/{job_id}", response_model=ApiResponse[dict[str, int]])
+def delete_job(
+    job_id: int,
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    deleted_id = AuthorityDiscoveryService(db).delete_job(job_id)
+    return ApiResponse(message="发现任务记录已删除", data={"id": deleted_id})
+
+
 @router.get("/candidates", response_model=ApiResponse[list[MaterialCandidateRead]])
 def list_candidates(
     candidate_status: str | None = Query(default=None, alias="status"),
@@ -123,6 +133,37 @@ def list_candidates(
     )])
 
 
+@router.get("/candidates/summary", response_model=ApiResponse[CandidateDecisionSummary])
+def candidate_summary(
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[CandidateDecisionSummary]:
+    return ApiResponse(data=CandidateDecisionSummary(
+        **AuthorityDiscoveryService(db).candidate_decision_summary(),
+    ))
+
+
+@router.get("/candidates/groups", response_model=ApiResponse[list[CandidateTopicGroup]])
+def candidate_groups(
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[list[CandidateTopicGroup]]:
+    return ApiResponse(data=[
+        CandidateTopicGroup(**item)
+        for item in AuthorityDiscoveryService(db).candidate_topic_groups()
+    ])
+
+
+@router.post("/candidates/batch", response_model=ApiResponse[dict[str, int]])
+def batch_candidates(
+    payload: CandidateBatchAction,
+    user: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    updated = AuthorityDiscoveryService(db).batch_candidates(user, payload)
+    return ApiResponse(message="候选材料已批量处理", data={"updated": updated})
+
+
 @router.get("/candidates/{candidate_id}", response_model=ApiResponse[MaterialCandidateRead])
 def get_candidate(
     candidate_id: int,
@@ -130,6 +171,16 @@ def get_candidate(
     db: Session = Depends(get_db),
 ) -> ApiResponse[MaterialCandidateRead]:
     return ApiResponse(data=MaterialCandidateRead.model_validate(AuthorityDiscoveryService(db).require_candidate(candidate_id)))
+
+
+@router.delete("/candidates/{candidate_id}", response_model=ApiResponse[dict[str, int]])
+def delete_candidate(
+    candidate_id: int,
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    deleted_id = AuthorityDiscoveryService(db).delete_candidate(candidate_id)
+    return ApiResponse(message="候选材料及其快照、差异证据已删除", data={"id": deleted_id})
 
 
 @router.get("/candidates/{candidate_id}/snapshots", response_model=ApiResponse[list[MaterialSnapshotRead]])
