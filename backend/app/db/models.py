@@ -28,7 +28,12 @@ from app.models.material_scope import (
 )
 from app.models.material_import import MaterialImportBatch, MaterialImportItem
 from app.models.agent_run import AgentRun, AgentStep
+from app.models.agent_execution import AgentExecution
 from app.models.presentation_template import PresentationTemplate
 from app.models.lesson_publication import LessonPublication
+from app.models.authority_discovery import (
+    AuthoritySourceRegistry, DiscoveryJob, MaterialCandidate, MaterialSnapshot, PolicyChange,
+)
+from app.models.teaching_notification import TeachingNotification
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback", "DocumentCourseScope", "DocumentChapterScope", "DocumentClassScope", "DocumentKnowledgeTag", "MaterialImportBatch", "MaterialImportItem", "AgentRun", "AgentStep", "PresentationTemplate", "LessonPublication"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback", "DocumentCourseScope", "DocumentChapterScope", "DocumentClassScope", "DocumentKnowledgeTag", "MaterialImportBatch", "MaterialImportItem", "AgentRun", "AgentStep", "AgentExecution", "PresentationTemplate", "LessonPublication", "AuthoritySourceRegistry", "DiscoveryJob", "MaterialCandidate", "MaterialSnapshot", "PolicyChange", "TeachingNotification"]

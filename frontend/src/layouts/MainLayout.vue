@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { Bell, Clock, Menu, Search } from '@element-plus/icons-vue'
-import FloatingAiAssistant from '@/components/FloatingAiAssistant.vue'
+import AgentDock from '@/components/AgentDock.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
 import { navigationForRole, type NavigationItem } from '@/config/navigation'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { agentApi, type AgentRun } from '@/api/agents'
+import { notificationApi, type TeachingNotification } from '@/api/notifications'
 
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
@@ -18,6 +19,9 @@ const messageVisible = ref(false)
 const taskVisible = ref(false)
 const taskLoading = ref(false)
 const agentRuns = ref<AgentRun[]>([])
+const notifications = ref<TeachingNotification[]>([])
+const notificationLoading = ref(false)
+let notificationTimer: number | undefined
 
 const navigationItems = computed(() => navigationForRole(auth.user?.role))
 const roleLabel = computed(() => ({ student: '学生', teacher: '教师', admin: '管理员' }[auth.user?.role || 'student']))
@@ -43,7 +47,44 @@ function navigate(path: string) {
   router.push(path)
 }
 
-onMounted(() => workspace.initialize())
+onMounted(() => {
+  workspace.initialize()
+  void loadNotifications()
+  notificationTimer = window.setInterval(() => void loadNotifications(), 60_000)
+})
+
+onUnmounted(() => {
+  if (notificationTimer) window.clearInterval(notificationTimer)
+})
+
+const unreadNotificationCount = computed(() => notifications.value.filter((item) => !item.is_read).length)
+
+async function loadNotifications() {
+  if (!auth.user) return
+  notificationLoading.value = true
+  try {
+    const response = await notificationApi.list(false, 80)
+    notifications.value = response.data.data
+  } finally {
+    notificationLoading.value = false
+  }
+}
+
+async function markNotificationRead(item: TeachingNotification) {
+  if (item.is_read) return
+  try {
+    const response = await notificationApi.markRead(item.id)
+    const index = notifications.value.findIndex((notification) => notification.id === item.id)
+    if (index >= 0) notifications.value[index] = response.data.data
+  } catch { /* 消息入口不应阻断主页面操作 */ }
+}
+
+async function markAllNotificationsRead() {
+  try {
+    await notificationApi.markAllRead()
+    notifications.value = notifications.value.map((item) => ({ ...item, is_read: true, read_time: new Date().toISOString() }))
+  } catch { /* 消息入口不应阻断主页面操作 */ }
+}
 
 async function loadAgentRuns() {
   if (auth.user?.role === 'student') return
@@ -75,6 +116,10 @@ function openAgentRun() {
 
 watch(taskVisible, (visible) => {
   if (visible) void loadAgentRuns()
+})
+
+watch(() => auth.user?.id, () => {
+  void loadNotifications()
 })
 </script>
 
@@ -122,7 +167,9 @@ watch(taskVisible, (visible) => {
             <el-button circle text :icon="Clock" aria-label="查看后台任务" @click="taskVisible = true" />
           </el-tooltip>
           <el-tooltip content="消息提醒">
-            <el-button circle text :icon="Bell" aria-label="查看消息提醒" @click="messageVisible = true" />
+            <el-badge :value="unreadNotificationCount" :hidden="unreadNotificationCount === 0" :max="99" class="notification-badge">
+              <el-button circle text :icon="Bell" aria-label="查看消息提醒" @click="messageVisible = true; void loadNotifications()" />
+            </el-badge>
           </el-tooltip>
           <el-dropdown>
             <button type="button" class="user-avatar" aria-label="打开用户菜单">{{ auth.user?.username?.slice(0, 1).toUpperCase() }}</button>
@@ -136,8 +183,8 @@ watch(taskVisible, (visible) => {
         </div>
       </header>
 
+      <AgentDock />
       <main class="page"><router-view /></main>
-      <FloatingAiAssistant />
     </div>
 
     <el-drawer v-model="mobileNavVisible" title="功能导航" direction="ltr" size="min(88vw, 340px)">
@@ -158,10 +205,32 @@ watch(taskVisible, (visible) => {
     </el-drawer>
 
     <el-drawer v-model="messageVisible" title="消息提醒" size="min(92vw, 420px)">
-      <div class="utility-drawer-content">
-        <span class="utility-mark"><el-icon><Bell /></el-icon></span>
-        <h3>暂无新的教学提醒</h3>
-        <p>第一阶段已预留统一消息入口。后续中央文件更新、任务截止和审核结果会集中显示在这里。</p>
+      <div v-loading="notificationLoading" class="notification-center">
+        <div class="notification-toolbar">
+          <span>显示最近的教学与权威资料提醒</span>
+          <el-button text type="primary" :disabled="unreadNotificationCount === 0" @click="markAllNotificationsRead">全部已读</el-button>
+        </div>
+        <button
+          v-for="item in notifications"
+          :key="item.id"
+          type="button"
+          class="notification-item"
+          :class="{ unread: !item.is_read }"
+          @click="markNotificationRead(item)"
+        >
+          <span class="notification-item-head">
+            <strong>{{ item.title }}</strong>
+            <el-tag size="small" :type="item.level === 'urgent' ? 'danger' : item.level === 'important' ? 'warning' : 'info'">{{ item.level === 'urgent' ? '紧急' : item.level === 'important' ? '重要' : '提醒' }}</el-tag>
+          </span>
+          <span class="notification-item-content">{{ item.content }}</span>
+          <a v-if="item.source_url" class="notification-source" :href="item.source_url" target="_blank" rel="noreferrer" @click.stop="markNotificationRead(item)">查看权威原文 ↗</a>
+          <small>{{ new Date(item.created_time).toLocaleString() }}</small>
+        </button>
+        <div v-if="!notifications.length && !notificationLoading" class="utility-drawer-content">
+          <span class="utility-mark"><el-icon><Bell /></el-icon></span>
+          <h3>暂无教学提醒</h3>
+          <p>已确认的权威资料更新、任务截止和审核结果会集中显示在这里。</p>
+        </div>
       </div>
     </el-drawer>
 
@@ -275,6 +344,16 @@ watch(taskVisible, (visible) => {
 .utility-drawer-content { display: grid; min-height: 320px; place-items: center; align-content: center; gap: var(--space-3); text-align: center; }
 .utility-drawer-content h3, .utility-drawer-content p { max-width: 320px; margin: 0; }
 .utility-drawer-content p { color: var(--ink-600); line-height: 1.7; }
+.notification-center { display: grid; gap: var(--space-3); }
+.notification-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); color: var(--ink-500); font-size: var(--fs-meta); }
+.notification-item { display: grid; gap: 8px; width: 100%; padding: 14px; color: var(--ink-800); text-align: left; background: var(--surface-card); border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; }
+.notification-item.unread { background: #f3f7ff; border-color: var(--action-line); box-shadow: inset 3px 0 0 var(--action-blue); }
+.notification-item:hover { border-color: var(--action-blue); }
+.notification-item-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.notification-item-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notification-item-content { color: var(--ink-600); line-height: 1.6; white-space: pre-line; }
+.notification-source { width: fit-content; color: var(--action-blue); font-size: var(--fs-meta); text-decoration: none; }
+.notification-item small { color: var(--ink-400); }
 .utility-mark { display: grid; width: 48px; height: 48px; place-items: center; color: var(--action-blue); background: var(--action-soft); border-radius: var(--radius-card); font-size: 22px; }
 .agent-task-center { display: grid; gap: var(--space-3); min-height: 220px; align-content: start; }
 .agent-task-item { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); color: var(--ink-900); background: var(--surface-card); border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }

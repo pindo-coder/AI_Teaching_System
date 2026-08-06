@@ -54,6 +54,119 @@ export interface MaterialSuggestion {
   score: number
 }
 
+export interface AuthoritySource {
+  id: number
+  name: string
+  domain: string
+  source_level: 'A' | 'B' | 'C' | 'D'
+  adapter_type: 'html_list' | 'rss' | 'sitemap'
+  entry_url: string
+  fetch_interval_minutes: number
+  request_interval_seconds: number
+  allow_full_text: boolean
+  allow_alert: boolean
+  is_enabled: boolean
+  last_success_time: string | null
+  consecutive_failures: number
+  last_error: string | null
+  created_time: string
+  updated_time: string
+}
+
+export interface DiscoveryJob {
+  id: number
+  created_by: number
+  trigger_type: string
+  query_text: string | null
+  keywords: string[]
+  start_date: string | null
+  end_date: string | null
+  source_ids: number[]
+  status: string
+  progress_stage: string
+  total_sources: number
+  processed_sources: number
+  discovered_count: number
+  fetched_count: number
+  deduped_count: number
+  pending_review_count: number
+  filtered_count: number
+  extraction_failed_count: number
+  failed_count: number
+  retry_count: number
+  error_message: string | null
+  started_time: string | null
+  finished_time: string | null
+  created_time: string
+  updated_time: string
+}
+
+export interface MaterialCandidate {
+  id: number
+  discovery_job_id: number | null
+  source_registry_id: number
+  title: string
+  source_url: string
+  canonical_url: string
+  publisher: string | null
+  published_date: string | null
+  source_level: string
+  recommended_material_type: string
+  status: string
+  content_hash: string | null
+  content_preview: string | null
+  extraction_quality_score: number
+  relevance_score: number
+  importance_score: number
+  importance_level: string
+  importance_reason: string | null
+  freshness_score: number
+  novelty_score: number
+  analysis_reason: string | null
+  review_notes: string | null
+  course_ids: number[]
+  chapter_ids: number[]
+  knowledge_tags: string[]
+  suggested_course_ids: number[] | null
+  suggested_chapter_ids: number[] | null
+  suggested_knowledge_tags: string[] | null
+  association_confidence: number
+  association_reason: string | null
+  reviewed_by: number | null
+  reviewed_time: string | null
+  document_id: number | null
+  created_time: string
+  updated_time: string
+}
+
+export interface PolicyChange {
+  id: number
+  candidate_id: number
+  old_document_id: number | null
+  old_chapter_id: number | null
+  change_type: string
+  old_source_title: string | null
+  old_source_url: string | null
+  new_source_title: string | null
+  new_source_url: string | null
+  old_excerpt: string
+  new_excerpt: string
+  similarity_score: number
+  importance: 'high' | 'medium' | 'low'
+  alert_recommended: boolean
+  review_status: 'pending' | 'confirmed' | 'dismissed' | 'observed'
+  affected_course_ids: number[]
+  affected_chapter_ids: number[]
+  ai_explanation: string | null
+  kb_sync_status: 'pending' | 'waiting_publish' | 'synced' | 'failed' | 'not_required' | string
+  kb_synced_time: string | null
+  kb_error: string | null
+  reviewed_by: number | null
+  reviewed_time: string | null
+  created_time: string
+  updated_time: string
+}
+
 export interface MaterialPreviewColumn {
   field: string
   column: string
@@ -234,4 +347,26 @@ export const knowledgeApi = {
     http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/archive`),
   classifyMaterial: (id: number, payload: { material_type: 'central' | 'textbook' | 'local'; publisher?: string; published_date?: string; applicable_scope?: string }) =>
     http.put<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/classification`, payload, { timeout: 120_000 }),
+  authoritySources: () => http.get<ApiResponse<AuthoritySource[]>>('/knowledge/discovery/sources'),
+  createAuthoritySource: (payload: Partial<AuthoritySource>) => http.post<ApiResponse<AuthoritySource>>('/knowledge/discovery/sources', payload),
+  updateAuthoritySource: (id: number, payload: Partial<AuthoritySource>) => http.patch<ApiResponse<AuthoritySource>>(`/knowledge/discovery/sources/${id}`, payload),
+  discoveryJobs: (limit = 30) => http.get<ApiResponse<DiscoveryJob[]>>('/knowledge/discovery/jobs', { params: { limit } }),
+  createDiscoveryJob: (payload: { query_text?: string; keywords?: string[]; start_date?: string; end_date?: string; source_ids?: number[] }) =>
+    http.post<ApiResponse<DiscoveryJob>>('/knowledge/discovery/jobs', payload),
+  retryDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/retry`),
+  cancelDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/cancel`),
+  discoveryCandidates: (params?: { status?: string; source_level?: string; limit?: number }) =>
+    http.get<ApiResponse<MaterialCandidate[]>>('/knowledge/discovery/candidates', { params }),
+  analyzeDiscoveryCandidate: (id: number) =>
+    http.post<ApiResponse<MaterialCandidate>>(`/knowledge/discovery/candidates/${id}/analyze`, undefined, { timeout: 120_000 }),
+  policyChanges: (params?: { status?: string; importance?: string; candidate_id?: number; limit?: number }) =>
+    http.get<ApiResponse<PolicyChange[]>>('/knowledge/discovery/changes', { params }),
+  candidatePolicyChanges: (id: number) =>
+    http.get<ApiResponse<PolicyChange[]>>(`/knowledge/discovery/candidates/${id}/changes`),
+  reviewPolicyChange: (id: number, payload: { action: 'confirm' | 'dismiss' | 'observe'; note?: string }) =>
+    http.post<ApiResponse<PolicyChange>>(`/knowledge/discovery/changes/${id}/review`, payload),
+  syncPolicyChange: (id: number) =>
+    http.post<ApiResponse<PolicyChange>>(`/knowledge/discovery/changes/${id}/sync`),
+  reviewDiscoveryCandidate: (id: number, payload: { action: 'publish' | 'reject' | 'duplicate'; source_title?: string; publisher?: string; published_date?: string; applicable_scope?: string; course_ids?: number[]; chapter_ids?: number[]; knowledge_tags?: string[]; review_notes?: string }) =>
+    http.post<ApiResponse<MaterialCandidate>>(`/knowledge/discovery/candidates/${id}/review`, payload, { timeout: 180_000 }),
 }

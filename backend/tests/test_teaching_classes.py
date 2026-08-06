@@ -13,6 +13,28 @@ def headers(user: User) -> dict[str, str]:
     return {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
 
 
+def test_teacher_can_bootstrap_empty_class_basics(client: TestClient, db: Session) -> None:
+    teacher = User(
+        username="bootstrap_teacher",
+        identity_no="T-BOOTSTRAP",
+        password_hash=hash_password("password-123"),
+        role="teacher",
+        approval_status="approved",
+    )
+    db.add(teacher)
+    db.commit()
+
+    first = client.post("/api/v1/teaching-classes/bootstrap", headers=headers(teacher), json={})
+    second = client.post("/api/v1/teaching-classes/bootstrap", headers=headers(teacher), json={})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["data"]["subject_id"] == second.json()["data"]["subject_id"]
+    assert first.json()["data"]["term_id"] == second.json()["data"]["term_id"]
+    assert db.query(CourseSubject).count() == 1
+    assert db.query(AcademicTerm).count() == 1
+
+
 def test_class_join_review_and_same_subject_transfer_rule(client: TestClient, db: Session) -> None:
     teacher = User(username="class_teacher", identity_no="T-CLASS", password_hash=hash_password("password-123"),
                    role="teacher", approval_status="approved")

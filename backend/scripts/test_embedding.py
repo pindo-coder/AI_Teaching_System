@@ -1,12 +1,15 @@
 """检查 Embedding 配置并发送一条非敏感测试文本。"""
 
 from app.core.config import settings
-from app.rag.embeddings import get_embeddings
+from app.rag.embeddings import get_embedding_profile, get_embeddings
 
 
 def main() -> None:
     print(f"provider={settings.embedding_provider}")
     print(f"model={settings.embedding_model}")
+    profile = get_embedding_profile()
+    print(f"expected_dimensions={profile.dimensions}")
+    print(f"profile_fingerprint={profile.fingerprint}")
     if settings.embedding_provider == "mock":
         print("warning=当前为 mock 模式，不会调用真实 Embedding 服务")
     embeddings = get_embeddings()

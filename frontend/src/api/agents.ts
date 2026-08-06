@@ -169,6 +169,7 @@ export interface AgentRun {
           status: 'completed' | 'fallback' | 'unavailable'
           generated_count: number
           requested_count?: number
+          selected_slides?: number[]
           model?: string
           message: string
           errors?: string[]

@@ -24,6 +24,10 @@ AI_USER_PROMPT = """当前课程：{course_name}
 当前章节：{chapter_title}
 学习阶段：{learning_stage_label}
 任务类型：{task_type_label}
+助手模式：{assistant_mode_label}
+当前角色：{assistant_role_label}
+角色约束：{assistant_role_instructions}
+模式要求：{assistant_mode_instructions}
 
 当前阶段的教学目标：
 {stage_instructions}
@@ -83,6 +87,30 @@ TASK_LABELS = {
     "note_real_significance": "补充现实意义",
     "note_concept_compare": "比较易混概念",
     "news_study_note": "生成时政研学笔记",
+}
+
+
+WORKSPACE_ROLE_LABELS = {
+    "student": "学生",
+    "teacher": "教师",
+    "admin": "管理员",
+}
+
+WORKSPACE_ROLE_INSTRUCTIONS = {
+    "student": "只提供预习、巩固、复习、笔记和概念解释等学习帮助，不代替学生作答或修改成绩。",
+    "teacher": "优先提供备课、课纲、课堂互动和教材关联建议；生成内容只能作为草稿，发布或通知必须由教师确认。",
+    "admin": "优先提供教材资料、索引和系统运行检查建议；涉及删除、切换版本或批量导入时必须先征得明确确认。",
+}
+
+
+WORKSPACE_MODE_LABELS = {
+    "chat": "Chat 对话（只回答，不执行业务操作）",
+    "agent": "Agent 任务（可规划任务，但所有有副作用的操作均需确认）",
+}
+
+WORKSPACE_MODE_INSTRUCTIONS = {
+    "chat": "直接回答当前问题，优先给出教材依据与可执行的学习建议；不要模拟已经执行任何系统操作。",
+    "agent": "先拆解任务，再给出步骤、所需资料和待确认项；可以生成课纲、课堂活动、PPT视觉建议等草稿，但涉及发布、删除、导入、通知或修改数据时只提出确认请求，不宣称已执行。",
 }
 
 
@@ -285,6 +313,11 @@ LESSON_PPT_DESIGN_SYSTEM_PROMPT = """你是高校思政课课件的视觉设计 
 - line：分隔线或关系线；
 - image：多模态辅助插图，只能使用 source="visual_asset"。仅当 PPT 偏好中的 include_visuals=true
   时，在最适合视觉解释的 1—3 个正文页使用；标题页、总结页和纯理论原文页不要强行使用。
+
+当 include_visuals=true 时，必须至少为 1 个正文页、最多 3 个正文页输出 image 元素和
+visual_prompt；优先选择概念关系、过程路径、时间线、案例分析或课堂互动页。图片不是装饰，
+必须帮助学生理解该页结论，并且应放在正文留白区域，不能覆盖文字。若页面没有合适的留白，
+宁可不放图片，也不要把图片压在正文上。
 
 使用 image 时，该 page 必须同时给出 visual_prompt。visual_prompt 只描述与本页结论一致的
 象征性场景、自然景观、城市发展、青年学习或抽象文化意象，不生成政治人物肖像，

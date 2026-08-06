@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any
 from urllib.parse import urlparse
 
@@ -54,10 +55,120 @@ class PptMultimodalService:
     def _extract_image_url(payload: dict[str, Any]) -> str:
         for choice in ((payload.get("output") or {}).get("choices") or []):
             for item in ((choice.get("message") or {}).get("content") or []):
-                url = item.get("image")
+                if not isinstance(item, dict):
+                    continue
+                url = item.get("image") or item.get("url")
                 if url:
                     return str(url)
         raise RuntimeError("百炼图像模型未返回图片地址")
+
+    @staticmethod
+    def _overlap_area(left: tuple[float, float, float, float], right: tuple[float, float, float, float]) -> float:
+        lx, ly, lw, lh = left
+        rx, ry, rw, rh = right
+        return max(0.0, min(lx + lw, rx + rw) - max(lx, rx)) * max(
+            0.0, min(ly + lh, ry + rh) - max(ly, ry)
+        )
+
+    @classmethod
+    def _append_auto_image_slot(cls, slide: dict[str, Any]) -> bool:
+        """为没有输出 image 占位的页面补一个不遮挡正文的视觉槽位。
+
+        视觉 Agent 偶尔会因为 JSON 过长而漏掉 image 元素。此时不应直接放弃多模态
+        生成，而是从页面剩余空间中选一个右侧/底部安全区域，保证图片最终能进入 PPT。
+        """
+        canvas = slide.get("canvas")
+        if not isinstance(canvas, list):
+            return False
+        if any(item.get("type") == "image" for item in canvas if isinstance(item, dict)):
+            return True
+        text_boxes = [
+            (
+                float(item.get("x") or 0),
+                float(item.get("y") or 0),
+                float(item.get("w") or 0),
+                float(item.get("h") or 0),
+            )
+            for item in canvas
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        # 优先右侧竖图，其次底部横图；每个候选都留出 4% 的视觉边距。
+        candidates = [
+            (62.0, 22.0, 32.0, 54.0),
+            (58.0, 58.0, 36.0, 30.0),
+            (6.0, 58.0, 38.0, 30.0),
+        ]
+        for x, y, w, h in candidates:
+            box = (x, y, w, h)
+            if all(cls._overlap_area(box, text_box) <= 12.0 for text_box in text_boxes):
+                canvas.append(
+                    {
+                        "type": "image",
+                        "source": "visual_asset",
+                        "style": "body",
+                        "x": x,
+                        "y": y,
+                        "w": w,
+                        "h": h,
+                        "color": "text",
+                        "fill": "",
+                        "shape": "roundRect",
+                        "align": "center",
+                        "bold": False,
+                        "background": str(slide.get("canvas_background") or "background"),
+                    }
+                )
+                return True
+        return False
+
+    @staticmethod
+    def _candidate_score(slide: dict[str, Any], index: int, total: int) -> int:
+        layout = str(slide.get("layout") or "content")
+        if index == 0 or index == total - 1 or layout in {"title", "summary"}:
+            return -100
+        score = {
+            "concept": 8,
+            "process": 8,
+            "timeline": 8,
+            "comparison": 7,
+            "discussion": 6,
+            "content": 5,
+            "question": 4,
+            "agenda": 2,
+        }.get(layout, 3)
+        if slide.get("steps"):
+            score += 2
+        if slide.get("timeline"):
+            score += 2
+        if slide.get("left") or slide.get("right"):
+            score += 1
+        if slide.get("bullets"):
+            score += 1
+        return score
+
+    @classmethod
+    def _select_candidates(cls, slides: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any]]]:
+        """选择最适合插图的 1—3 页，避免封面、总结页被强行配图。"""
+        limit = max(0, settings.ppt_multimodal_max_images)
+        if limit == 0:
+            return []
+        explicit = [
+            (index, slide)
+            for index, slide in enumerate(slides)
+            if any(
+                isinstance(item, dict) and item.get("type") == "image"
+                for item in (slide.get("canvas") or [])
+            )
+        ]
+        explicit_indexes = {index for index, _ in explicit}
+        remaining = [
+            (cls._candidate_score(slide, index, len(slides)), index, slide)
+            for index, slide in enumerate(slides)
+            if index not in explicit_indexes
+        ]
+        remaining.sort(key=lambda item: (-item[0], item[1]))
+        ordered = explicit + [(index, slide) for score, index, slide in remaining if score > 0]
+        return ordered[:limit]
 
     @staticmethod
     def _validate_result_url(url: str) -> None:
@@ -90,17 +201,29 @@ class PptMultimodalService:
         }
         timeout = httpx.Timeout(settings.ppt_multimodal_timeout_seconds)
         with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = client.post(
-                endpoint,
-                headers={
-                    "Authorization": f"Bearer {settings.ppt_multimodal_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=request_body,
-            )
-            if response.status_code >= 400:
-                detail = response.text[:500]
-                raise RuntimeError(f"百炼图像生成失败（{response.status_code}）：{detail}")
+            response = None
+            for attempt in range(2):
+                try:
+                    response = client.post(
+                        endpoint,
+                        headers={
+                            "Authorization": f"Bearer {settings.ppt_multimodal_api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=request_body,
+                    )
+                except httpx.RequestError as exc:
+                    if attempt == 0:
+                        time.sleep(1)
+                        continue
+                    raise RuntimeError(f"百炼图像服务连接失败：{exc}") from exc
+                if response.status_code not in {429, 500, 502, 503, 504} or attempt == 1:
+                    break
+                time.sleep(1.5)
+            if response is None or response.status_code >= 400:
+                detail = response.text[:500] if response is not None else "无响应"
+                code = response.status_code if response is not None else "连接失败"
+                raise RuntimeError(f"百炼图像生成失败（{code}）：{detail}")
             image_url = self._extract_image_url(response.json())
             self._validate_result_url(image_url)
             image_response = client.get(image_url)
@@ -133,11 +256,13 @@ class PptMultimodalService:
                 "message": "未配置可用的阿里云 PPT 多模态服务，已保留纯图形课件。",
             }
             return ppt_data
+        candidates = self._select_candidates(slides)
+        # 设计 Agent 未输出图片槽位时自动补槽；失败的页面保留原有文字构图。
         candidates = [
             (index, slide)
-            for index, slide in enumerate(slides)
-            if any(item.get("type") == "image" for item in (slide.get("canvas") or []))
-        ][: max(0, settings.ppt_multimodal_max_images)]
+            for index, slide in candidates
+            if self._append_auto_image_slot(slide)
+        ]
         generated = 0
         errors: list[str] = []
         for index, slide in candidates:
@@ -154,6 +279,7 @@ class PptMultimodalService:
             "status": "completed" if generated else "fallback",
             "generated_count": generated,
             "requested_count": len(candidates),
+            "selected_slides": [index + 1 for index, _ in candidates],
             "model": settings.ppt_multimodal_model,
             "message": "辅助插图已保存到本地课件资源目录。" if generated else "多模态生成未成功，已回退为纯图形课件。",
             "errors": errors[:3],

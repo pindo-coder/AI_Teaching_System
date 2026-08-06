@@ -38,7 +38,7 @@ const roleNavigation: Record<UserRole, NavigationItem[]> = {
   admin: [
     { label: '平台概览', description: '资料、教学与系统状态', path: '/', icon: House },
     { label: '教学管理', description: '教学班、教师与课程', path: '/classes', icon: Management, match: ['/classes', '/courses'] },
-    { label: '资料审核', description: '候选、教材与发布确认', path: '/material-review', icon: DataAnalysis, match: ['/material-review', '/knowledge'] },
+    { label: '资料动态', description: '来源发现、候选与发布确认', path: '/material-discovery', icon: DataAnalysis, match: ['/material-discovery', '/material-review', '/knowledge'] },
     { label: '任务监督', description: '教学任务与完成状态', path: '/assignments', icon: Bell },
     { label: '内容互动', description: '课堂互动与内容复核', path: '/interaction', icon: User },
   ],
@@ -47,4 +47,3 @@ const roleNavigation: Record<UserRole, NavigationItem[]> = {
 export function navigationForRole(role: UserRole | undefined): NavigationItem[] {
   return roleNavigation[role || 'student']
 }
-

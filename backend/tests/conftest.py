@@ -38,6 +38,8 @@ def reset_database(tmp_path, monkeypatch):
     # 测试默认使用确定性向量，避免单元测试依赖外部 Embedding 服务。
     monkeypatch.setattr(settings, "ai_mock_mode", True)
     monkeypatch.setattr(settings, "embedding_provider", "mock")
+    # 测试不应读取开发者本机的百炼密钥；多模态可用性由专门用例显式覆盖。
+    monkeypatch.setattr(settings, "ppt_multimodal_api_key", None)
     monkeypatch.setattr(settings, "chroma_persist_directory", str(tmp_path / "chroma"))
     monkeypatch.setattr(settings, "knowledge_upload_directory", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "generated_artifact_directory", str(tmp_path / "artifacts"))

@@ -31,7 +31,6 @@ const extraMaterialId = ref<number>()
 const extraMaterialRole = ref<'primary' | 'supplementary'>('supplementary')
 const form = reactive({ subject_id: 0, term_id: 0, name: '', code: '', description: '', primary_course_id: 0, supplementary_course_ids: [] as number[] })
 const subjectForm = reactive({ name: '习近平新时代中国特色社会主义思想概论', code: 'XG', description: '' })
-const termForm = reactive({ name: '', start_date: '', end_date: '', is_current: true })
 const isManager = computed(() => auth.user?.role === 'teacher' || auth.user?.role === 'admin')
 
 async function load() {
@@ -132,8 +131,11 @@ async function approveTeacher(user: User, approved: boolean) {
 
 async function createSubjectAndTerm() {
   try {
-    if (!subjects.value.length) await teachingClassApi.createSubject(subjectForm)
-    if (!terms.value.length) await teachingClassApi.createTerm(termForm)
+    // 教师首次使用也允许完成最小初始化；已有基础数据时后端仅复用，不会覆盖。
+    await teachingClassApi.bootstrap({
+      subject_name: subjectForm.name || '高校思政课程',
+      subject_code: subjectForm.code || 'IDEOLOGY',
+    })
     setupVisible.value = false; await load(); openCreate()
   } catch (error) { ElMessage.error(getErrorMessage(error, '基础数据创建失败')) }
 }
@@ -186,9 +188,9 @@ onMounted(load)
     </el-dialog>
 
     <el-dialog v-model="setupVisible" title="课程科目与学期" width="620px">
-      <el-alert title="首次使用时创建一次即可，后续教学班直接复用。" type="info" :closable="false" />
-      <el-form label-position="top"><template v-if="!subjects.length"><el-divider>课程科目</el-divider><el-form-item label="名称"><el-input v-model="subjectForm.name" /></el-form-item><el-form-item label="代码"><el-input v-model="subjectForm.code" /></el-form-item></template><template v-if="!terms.length"><el-divider>当前学期</el-divider><el-form-item label="名称"><el-input v-model="termForm.name" placeholder="2026秋季学期" /></el-form-item><el-row :gutter="12"><el-col :span="12"><el-form-item label="开始日期"><el-date-picker v-model="termForm.start_date" value-format="YYYY-MM-DD" /></el-form-item></el-col><el-col :span="12"><el-form-item label="结束日期"><el-date-picker v-model="termForm.end_date" value-format="YYYY-MM-DD" /></el-form-item></el-col></el-row></template></el-form>
-      <template #footer><el-button @click="setupVisible=false">关闭</el-button><el-button type="primary" @click="createSubjectAndTerm">保存</el-button></template>
+      <el-alert title="首次使用时创建一次即可。系统会自动创建或复用“当前学期”，不会覆盖已有课程科目与学期。" type="info" :closable="false" />
+      <el-form label-position="top"><template v-if="!subjects.length"><el-divider>课程科目</el-divider><el-form-item label="名称"><el-input v-model="subjectForm.name" /></el-form-item><el-form-item label="代码"><el-input v-model="subjectForm.code" /></el-form-item></template><template v-if="!terms.length"><el-divider>当前学期</el-divider><p class="muted">保存时按当前日期自动创建春季或秋季学期；管理员可在后续统一维护准确起止时间。</p></template></el-form>
+      <template #footer><el-button @click="setupVisible=false">关闭</el-button><el-button type="primary" @click="createSubjectAndTerm">自动创建并继续</el-button></template>
     </el-dialog>
 
     <el-drawer v-model="manageVisible" :title="selected?.name" size="720px" class="class-manage-drawer">

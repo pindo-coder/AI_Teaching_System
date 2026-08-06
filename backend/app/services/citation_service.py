@@ -11,7 +11,8 @@ from app.models.citation import (
 )
 from app.models.knowledge_document import KnowledgeDocument
 from app.rag.text_splitter import split_text
-from app.rag.vector_store import add_precise_chunks, delete_document_vectors
+from app.rag.embeddings import get_embedding_profile
+from app.rag.vector_store import add_precise_chunks, delete_document_vectors, resolve_active_collection_name
 from app.schemas.knowledge import CitationFeedbackCreate, DocumentCalibrationUpdate
 from app.schemas.knowledge import OutlineNodeInput
 
@@ -182,7 +183,7 @@ class CitationService:
             from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="校准结果没有可用于检索的正文节点")
 
-        delete_document_vectors(document_id)
+        delete_document_vectors(document_id, collection_name=document.vector_collection)
         self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
         vector_ids = add_precise_chunks(
             document_id=document_id, chunks=precise_chunks,
@@ -194,7 +195,7 @@ class CitationService:
                       "source_url": document.source_url or "",
                       "authority_level": "", "effective_date": "", "expired_date": ""},
         )
-        version = f"{settings.embedding_model}:{settings.embedding_dimensions}"
+        version = get_embedding_profile().version
         for index, (chunk, vector_id) in enumerate(zip(precise_chunks, vector_ids)):
             metadata = dict(chunk.get("metadata") or {})
             self.db.add(KnowledgeChunk(
@@ -208,6 +209,7 @@ class CitationService:
                 end_anchor=str(chunk.get("end_anchor") or "")[-500:], index_version=version,
             ))
         document.access_policy = payload.access_policy
+        document.vector_collection = resolve_active_collection_name()
         document.calibration_status = "calibrated"
         document.status = "ready"
         document.chunk_count = len(precise_chunks)

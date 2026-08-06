@@ -17,6 +17,10 @@ from app.core.prompts import (
     STAGE_LABELS,
     TASK_INSTRUCTIONS,
     TASK_LABELS,
+    WORKSPACE_MODE_LABELS,
+    WORKSPACE_MODE_INSTRUCTIONS,
+    WORKSPACE_ROLE_INSTRUCTIONS,
+    WORKSPACE_ROLE_LABELS,
 )
 from app.repositories.course_repository import ChapterRepository, CourseRepository
 from app.repositories.knowledge_repository import KnowledgeRepository
@@ -25,6 +29,13 @@ from app.models.knowledge_document import KnowledgeDocument
 from app.models.user import User
 from app.rag.retriever import retrieve_layered
 from app.schemas.ai import AiAssistData, AiAssistRequest, AiSource
+from app.services.llm_compat import (
+    capability_key,
+    chunk_text,
+    clean_model_text,
+    known_streaming_support,
+    remember_streaming_support,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -66,10 +77,11 @@ class LangChainGenerator:
             timeout=settings.llm_timeout_seconds,
         )
         self.chain = prompt | model | StrOutputParser()
+        self.stream_key = capability_key(settings.llm_base_url, settings.llm_model)
 
     def generate(self, variables: dict[str, str]) -> str:
         try:
-            return self.chain.invoke(variables)
+            return clean_model_text(self.chain.invoke(variables))
         except HTTPException:
             raise
         except Exception as exc:
@@ -79,10 +91,53 @@ class LangChainGenerator:
             ) from exc
 
     def stream(self, variables: dict[str, str]) -> Iterator[str]:
+        # 自建 OpenAI 兼容服务可能忽略 stream=true 并返回普通 JSON。
+        # 一旦探测到该行为，本进程后续请求直接走 invoke，再由服务端分块，
+        # 避免每次都先失败一次并对模型重复计费。
+        if known_streaming_support(self.stream_key) is False:
+            try:
+                answer = clean_model_text(self.chain.invoke(variables))
+                if not answer:
+                    raise ValueError("模型未返回任何内容")
+                yield from chunk_text(answer)
+                return
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="大模型服务暂时不可用，请稍后重试",
+                ) from exc
+
+        emitted = False
         try:
-            yield from self.chain.stream(variables)
+            for part in self.chain.stream(variables):
+                if part:
+                    emitted = True
+                    yield part
+            if not emitted:
+                raise ValueError("No generation chunks were returned")
+            remember_streaming_support(self.stream_key, True)
         except Exception as exc:
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="大模型服务暂时不可用，请稍后重试") from exc
+            if emitted:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="大模型流式响应中断，请稍后重试",
+                ) from exc
+            logger.warning(
+                "llm_stream_unsupported model=%s reason=%s; falling back to invoke",
+                settings.llm_model,
+                str(exc) or type(exc).__name__,
+            )
+            remember_streaming_support(self.stream_key, False)
+            try:
+                answer = clean_model_text(self.chain.invoke(variables))
+                if not answer:
+                    raise ValueError("模型未返回任何内容")
+                yield from chunk_text(answer)
+            except Exception as fallback_exc:
+                raise HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail="大模型服务暂时不可用，请稍后重试",
+                ) from fallback_exc
 
 
 class MockGenerator:
@@ -277,6 +332,10 @@ class AiService:
             "chapter_title": chapter.title,
             "learning_stage_label": STAGE_LABELS[payload.learning_stage],
             "task_type_label": TASK_LABELS[payload.task_type],
+            "assistant_mode_label": WORKSPACE_MODE_LABELS[payload.assistant_mode],
+            "assistant_mode_instructions": WORKSPACE_MODE_INSTRUCTIONS[payload.assistant_mode],
+            "assistant_role_label": WORKSPACE_ROLE_LABELS[payload.assistant_role],
+            "assistant_role_instructions": WORKSPACE_ROLE_INSTRUCTIONS[payload.assistant_role],
             "chapter_content": content,
             "question": payload.question,
             "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],

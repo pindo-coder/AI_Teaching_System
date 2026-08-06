@@ -114,7 +114,7 @@ PPT_MULTIMODAL_ENABLED=true
 # 可复用 DASHSCOPE_API_KEY；如需隔离额度，也可设置独立 Key。
 PPT_MULTIMODAL_API_KEY=your-dashscope-key
 PPT_MULTIMODAL_BASE_URL=https://dashscope.aliyuncs.com/api/v1
-PPT_MULTIMODAL_MODEL=wan2.7-image
+PPT_MULTIMODAL_MODEL=wan2.7-image-pro
 PPT_MULTIMODAL_MAX_IMAGES=3
 PPT_MULTIMODAL_TIMEOUT_SECONDS=180
 ```
@@ -159,13 +159,16 @@ DashScope 默认使用 `https://dashscope.aliyuncs.com/compatible-mode/v1`。切
 
 ```bash
 cd backend
-PYTHONPATH=. python -m scripts.rebuild_precise_index
-# 确认构建与数量检查正常后再原子切换
+# 先验证接口和实际维数
+PYTHONPATH=. python -m scripts.test_embedding
+# 在新集合构建全部资料；数量和分层覆盖率全部通过后才会原子切换
 PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
 PYTHONPATH=. python -m scripts.rebuild_study_note_index
 ```
 
-教材与个人笔记都会按当前模型和维度进入独立 collection。旧 Chroma collection 会保留；删除 `knowledge_base/chroma/active_index.json` 即可回退教材索引到环境变量或默认集合。
+教材与个人笔记都会按 Embedding 提供方、模型、实际维度和索引协议指纹进入独立 collection。每次接口返回都会校验向量维数，活动索引清单也会校验相同指纹；不匹配时系统明确中止并要求重建，不再把不同维数写入同一集合。DashScope `text-embedding-v1/v2` 固定按 1536 维处理，`text-embedding-v3/v4` 使用 `EMBEDDING_DIMENSIONS`。
+
+原子切换前的活动清单会保存为 `knowledge_base/chroma/active_index.previous.json`，旧 Chroma collection 也会保留。回退时应同时恢复上一份清单和与其匹配的 Embedding 模型配置；不要只删除 `active_index.json`，否则会进入当前模型对应的全新空集合。
 
 ## 切换 MySQL
 

@@ -14,6 +14,8 @@ from app.db.session import engine
 from app.exceptions import register_exception_handlers
 from app.services.material_import_service import recover_material_batches
 from app.services.agent_service import recover_agent_runs
+from app.services.agent_execution_service import recover_agent_executions
+from app.services.authority_discovery_service import start_discovery_scheduler
 
 
 configure_logging()
@@ -29,6 +31,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     interrupted_agents = recover_agent_runs(engine)
     if interrupted_agents:
         logger.warning("marked interrupted agent runs as failed count=%s", interrupted_agents)
+    interrupted_workspace_agents = recover_agent_executions(engine)
+    if interrupted_workspace_agents:
+        logger.warning("marked interrupted workspace agent executions as failed count=%s", interrupted_workspace_agents)
+    start_discovery_scheduler(engine)
     yield
 
 

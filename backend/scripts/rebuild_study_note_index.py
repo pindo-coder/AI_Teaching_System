@@ -15,10 +15,14 @@ from app.services.study_service import StudyService
 def main() -> None:
     with SessionLocal() as db:
         notes = list(db.scalars(select(StudyNote).order_by(StudyNote.id)).all())
+        expected_vectors = 0
         for note in notes:
+            content = StudyService.plain_note_content(note.content)
+            if content.strip():
+                expected_vectors += (len(content.strip()) + 899) // 900
             upsert_study_note_vector(
                 note_id=note.id,
-                content=StudyService.plain_note_content(note.content),
+                content=content,
                 metadata={
                     "user_id": note.user_id,
                     "course_id": note.course_id,
@@ -26,7 +30,10 @@ def main() -> None:
                 },
             )
         store = get_study_note_vector_store()
-        print(f"study_notes={len(notes)} vectors={store._collection.count()} collection={store._collection.name}")
+        actual_vectors = store._collection.count()
+        if actual_vectors != expected_vectors:
+            raise RuntimeError(f"笔记索引不完整：预期 {expected_vectors} 条，实际 {actual_vectors} 条")
+        print(f"study_notes={len(notes)} vectors={actual_vectors} collection={store._collection.name}")
 
 
 if __name__ == "__main__":

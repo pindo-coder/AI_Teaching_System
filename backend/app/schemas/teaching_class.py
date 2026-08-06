@@ -23,6 +23,16 @@ class TermCreate(BaseModel):
         return self
 
 
+class TeachingClassBootstrap(BaseModel):
+    """首次创建教学班所需的最小基础数据。
+
+    教师无需先进入管理员页面逐项创建；若已有数据则复用而不覆盖。
+    """
+
+    subject_name: str = Field(default="高校思政课程", min_length=2, max_length=160)
+    subject_code: str | None = Field(default="IDEOLOGY", max_length=50)
+
+
 class TeachingClassCreate(BaseModel):
     subject_id: int
     term_id: int

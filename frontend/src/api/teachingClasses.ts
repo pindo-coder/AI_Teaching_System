@@ -20,6 +20,8 @@ export const teachingClassApi = {
   terms: () => http.get<ApiResponse<AcademicTerm[]>>('/teaching-classes/terms'),
   availableTeachers: () => http.get<ApiResponse<AvailableTeacher[]>>('/teaching-classes/teachers/available'),
   createTerm: (payload: { name: string; start_date: string; end_date: string; is_current: boolean }) => http.post<ApiResponse<AcademicTerm>>('/teaching-classes/terms', payload),
+  bootstrap: (payload?: { subject_name?: string; subject_code?: string }) =>
+    http.post<ApiResponse<{ subject_id: number; subject_name: string; term_id: number; term_name: string }>>('/teaching-classes/bootstrap', payload || {}),
   list: () => http.get<ApiResponse<TeachingClass[]>>('/teaching-classes'),
   create: (payload: Record<string, unknown>) => http.post<ApiResponse<TeachingClass>>('/teaching-classes', payload),
   join: (joinCode: string) => http.post<ApiResponse<{ status: string; teaching_class_id: number; message: string }>>('/teaching-classes/join', { join_code: joinCode }),

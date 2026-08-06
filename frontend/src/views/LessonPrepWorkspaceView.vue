@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch, type CSSProperties } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   agentApi,
@@ -21,6 +21,7 @@ import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 import type { Course, CourseDetail } from '@/types'
 
 const router = useRouter()
+const route = useRoute()
 const loading = ref(true)
 const acting = ref(false)
 const courses = ref<Course[]>([])
@@ -60,7 +61,8 @@ const pptPreferences = ref<PptPreferences>({
   max_slides: 10,
   slide_count: 10,
   include_interaction: true,
-  include_visuals: false,
+  // 已配置百炼多模态时默认生成少量语义插图；教师仍可取消以控制额度。
+  include_visuals: true,
   template_id: null,
 })
 const pptTemplates = ref<PresentationTemplate[]>([])
@@ -73,6 +75,7 @@ const revisingSlideIndex = ref(0)
 const revisionInstruction = ref('')
 const revisionMode = ref<'content' | 'design' | 'both'>('both')
 const selectedVersionId = ref('')
+const hydratingRun = ref(false)
 
 const steps = ['设置任务', '构建证据', '生成课纲', '生成成果', '预览发布']
 const currentStep = computed(() => activeStage.value - 1)
@@ -89,6 +92,27 @@ const eligibleTeachingClasses = computed(() => teachingClasses.value.filter(
   (item) => !selectedCourseId.value || item.material_ids.includes(selectedCourseId.value),
 ))
 const classroomActivities = computed(() => artifactBundle.value?.classroom_activities || [])
+type ArtifactKey = 'ppt' | 'lesson_plan' | 'classroom_activities'
+const artifactLabels: Record<ArtifactKey, string> = {
+  ppt: '教学 PPT',
+  lesson_plan: '完整教案',
+  classroom_activities: '课堂活动',
+}
+function isArtifactKey(value: unknown): value is ArtifactKey {
+  return value === 'ppt' || value === 'lesson_plan' || value === 'classroom_activities'
+}
+function artifactKeys(value: unknown): ArtifactKey[] {
+  return Array.isArray(value) ? value.filter(isArtifactKey) : []
+}
+const failedArtifactStep = computed(() => currentRun.value?.steps.find(
+  (step) => step.step_key === 'generate_artifacts' && step.status === 'failed',
+))
+const requestedArtifactKeys = computed(() => artifactKeys(currentRun.value?.input_data.artifact_output_types))
+const artifactStatusRows = computed(() => {
+  const keys = [...new Set([...requestedArtifactKeys.value, ...artifactKeys(Object.keys(artifacts.value))])]
+  return keys.map((key) => ({ key, label: artifactLabels[key], ready: Boolean(artifacts.value[key]) }))
+})
+const incompleteArtifactKeys = computed(() => artifactStatusRows.value.filter((item) => !item.ready).map((item) => item.key))
 const canPublish = computed(() => Boolean(
   currentRun.value
   && selectedTeachingClassId.value
@@ -189,6 +213,42 @@ function resetRun() {
   currentRun.value = null
   activeStage.value = 1
   publishedResult.value = null
+}
+
+async function applyRun(run: AgentRun) {
+  hydratingRun.value = true
+  try {
+    currentRun.value = run
+    selectedCourseId.value = run.course_id || courses.value[0]?.id
+    if (selectedCourseId.value) await loadCourse(selectedCourseId.value, run.chapter_id)
+    selectedTeachingClassId.value = run.teaching_class_id || eligibleTeachingClasses.value[0]?.id
+    lessonHours.value = Number(run.input_data.lesson_hours || 2)
+    studentLevel.value = String(run.input_data.student_level || '本科生')
+    teachingGoal.value = String(run.input_data.teaching_goal || '')
+    if (run.input_data.ppt_preferences) {
+      pptPreferences.value = { ...pptPreferences.value, ...(run.input_data.ppt_preferences as Partial<PptPreferences>) }
+      setSlideCount(pptPreferences.value.slide_count || pptPreferences.value.min_slides || 10)
+    }
+    if (Object.keys(run.output_data.artifacts || {}).length) activeStage.value = 4
+    else if (run.output_data.outline) activeStage.value = 3
+    else if (run.evidence_snapshot.length) activeStage.value = 2
+    else activeStage.value = 1
+    if (['queued', 'running'].includes(run.status)) void listenToRun(run.id)
+  } finally {
+    hydratingRun.value = false
+  }
+}
+
+async function openRunFromRoute() {
+  const runId = Number(route.query.run_id)
+  if (!Number.isFinite(runId) || runId < 1 || currentRun.value?.id === runId) return
+  try {
+    const response = await agentApi.detail(runId)
+    await applyRun(response.data.data)
+    ElMessage.success(`已打开 Agent 创建的备课草稿 #${runId}`)
+  } catch {
+    ElMessage.warning('无法打开指定备课草稿，已保留当前任务')
+  }
 }
 
 function goStage(stage: number) {
@@ -307,6 +367,26 @@ async function generateArtifacts() {
     activeStage.value = 4
     ElMessage.success('教学成果已进入后台生成，可以离开本页面')
     void listenToRun(currentRun.value.id)
+  } finally {
+    acting.value = false
+  }
+}
+
+async function retryArtifact(key: ArtifactKey) {
+  if (!currentRun.value || isExecuting.value) return
+  acting.value = true
+  try {
+    const response = await agentApi.generateArtifacts(
+      currentRun.value.id,
+      [key],
+      key === 'ppt' ? pptPreferences.value : undefined,
+    )
+    currentRun.value = response.data.data
+    activeStage.value = 4
+    ElMessage.success(`${artifactLabels[key]}已重新进入后台生成`)
+    void listenToRun(currentRun.value.id)
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : `${artifactLabels[key]}重试失败，请稍后重试`)
   } finally {
     acting.value = false
   }
@@ -480,27 +560,17 @@ onMounted(async () => {
     teachingClasses.value = classResponse.data.data.filter((item) => ['active', 'not_started'].includes(item.status))
     capabilities.value = capabilityResponse.data.data
     if (!capabilities.value.ppt_multimodal_available) pptPreferences.value.include_visuals = false
-    const latest = runResponse.data.data.find((item) => item.agent_type === 'teacher_lesson_prep') || null
-    currentRun.value = latest
-    selectedCourseId.value = latest?.course_id || courses.value[0]?.id
-    if (selectedCourseId.value) await loadCourse(selectedCourseId.value, latest?.chapter_id)
-    selectedTeachingClassId.value = latest?.teaching_class_id
-      || eligibleTeachingClasses.value[0]?.id
-    if (latest) {
-      lessonHours.value = Number(latest.input_data.lesson_hours || 2)
-      studentLevel.value = String(latest.input_data.student_level || '本科生')
-      teachingGoal.value = String(latest.input_data.teaching_goal || '')
-      if (latest.input_data.ppt_preferences) {
-        pptPreferences.value = {
-          ...pptPreferences.value,
-          ...(latest.input_data.ppt_preferences as Partial<PptPreferences>),
-        }
-        setSlideCount(pptPreferences.value.slide_count || pptPreferences.value.min_slides || 10)
-      }
-      if (Object.keys(latest.output_data.artifacts || {}).length) activeStage.value = 4
-      else if (latest.output_data.outline) activeStage.value = 3
-      else if (latest.evidence_snapshot.length) activeStage.value = 2
-      if (['queued', 'running'].includes(latest.status)) void listenToRun(latest.id)
+    const requestedRunId = Number(route.query.run_id)
+    const latest = runResponse.data.data.find((item) => item.id === requestedRunId)
+      || runResponse.data.data.find((item) => item.agent_type === 'teacher_lesson_prep')
+      || null
+    if (latest) await applyRun(latest)
+    else if (courses.value[0]?.id) {
+      selectedCourseId.value = courses.value[0].id
+      await loadCourse(courses.value[0].id)
+    }
+    if (Number.isFinite(requestedRunId) && requestedRunId > 0 && latest?.id !== requestedRunId) {
+      await openRunFromRoute()
     }
   } finally {
     loading.value = false
@@ -508,7 +578,7 @@ onMounted(async () => {
 })
 
 watch(selectedCourseId, async (value, previous) => {
-  if (value && previous && value !== previous) {
+  if (value && previous && value !== previous && !hydratingRun.value) {
     resetRun()
     await loadCourse(value)
     if (!eligibleTeachingClasses.value.some((item) => item.id === selectedTeachingClassId.value)) {
@@ -524,6 +594,7 @@ watch(artifacts, (value) => {
   if (keys.length && !keys.includes(artifactPreview.value)) artifactPreview.value = keys[0]
 })
 watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 10))
+watch(() => route.query.run_id, () => { void openRunFromRoute() })
 </script>
 
 <template>
@@ -695,6 +766,25 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
               <el-checkbox-button value="lesson_plan">完整教案</el-checkbox-button>
               <el-checkbox-button value="classroom_activities">课堂活动</el-checkbox-button>
             </el-checkbox-group>
+            <section v-if="failedArtifactStep && incompleteArtifactKeys.length" class="artifact-retry-banner">
+              <div>
+                <strong>有成果未完成</strong>
+                <p>{{ failedArtifactStep.error_message || '上次生成没有返回可用结果。已完成的成果会保留，无需全部重做。' }}</p>
+              </div>
+              <div class="artifact-retry-actions">
+                <el-button
+                  v-for="key in incompleteArtifactKeys"
+                  :key="key"
+                  size="small"
+                  type="warning"
+                  plain
+                  :loading="acting"
+                  @click="retryArtifact(key)"
+                >
+                  重试{{ artifactLabels[key] }}
+                </el-button>
+              </div>
+            </section>
             <div v-if="artifactTypes.includes('ppt')" class="ppt-preferences">
               <div class="preference-heading">
                 <div>
@@ -831,6 +921,38 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
           </div>
         </template>
 
+        <section class="artifact-overview">
+          <div>
+            <p class="eyebrow">成果总览</p>
+            <strong>先看齐全度，再决定发布什么</strong>
+            <span>成果可以单独下载、补生成；发布前仍由教师选择教学班并确认。</span>
+          </div>
+          <div class="artifact-status-list">
+            <span
+              v-for="item in artifactStatusRows"
+              :key="item.key"
+              :class="['artifact-status-item', { 'is-ready': item.ready }]"
+            >
+              <span class="artifact-status-dot"></span>
+              {{ item.label }} · {{ item.ready ? '已就绪' : '待补生成' }}
+            </span>
+          </div>
+          <div v-if="failedArtifactStep && incompleteArtifactKeys.length" class="artifact-overview-retry">
+            <span>生成步骤有异常，已完成内容不会被覆盖：</span>
+            <el-button
+              v-for="key in incompleteArtifactKeys"
+              :key="`overview-${key}`"
+              size="small"
+              type="warning"
+              plain
+              :loading="acting"
+              @click="retryArtifact(key)"
+            >
+              重试{{ artifactLabels[key] }}
+            </el-button>
+          </div>
+        </section>
+
         <div class="artifact-file-grid">
           <article v-for="(item, key) in artifacts" :key="key" class="artifact-file">
             <span class="artifact-file-type">
@@ -889,6 +1011,9 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
             <el-alert
               v-if="artifactBundle.ppt.multimodal"
               :title="artifactBundle.ppt.multimodal.message"
+              :description="artifactBundle.ppt.multimodal.generated_count && artifactBundle.ppt.multimodal.selected_slides?.length
+                ? `已生成第 ${artifactBundle.ppt.multimodal.selected_slides.join('、')} 页辅助插图`
+                : undefined"
               :type="artifactBundle.ppt.multimodal.status === 'completed' ? 'success' : 'warning'"
               :closable="false"
               show-icon
@@ -1182,6 +1307,9 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
 .artifact-builder { padding: clamp(18px, 3vw, 36px); background: var(--surface-muted); border-radius: var(--radius-card); }
 .artifact-builder :deep(.el-checkbox-group) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .artifact-builder :deep(.el-checkbox-button__inner) { border: 1px solid var(--line); border-radius: var(--radius-input); box-shadow: none; }
+.artifact-retry-banner { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-3); color: #7a4a00; background: #fff8e8; border: 1px solid #efd48a; border-radius: var(--radius-input); }
+.artifact-retry-banner p { margin: 4px 0 0; color: #876b35; font-size: var(--fs-meta); }
+.artifact-retry-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
 .ppt-preferences { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
 .preference-heading, .quality-heading, .artifact-actions, .version-switcher { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .preference-heading p { margin: 4px 0 0; color: var(--ink-400); font-size: var(--fs-meta); }
@@ -1198,6 +1326,16 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
 .artifact-results { grid-column: 1 / -1; }
 .artifact-actions { flex-wrap: wrap; }
 .version-switcher :deep(.el-select) { width: min(300px, 38vw); }
+.artifact-overview { display: grid; gap: var(--space-3); margin-bottom: var(--space-4); padding: var(--space-4); background: linear-gradient(135deg, #f3f7ff, #fffaf0); border: 1px solid #d8e2f6; border-radius: var(--radius-card); }
+.artifact-overview > div:first-child { display: grid; gap: 4px; }
+.artifact-overview strong { color: var(--ink-900); font-size: var(--fs-card-title); }
+.artifact-overview > div:first-child > span { color: var(--ink-500); font-size: var(--fs-meta); }
+.artifact-status-list { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.artifact-status-item { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; color: var(--ink-500); background: white; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-meta); }
+.artifact-status-item.is-ready { color: #167a42; border-color: #b9dfc7; background: #f0faf4; }
+.artifact-status-dot { width: 7px; height: 7px; background: var(--ink-300); border-radius: 50%; }
+.artifact-status-item.is-ready .artifact-status-dot { background: #2aa361; }
+.artifact-overview-retry { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: #876b35; font-size: var(--fs-meta); }
 .artifact-file-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
 .artifact-file { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-4); background: var(--surface-muted); border: 1px solid var(--line); border-radius: var(--radius-card); }
 .artifact-file-type { display: grid; width: 48px; height: 48px; place-items: center; color: white; background: var(--authority-red); border-radius: 50%; font-size: 11px; font-weight: var(--fw-bold); }
@@ -1278,5 +1416,5 @@ watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 
 .dialog-form input[type="file"] { display: block; width: 100%; padding: var(--space-3); background: var(--surface-muted); border: 1px dashed var(--line); border-radius: var(--radius-input); }
 .dialog-form small { display: block; margin-top: var(--space-2); color: var(--ink-400); }
 @media (max-width: 1199px) { .artifact-file-grid { grid-template-columns: 1fr; } }
-@media (max-width: 767px) { .stage-navigation { display: flex; overflow-x: auto; padding-bottom: var(--space-1); } .stage-navigation button { min-width: 132px; } .prep-grid, .compact-form-row, .slide-preview-list, .preference-grid, .quality-issues, .publish-form-grid { grid-template-columns: 1fr; } .prep-output, .artifact-results { grid-column: auto; } .run-toolbar, .preference-heading, .quality-heading, .publish-heading { align-items: flex-start; flex-direction: column; } .artifact-file { grid-template-columns: auto minmax(0, 1fr); } .artifact-file .el-button { grid-column: 1 / -1; } .ppt-quality { grid-template-columns: 1fr; } .quality-score { padding-bottom: var(--space-3); border-right: 0; border-bottom: 1px solid var(--line); } .quality-heading > span { max-width: none; text-align: left; } .slide-actions { opacity: 1; } }
+@media (max-width: 767px) { .stage-navigation { display: flex; overflow-x: auto; padding-bottom: var(--space-1); } .stage-navigation button { min-width: 132px; } .prep-grid, .compact-form-row, .slide-preview-list, .preference-grid, .quality-issues, .publish-form-grid { grid-template-columns: 1fr; } .prep-output, .artifact-results { grid-column: auto; } .run-toolbar, .preference-heading, .quality-heading, .publish-heading, .artifact-retry-banner { align-items: flex-start; flex-direction: column; } .artifact-file { grid-template-columns: auto minmax(0, 1fr); } .artifact-file .el-button { grid-column: 1 / -1; } .ppt-quality { grid-template-columns: 1fr; } .quality-score { padding-bottom: var(--space-3); border-right: 0; border-bottom: 1px solid var(--line); } .quality-heading > span { max-width: none; text-align: left; } .slide-actions { opacity: 1; } }
 </style>

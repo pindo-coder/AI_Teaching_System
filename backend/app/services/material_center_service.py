@@ -33,7 +33,11 @@ class _ArticleTextParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.parts: list[str] = []
+        self.preferred_parts: list[str] = []
         self._ignored = 0
+        self._preferred_depth = 0
+        self._tag_stack: list[str] = []
+        self._preferred_flags: list[bool] = []
         self.meta: dict[str, str] = {}
         self._capture: str | None = None
         self._capture_parts: list[str] = []
@@ -42,6 +46,14 @@ class _ArticleTextParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = {key.lower(): (value or "").strip() for key, value in attrs}
+        marker = " ".join((attributes.get(key) or "") for key in ("id", "class", "role")).lower()
+        preferred_container = tag in {"article", "main"} or any(
+            token in marker for token in ("article", "content", "正文", "detail", "editor", "trs_editor", "news_body")
+        )
+        self._tag_stack.append(tag)
+        self._preferred_flags.append(preferred_container)
+        if preferred_container:
+            self._preferred_depth += 1
         if tag == "meta" and attributes.get("content"):
             key = (attributes.get("property") or attributes.get("name") or attributes.get("itemprop") or "").lower()
             if key:
@@ -59,6 +71,14 @@ class _ArticleTextParser(HTMLParser):
             self._ignored -= 1
         if tag in {"p", "article", "section", "h1", "h2", "h3", "li"}:
             self.parts.append("\n")
+            if self._preferred_depth:
+                self.preferred_parts.append("\n")
+        if tag in self._tag_stack:
+            index = len(self._tag_stack) - 1 - self._tag_stack[::-1].index(tag)
+            closing_flags = self._preferred_flags[index:]
+            del self._tag_stack[index:]
+            del self._preferred_flags[index:]
+            self._preferred_depth = max(0, self._preferred_depth - sum(closing_flags))
         if self._capture == tag:
             value = " ".join(" ".join(self._capture_parts).split())
             if tag == "title":
@@ -71,12 +91,26 @@ class _ArticleTextParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         if not self._ignored and data.strip():
             self.parts.append(data.strip())
+            if self._preferred_depth:
+                self.preferred_parts.append(data.strip())
             if self._capture:
                 self._capture_parts.append(data.strip())
 
     def text(self) -> str:
         lines = [" ".join(line.split()) for line in " ".join(self.parts).splitlines()]
-        return "\n".join(line for line in lines if line).strip()
+        generic = "\n".join(line for line in lines if line).strip()
+        preferred_lines = [" ".join(line.split()) for line in " ".join(self.preferred_parts).splitlines()]
+        preferred = "\n".join(line for line in preferred_lines if line).strip()
+        # Prefer an article/main/content container only when it contains a
+        # meaningful amount of text. Otherwise retain the generic parser for
+        # older government pages that do not use semantic containers.
+        # Semantic article containers are intentionally accepted at a lower
+        # threshold than the generic fallback.  Government detail pages often
+        # have short notices, and keeping the surrounding navigation/footer in
+        # those cases makes the extracted evidence less precise.
+        if len(re.sub(r"\s+", "", preferred)) >= 60 and len(preferred) >= len(generic) * 0.12:
+            return preferred
+        return generic
 
     def metadata(self) -> tuple[str | None, str | None, date | None]:
         def first(*keys: str) -> str | None:

@@ -55,9 +55,16 @@ def test_all_mvp_tables_are_registered() -> None:
             "material_import_items",
             "agent_runs",
             "agent_steps",
+            "agent_executions",
             "presentation_templates",
             "lesson_publications",
-        }
+            "source_registries",
+            "discovery_jobs",
+                "material_candidates",
+                    "material_snapshots",
+                    "policy_changes",
+                    "teaching_notifications",
+                }
 
 
 def test_document_page_uses_longtext_on_mysql() -> None:

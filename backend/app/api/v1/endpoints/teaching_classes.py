@@ -7,13 +7,15 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
 from app.db.session import get_db
+from datetime import date
+
 from app.models.teaching_class import AcademicTerm, ClassGroupMember, CourseSubject
 from app.models.user import User
 from app.schemas.common import ApiResponse
 from app.schemas.teaching_class import (
     ClassGroupCreate, ClassGroupRead, ClassMaterialAdd, ClassStatusUpdate, ClassTeacherAdd,
     JoinClassRequest, JoinClassResult, JoinCodeUpdate, JoinRequestReview, RandomGroupCreate,
-    RosterImportResult, SubjectCreate, TeachingClassCreate, TeachingClassRead, TermCreate,
+    RosterImportResult, SubjectCreate, TeachingClassBootstrap, TeachingClassCreate, TeachingClassRead, TermCreate,
 )
 from app.services.teaching_class_service import TeachingClassService
 
@@ -61,6 +63,57 @@ def create_term(payload: TermCreate, _: User = Depends(require_roles("admin")),
             current.is_current = False
     item = AcademicTerm(**payload.model_dump()); db.add(item); db.commit(); db.refresh(item)
     return ApiResponse(message="学期已创建", data={"id": item.id, "name": item.name})
+
+
+@router.post("/bootstrap", response_model=ApiResponse[dict])
+def bootstrap_class_basics(
+    payload: TeachingClassBootstrap,
+    _: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    """确保首次创建教学班时具备一个可复用的课程科目和当前学期。
+
+    这是幂等操作，不覆盖管理员后续维护的学期或课程科目；解决教师首次使用时
+    因基础数据为空而无法继续创建教学班的问题。
+    """
+    subject = db.scalar(select(CourseSubject).where(CourseSubject.name == payload.subject_name.strip()))
+    if subject is None and payload.subject_code:
+        subject = db.scalar(select(CourseSubject).where(
+            CourseSubject.code == payload.subject_code.strip().upper()
+        ))
+    if subject is None:
+        subject = CourseSubject(
+            name=payload.subject_name.strip(),
+            code=payload.subject_code.strip().upper() if payload.subject_code else None,
+        )
+        db.add(subject)
+        db.flush()
+
+    term = db.scalar(select(AcademicTerm).where(AcademicTerm.is_current.is_(True)))
+    if term is None:
+        today = date.today()
+        if today.month <= 7:
+            start_date, end_date, label = date(today.year, 1, 1), date(today.year, 7, 31), "春季学期"
+        else:
+            start_date, end_date, label = date(today.year, 8, 1), date(today.year, 12, 31), "秋季学期"
+        term = AcademicTerm(
+            name=f"{today.year}{label}",
+            start_date=start_date,
+            end_date=end_date,
+            is_current=True,
+        )
+        db.add(term)
+        db.flush()
+    db.commit()
+    return ApiResponse(
+        message="教学班基础数据已就绪",
+        data={
+            "subject_id": subject.id,
+            "subject_name": subject.name,
+            "term_id": term.id,
+            "term_name": term.name,
+        },
+    )
 
 
 @router.get("", response_model=ApiResponse[list[TeachingClassRead]])

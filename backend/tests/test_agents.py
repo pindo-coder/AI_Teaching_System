@@ -19,6 +19,8 @@ from app.models.teaching_class import (
 )
 from app.models.user import User
 from app.services.agent_service import (
+    LessonArtifactGenerator,
+    _extract_json_object,
     _prepare_ppt_canvas_for_slide,
     _sanitize_ppt_design,
 )
@@ -236,6 +238,14 @@ def test_ppt_canvas_rejects_blank_decorative_layout_and_keeps_valid_content() ->
     assert diagnostics["recovered_with_safe_layout"] is False
 
 
+def test_extract_json_object_accepts_model_explanation_and_code_fence() -> None:
+    parsed = _extract_json_object(
+        "说明如下：\n```json\n{\"title\": \"测试课纲\", \"items\": [1]}\n```",
+        error_message="invalid",
+    )
+    assert parsed == {"title": "测试课纲", "items": [1]}
+
+
 def test_teacher_lesson_prep_waits_for_evidence_confirmation_then_generates_outline(
     client: TestClient, db: Session
 ) -> None:
@@ -428,6 +438,82 @@ def test_teacher_can_generate_preview_and_download_all_teaching_artifacts(
     assert restored.status_code == 200
 
 
+def test_artifact_failure_keeps_completed_outline_available(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+) -> None:
+    teacher, _, course, chapter = _context(db)
+    run = client.post(
+        "/api/v1/agent/runs",
+        headers=_headers(teacher),
+        json=_payload(course, chapter),
+    ).json()["data"]
+    client.post(
+        f"/api/v1/agent/runs/{run['id']}/confirm",
+        headers=_headers(teacher),
+        json={"action": "approve_evidence"},
+    )
+
+    def raise_generation_error(self, variables):
+        raise RuntimeError("模型未返回任何内容")
+
+    monkeypatch.setattr(LessonArtifactGenerator, "generate", raise_generation_error)
+    response = client.post(
+        f"/api/v1/agent/runs/{run['id']}/artifacts",
+        headers=_headers(teacher),
+        json={"output_types": ["ppt"]},
+    )
+    assert response.status_code == 200
+    detail = client.get(
+        f"/api/v1/agent/runs/{run['id']}",
+        headers=_headers(teacher),
+    ).json()["data"]
+    assert detail["status"] == "completed"
+    assert detail["output_data"]["outline"]["title"]
+    assert detail["steps"][3]["status"] == "failed"
+    assert detail["steps"][3]["error_message"] == "模型未返回任何内容"
+
+
+def test_artifact_retry_keeps_existing_successful_outputs(
+    client: TestClient, db: Session
+) -> None:
+    """补生成单项成果时，不应覆盖同一备课任务已有成果。"""
+    teacher, _, course, chapter = _context(db)
+    run = client.post(
+        "/api/v1/agent/runs",
+        headers=_headers(teacher),
+        json=_payload(course, chapter),
+    ).json()["data"]
+    client.post(
+        f"/api/v1/agent/runs/{run['id']}/confirm",
+        headers=_headers(teacher),
+        json={"action": "approve_evidence"},
+    )
+    all_artifacts = client.post(
+        f"/api/v1/agent/runs/{run['id']}/artifacts",
+        headers=_headers(teacher),
+        json={"output_types": ["ppt", "lesson_plan"]},
+    )
+    assert all_artifacts.status_code == 200
+    first = client.get(
+        f"/api/v1/agent/runs/{run['id']}", headers=_headers(teacher)
+    ).json()["data"]
+    assert set(first["output_data"]["artifacts"]) == {"ppt", "lesson_plan"}
+
+    retry_one = client.post(
+        f"/api/v1/agent/runs/{run['id']}/artifacts",
+        headers=_headers(teacher),
+        json={"output_types": ["lesson_plan"]},
+    )
+    assert retry_one.status_code == 200
+    second = client.get(
+        f"/api/v1/agent/runs/{run['id']}", headers=_headers(teacher)
+    ).json()["data"]
+    assert set(second["output_data"]["artifacts"]) == {"ppt", "lesson_plan"}
+    assert second["output_data"]["artifact_bundle"]["ppt"]["slides"]
+
+
 def test_teacher_can_upload_and_select_ppt_style_template(
     client: TestClient,
     db: Session,
@@ -576,6 +662,48 @@ def test_multimodal_service_attaches_generated_asset(monkeypatch, tmp_path) -> N
     assert enhanced["multimodal"]["status"] == "completed"
     assert enhanced["multimodal"]["generated_count"] == 1
     assert enhanced["slides"][1]["visual_asset"]["model"] == "wan2.7-image"
+
+
+def test_multimodal_service_auto_selects_pages_without_image_slots(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(settings, "generated_artifact_directory", str(tmp_path))
+    monkeypatch.setattr(settings, "ppt_multimodal_enabled", True)
+    monkeypatch.setattr(settings, "ppt_multimodal_api_key", "test-key")
+    monkeypatch.setattr(settings, "ppt_multimodal_model", "wan2.7-image")
+    monkeypatch.setattr(settings, "ppt_multimodal_max_images", 2)
+    service = PptMultimodalService(100)
+
+    def fake_generate(slide, design, index):
+        return {
+            "storage_path": f"100/ppt_visuals/slide-{index + 1}.png",
+            "file_name": f"slide-{index + 1}.png",
+            "media_type": "image/png",
+            "model": "wan2.7-image",
+            "prompt": "symbolic scene",
+        }
+
+    monkeypatch.setattr(service, "_generate_one", fake_generate)
+    canvas = [
+        {"type": "text", "source": "title", "x": 8, "y": 10, "w": 48, "h": 12},
+        {"type": "text", "source": "takeaway", "x": 8, "y": 28, "w": 46, "h": 20},
+    ]
+    ppt = {
+        "design": {"name": "专题视觉"},
+        "slides": [
+            {"layout": "title", "canvas": list(canvas)},
+            {"layout": "concept", "title": "理论与实践", "takeaway": "相互促进", "canvas": list(canvas)},
+            {"layout": "timeline", "title": "发展进程", "takeaway": "持续推进", "canvas": list(canvas)},
+            {"layout": "summary", "canvas": list(canvas)},
+        ],
+    }
+
+    enhanced = service.enhance(ppt)
+    assert enhanced["multimodal"]["status"] == "completed"
+    assert enhanced["multimodal"]["generated_count"] == 2
+    assert enhanced["multimodal"]["selected_slides"] == [2, 3]
+    assert all(
+        any(item.get("type") == "image" for item in enhanced["slides"][index]["canvas"])
+        for index in (1, 2)
+    )
 
 
 def test_teacher_can_publish_ppt_and_discussion_to_students(

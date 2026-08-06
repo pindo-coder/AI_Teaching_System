@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AiAssistData, type AiSource } from '@/api/ai'
 import { courseApi } from '@/api/courses'
@@ -11,8 +11,11 @@ import type { CourseDetail } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
+import { useWorkspaceStore } from '@/stores/workspace'
 
 const router = useRouter()
+const route = useRoute()
+const workspace = useWorkspaceStore()
 const loading = ref(false)
 const newsLoading = ref(true)
 const news = ref<NewsItem[]>([])
@@ -25,6 +28,8 @@ const currentPage = ref(1)
 const pageSize = ref(10)
 const totalNews = ref(0)
 const textbook = ref<CourseDetail | null>(null)
+const textbookOptions = ref<CourseDetail[]>([])
+const selectedCourseId = ref<number | null>(null)
 const selectedNews = ref<NewsItem | null>(null)
 const aiResult = ref<AiAssistData | null>(null)
 const aiLoading = ref(false)
@@ -43,6 +48,8 @@ const draftLoading = ref(false)
 const noteSaving = ref(false)
 const noteExists = ref(false)
 const savedChapterId = ref<number | null>(null)
+const textbookLoading = ref(false)
+let textbookPromise: Promise<CourseDetail | null> | null = null
 let lastNewsLoadedAt = 0
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
@@ -102,18 +109,66 @@ function changePage(page: number) {
   currentPage.value = page
   void loadNews()
 }
-async function loadTextbook() {
-  try {
-    const courses = (await courseApi.list()).data.data
-    textbook.value = courses[0] ? (await courseApi.detail(courses[0].id)).data.data : null
-  } catch { /* 教材尚未导入时保持空状态 */ }
+async function loadTextbook(): Promise<CourseDetail | null> {
+  if (textbookPromise) return textbookPromise
+  textbookLoading.value = true
+  textbookPromise = (async () => {
+    try {
+      // 课程中心允许存在尚未拆分章节的空课程。不能再固定取 courses[0]，
+      // 否则新建空课程会遮蔽已有教材，导致 AI 功能误报“请先创建专题”。
+      const courses = (await courseApi.list()).data.data
+      const preferredId = workspace.currentCourse?.id
+      const ordered = [...courses].sort((left, right) => {
+        if (left.id === preferredId) return -1
+        if (right.id === preferredId) return 1
+        return right.id - left.id
+      })
+      const details = await Promise.all(ordered.map(async (course) => {
+        try { return (await courseApi.detail(course.id)).data.data }
+        catch { return null }
+      }))
+      const validDetails = details.filter((item): item is CourseDetail => Boolean(item))
+      textbookOptions.value = validDetails
+      const routeCourseId = Number(route.query.course_id)
+      const hasRouteCourse = Number.isFinite(routeCourseId)
+      const requestedCourse = hasRouteCourse ? validDetails.find((item) => item.id === routeCourseId) : null
+      const preferred = validDetails.find((item) => item.id === preferredId && item.chapters.length)
+      const withChapters = validDetails.find((item) => item.chapters.length)
+      const selected = requestedCourse || preferred || withChapters || validDetails[0] || null
+      textbook.value = selected
+      selectedCourseId.value = selected?.id || null
+      return selected
+    } catch {
+      textbook.value = null
+      return null
+    } finally {
+      textbookLoading.value = false
+      textbookPromise = null
+    }
+  })()
+  return textbookPromise
+}
+async function ensureTextbook(): Promise<CourseDetail | null> {
+  return textbook.value || await loadTextbook()
+}
+function changeTextbook(courseId: number) {
+  const selected = textbookOptions.value.find((item) => item.id === courseId) || null
+  textbook.value = selected
+  selectedCourseId.value = selected?.id || null
+  aiResult.value = null
+  relations.value = []
+  void router.replace({ query: { ...route.query, course_id: selected?.id ? String(selected.id) : undefined } })
 }
 function refreshWhenReturning() {
   if (document.visibilityState === 'visible' && Date.now() - lastNewsLoadedAt > 30 * 60 * 1000) void loadNews()
 }
 onMounted(() => {
   void loadNews()
-  void loadTextbook()
+  void (async () => {
+    // 先尝试使用工作台的当前课程，再回退到课程中心中第一个已有章节的教材。
+    await workspace.initialize()
+    await loadTextbook()
+  })()
   document.addEventListener('visibilitychange', refreshWhenReturning)
 })
 onUnmounted(() => document.removeEventListener('visibilitychange', refreshWhenReturning))
@@ -121,13 +176,13 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
   selectedNews.value = item
   aiMode.value = mode
   aiResult.value = null
-  dialogVisible.value = true
-  const course = textbook.value
+  const course = await ensureTextbook()
   let chapter = course?.chapters[0]
   if (!course || !chapter) {
-    ElMessage.warning('请先创建教材专题，再使用 AI 功能')
+    ElMessage.warning('当前还没有可用的教材专题，请先导入教材并完成章节拆分')
     return
   }
+  dialogVisible.value = true
   aiLoading.value = true
   try {
     let relationHint = ''
@@ -158,8 +213,8 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
 }
 
 async function openStudyNote(item: NewsItem) {
-  const course = textbook.value
-  if (!course) return ElMessage.warning('请先导入教材并生成专题章节')
+  const course = await ensureTextbook()
+  if (!course || !course.chapters.length) return ElMessage.warning('当前还没有可用的教材专题，请先导入教材并完成章节拆分')
   selectedNews.value = item
   studyDialogVisible.value = true
   relations.value = []
@@ -256,7 +311,7 @@ function openSavedNote() {
 
     <section class="affairs-layout affairs-layout-single">
       <div>
-        <div class="section-heading"><div><p class="eyebrow">实时更新 · {{ sourceNames.length }} 个来源</p><h2>权威来源时政要点</h2></div><el-button :icon="Refresh" :loading="refreshing" plain type="primary" @click="refreshNews">刷新时政</el-button></div>
+        <div class="section-heading"><div><p class="eyebrow">实时更新 · {{ sourceNames.length }} 个来源</p><h2>权威来源时政要点</h2><div v-if="textbookOptions.length" class="affairs-textbook-picker"><span>当前教材</span><el-select v-model="selectedCourseId" size="small" placeholder="选择教材" @change="changeTextbook"><el-option v-for="option in textbookOptions" :key="option.id" :label="option.name" :value="option.id"><span>{{ option.name }}</span><small>{{ option.chapters.length }} 个专题</small></el-option></el-select><span v-if="textbook" class="affairs-textbook-status">已关联 {{ textbook.chapters.length }} 个专题</span></div></div><el-button :icon="Refresh" :loading="refreshing" plain type="primary" @click="refreshNews">刷新时政</el-button></div>
         <section class="news-search-panel">
           <div class="news-search-row">
             <el-input v-model="searchKeyword" :prefix-icon="Search" clearable placeholder="搜索政策、主题或关键词，例如：生态文明" @keyup.enter="loadNews(true)" @clear="loadNews(true)" />

@@ -27,6 +27,7 @@ from app.core.prompts import (
     LESSON_PREP_SYSTEM_PROMPT,
     LESSON_PREP_USER_PROMPT,
 )
+from app.services.llm_compat import clean_model_text
 from app.models.agent_run import AgentRun, AgentStep
 from app.models.chapter import Chapter
 from app.models.course import Course
@@ -737,26 +738,68 @@ def _invoke_streaming_text(
     model: ChatOpenAI,
     variables: dict[str, str],
 ) -> str:
-    """流式接收长文本，避免兼容接口在完整响应返回前关闭连接。"""
-    chunks: list[str] = []
+    """优先流式读取；兼容接口空流或中断时自动改用完整响应重试一次。"""
+    last_error: Exception | None = None
+    for attempt in range(2):
+        chunks: list[str] = []
+        try:
+            for chunk in (prompt | model | StrOutputParser()).stream(variables):
+                if chunk:
+                    chunks.append(chunk)
+            result = clean_model_text("".join(chunks))
+            if result:
+                return result
+            last_error = RuntimeError("流式响应为空")
+        except Exception as exc:  # 兼容部分 OpenAI 协议网关的偶发中断
+            last_error = exc
+        logger.warning(
+            "llm_stream_attempt_failed attempt=%s model=%s reason=%s",
+            attempt + 1,
+            getattr(model, "model_name", "unknown"),
+            str(last_error) or type(last_error).__name__,
+        )
+
+    # 有些兼容网关会建立 SSE 连接却不下发 token；此时非流式 invoke 更稳定。
     try:
-        for chunk in (prompt | model | StrOutputParser()).stream(variables):
-            if chunk:
-                chunks.append(chunk)
+        response = (prompt | model).invoke(variables)
+        content = getattr(response, "content", response)
+        if isinstance(content, str):
+            result = clean_model_text(content)
+        elif isinstance(content, list):
+            result = clean_model_text("".join(
+                str(item.get("text", "")) if isinstance(item, dict) else str(item)
+                for item in content
+            ))
+        else:
+            result = clean_model_text(content)
+        if result:
+            logger.info("llm_stream_fallback_succeeded model=%s", getattr(model, "model_name", "unknown"))
+            return result
     except Exception as exc:
-        root: BaseException = exc
-        while root.__cause__ is not None:
-            root = root.__cause__
-        detail = str(root) or str(exc)
-        if "incomplete chunked read" in detail.lower():
-            raise RuntimeError(
-                "大模型长内容传输被服务端中断，请稍后重试；系统已改用流式接收"
-            ) from exc
-        raise
-    result = "".join(chunks).strip()
-    if not result:
-        raise RuntimeError("模型未返回任何内容")
-    return result
+        last_error = exc
+        logger.warning(
+            "llm_non_stream_fallback_failed model=%s reason=%s",
+            getattr(model, "model_name", "unknown"),
+            str(exc) or type(exc).__name__,
+        )
+
+    raise RuntimeError("大模型连续两次未返回有效内容，请稍后重试") from last_error
+
+
+def _extract_json_object(raw: str, *, error_message: str) -> dict[str, Any]:
+    """从模型可能附带说明或 Markdown 代码块的输出中安全提取首个 JSON 对象。"""
+    candidate = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", raw.strip(), flags=re.I)
+    decoder = json.JSONDecoder()
+    for index, character in enumerate(candidate):
+        if character != "{":
+            continue
+        try:
+            value, _ = decoder.raw_decode(candidate[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    raise RuntimeError(error_message)
 
 
 class LessonOutlineGenerator:
@@ -820,13 +863,7 @@ class LessonOutlineGenerator:
             streaming=True,
         )
         raw = _invoke_streaming_text(prompt, model, variables)
-        match = re.search(r"\{.*\}", raw, re.S)
-        if match is None:
-            raise RuntimeError("模型未返回合法的课纲 JSON")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("模型返回的课纲结构无法解析") from exc
+        parsed = _extract_json_object(raw, error_message="模型未返回合法的课纲 JSON")
         if not isinstance(parsed, dict) or not parsed.get("title") or not parsed.get("teaching_flow"):
             raise RuntimeError("模型返回的课纲缺少必要字段")
         return parsed
@@ -878,13 +915,10 @@ class LessonArtifactGenerator:
                 "ppt_json": json.dumps(ppt_data, ensure_ascii=False),
             },
         )
-        match = re.search(r"\{.*\}", design_raw, re.S)
-        if match is None:
-            raise RuntimeError("视觉设计 Agent 未返回合法 JSON")
-        try:
-            parsed_design = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("视觉设计 Agent 返回的画布结构无法解析") from exc
+        parsed_design = _extract_json_object(
+            design_raw,
+            error_message="视觉设计 Agent 未返回合法 JSON",
+        )
         if not isinstance(parsed_design, dict):
             raise RuntimeError("视觉设计 Agent 返回格式无效")
         design, pages = _sanitize_ppt_design(parsed_design, len(slides))
@@ -991,8 +1025,7 @@ class LessonArtifactGenerator:
                     "ppt_json": json.dumps(ppt_data, ensure_ascii=False),
                 },
             )
-            match = re.search(r"\{.*\}", raw, re.S)
-            parsed = json.loads(match.group(0)) if match else None
+            parsed = _extract_json_object(raw, error_message="PPT 质量检查未返回合法 JSON")
             return _merge_ppt_quality(deterministic, parsed)
         except Exception as exc:
             logger.warning("ppt_quality_agent_fallback reason=%s", exc)
@@ -1052,13 +1085,7 @@ class LessonArtifactGenerator:
                 "evidence_context": evidence_context,
             },
         )
-        match = re.search(r"\{.*\}", raw, re.S)
-        if match is None:
-            raise RuntimeError("单页修改 Agent 未返回合法 JSON")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("单页修改 Agent 返回结构无法解析") from exc
+        parsed = _extract_json_object(raw, error_message="单页修改 Agent 未返回合法 JSON")
         raw_slide = parsed.get("slide")
         if request.mode == "design":
             raw_slide = json.loads(json.dumps(original, ensure_ascii=False))
@@ -1313,13 +1340,7 @@ class LessonArtifactGenerator:
             streaming=True,
         )
         raw = _invoke_streaming_text(prompt, model, variables)
-        match = re.search(r"\{.*\}", raw, re.S)
-        if match is None:
-            raise RuntimeError("模型未返回合法的教学成果 JSON")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("模型返回的教学成果结构无法解析") from exc
+        parsed = _extract_json_object(raw, error_message="模型未返回合法的教学成果 JSON")
         if not isinstance(parsed, dict):
             raise RuntimeError("模型返回的教学成果格式无效")
         if not (parsed.get("ppt") or parsed.get("lesson_plan") or parsed.get("classroom_activities")):
@@ -1944,9 +1965,16 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 run.finished_time = _now()
                 step.status = "cancelled"
             else:
+                # 成果是可独立重试的。重新生成 PPT、教案或课堂活动时，
+                # 只替换本次请求的类型，保留同一任务中已经成功的其它成果，
+                # 避免用户为了补一份教案而丢失已经核验过的 PPT。
                 output_data = dict(run.output_data or {})
-                output_data["artifact_bundle"] = generated
-                output_data["artifacts"] = artifacts
+                existing_bundle = dict(output_data.get("artifact_bundle") or {})
+                existing_bundle.update({key: value for key, value in generated.items() if key in requested})
+                existing_artifacts = dict(output_data.get("artifacts") or {})
+                existing_artifacts.update(artifacts)
+                output_data["artifact_bundle"] = existing_bundle
+                output_data["artifacts"] = existing_artifacts
                 run.output_data = output_data
                 run.status = "completed"
                 run.current_step = 3
@@ -1960,12 +1988,19 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
             db.commit()
         except Exception as exc:
             logger.exception("lesson artifact agent failed run_id=%s", run_id)
-            run.status = "failed"
-            run.error_message = str(exc)
-            run.finished_time = _now()
             step.status = "failed"
             step.error_message = str(exc)
             step.finished_time = _now()
+            # 成果是课纲后的可选步骤。课纲已存在时，不应因一次 PPT/教案生成
+            # 失败而抹掉前序成功状态；保留可用课纲并允许教师只重试该成果。
+            if isinstance((run.output_data or {}).get("outline"), dict):
+                run.status = "completed"
+                run.current_step = max(run.current_step or 0, 2)
+                run.error_message = None
+            else:
+                run.status = "failed"
+                run.error_message = str(exc)
+                run.finished_time = _now()
             db.commit()
 
 

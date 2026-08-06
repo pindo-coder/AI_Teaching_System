@@ -12,7 +12,14 @@ from app.core.config import settings
 from app.rag.document_loader import SUPPORTED_EXTENSIONS, extract_pages, extract_text
 from app.rag.retriever import RetrievedChunk, retrieve
 from app.rag.text_splitter import split_pages, split_text
-from app.rag.vector_store import add_chunks, add_precise_chunks, delete_document_vectors, resolve_backend_path
+from app.rag.embeddings import get_embedding_profile
+from app.rag.vector_store import (
+    add_chunks,
+    add_precise_chunks,
+    delete_document_vectors,
+    resolve_active_collection_name,
+    resolve_backend_path,
+)
 from app.repositories.course_repository import ChapterRepository, CourseRepository
 from app.repositories.knowledge_repository import KnowledgeRepository
 from app.models.knowledge_document import KnowledgeDocument
@@ -32,11 +39,14 @@ class KnowledgeService:
     def _mark_index_failed(self, document_id: int) -> None:
         """从失败事务中恢复，并把文档保留为可重试的明确状态。"""
         self.db.rollback()
+        document = self.db.get(KnowledgeDocument, document_id)
         try:
-            delete_document_vectors(document_id)
+            delete_document_vectors(
+                document_id,
+                collection_name=document.vector_collection if document is not None else None,
+            )
         except Exception:
             logger.exception("knowledge_vector_cleanup_failed document_id=%s", document_id)
-        document = self.db.get(KnowledgeDocument, document_id)
         if document is not None:
             self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
             document.status = "failed"
@@ -128,7 +138,7 @@ class KnowledgeService:
             course_id=course_id,
             chapter_id=chapter_id,
             knowledge_point=knowledge_point.strip() if knowledge_point else None,
-            vector_collection=settings.rag_collection_name,
+            vector_collection=resolve_active_collection_name(),
             source_role=source_role,
             material_type=material_type,
             publisher=publisher.strip() if publisher else None,
@@ -181,7 +191,7 @@ class KnowledgeService:
                     "expired_date": "",
                 },
             )
-            index_version = f"{settings.embedding_model}:{settings.embedding_dimensions}"
+            index_version = get_embedding_profile().version
             self.db.add_all([
                 KnowledgeChunk(
                     document_id=document.id, vector_id=vector_id, chunk_index=index,
@@ -195,6 +205,7 @@ class KnowledgeService:
             ])
             document.status = "ready"
             document.chunk_count = len(chunks)
+            document.vector_collection = resolve_active_collection_name()
             saved = self.documents.save(document)
         except Exception as exc:
             logger.exception("knowledge_ingest_failed document_id=%s", document_id)
@@ -229,7 +240,7 @@ class KnowledgeService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="已发布资料不能直接删除，请先归档后再处理",
             )
-        delete_document_vectors(document.id)
+        delete_document_vectors(document.id, collection_name=document.vector_collection)
         path = Path(document.stored_path)
         if path.exists():
             path.unlink()
@@ -250,7 +261,7 @@ class KnowledgeService:
         try:
             pages = extract_pages(document.original_filename, content)
             chunks = split_pages(pages)
-            delete_document_vectors(document.id)
+            delete_document_vectors(document.id, collection_name=document.vector_collection)
             self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
             self.db.execute(delete(DocumentPage).where(DocumentPage.document_id == document.id))
             self.db.add_all([DocumentPage(document_id=document.id, pdf_page=page.pdf_page, text=page.text,
@@ -274,7 +285,7 @@ class KnowledgeService:
                     "expired_date": "",
                 },
             )
-            index_version = f"{settings.embedding_model}:{settings.embedding_dimensions}"
+            index_version = get_embedding_profile().version
             self.db.add_all([
                 KnowledgeChunk(document_id=document.id, vector_id=vector_id, chunk_index=index,
                                content=str(chunk["content"]), chapter_id=document.chapter_id,
@@ -286,6 +297,7 @@ class KnowledgeService:
             ])
             document.status = "ready"
             document.chunk_count = len(chunks)
+            document.vector_collection = resolve_active_collection_name()
             return self.documents.save(document)
         except Exception as exc:
             logger.exception("knowledge_reindex_failed document_id=%s", document_id)
