@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, Search, Setting, Warning } from '@element-plus/icons-vue'
@@ -30,7 +30,9 @@ const runVisible = ref(false)
 const sourceVisible = ref(false)
 const editingSourceId = ref<number | null>(null)
 const sourceForm = ref({ name: '', domain: '', source_level: 'A' as AuthoritySource['source_level'], adapter_type: 'html_list' as AuthoritySource['adapter_type'], entry_url: '', fetch_interval_minutes: 360, request_interval_seconds: 3, allow_full_text: true, allow_alert: true, is_enabled: true })
-const activeFilter = ref('pending_review')
+const candidateFilters = new Set(['pending_review', 'published', 'rejected', 'observed', 'filtered'])
+const requestedFilter = String(route.query.filter || '')
+const activeFilter = ref(candidateFilters.has(requestedFilter) ? requestedFilter : 'pending_review')
 const selectedCandidate = computed(() => candidates.value.find((item) => item.id === selectedCandidateId.value) || candidates.value[0] || null)
 const candidateAnalysisState = computed(() => {
   const candidate = selectedCandidate.value
@@ -319,8 +321,15 @@ function formatDateTime(value: string | null | undefined) {
   return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
 }
 
+async function focusCandidatePool() {
+  if (route.hash !== '#candidate-pool') return
+  await nextTick()
+  document.getElementById('candidate-pool')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
 onMounted(async () => {
   await load()
+  await focusCandidatePool()
   scheduleJobPoll()
 })
 onBeforeUnmount(() => {
@@ -328,6 +337,15 @@ onBeforeUnmount(() => {
 })
 watch(runningJob, scheduleJobPoll)
 watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
+watch(() => route.query.filter, async (value) => {
+  const nextFilter = String(value || '')
+  if (candidateFilters.has(nextFilter) && nextFilter !== activeFilter.value) {
+    activeFilter.value = nextFilter
+    await load()
+  }
+  await focusCandidatePool()
+})
+watch(() => route.hash, () => { void focusCandidatePool() })
 </script>
 
 <template>
@@ -381,7 +399,7 @@ watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
       </UiCard>
     </section>
 
-    <UiCard class="candidate-card">
+    <UiCard id="candidate-pool" class="candidate-card">
       <template #title><div><p class="eyebrow">CANDIDATE MATERIALS</p><h2>候选材料池</h2></div></template>
       <template #actions>
         <el-radio-group v-model="activeFilter" size="small" @change="load">

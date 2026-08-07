@@ -12,7 +12,7 @@ const router = createRouter({
       children: [
         { path: '', name: 'dashboard', component: () => import('@/views/WorkspaceHomeView.vue') },
         { path: 'lesson-prep', name: 'lesson-prep', component: () => import('@/views/LessonPrepWorkspaceView.vue'), meta: { roles: ['teacher', 'admin'] } },
-        { path: 'material-review', name: 'material-review', component: () => import('@/views/MaterialReviewView.vue'), meta: { roles: ['teacher', 'admin'] } },
+        { path: 'material-review', name: 'material-review', component: () => import('@/views/MaterialReviewView.vue'), meta: { roles: ['teacher'] } },
         { path: 'material-discovery', name: 'material-discovery', component: () => import('@/views/MaterialDiscoveryView.vue'), meta: { roles: ['admin'] } },
         { path: 'courses', name: 'courses', component: () => import('@/views/CourseListView.vue') },
         { path: 'courses/:id', name: 'course-detail', component: () => import('@/views/CourseDetailView.vue') },
@@ -38,6 +38,14 @@ const router = createRouter({
 router.beforeEach((to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } }
+  if (auth.user?.role === 'admin' && to.name === 'material-review') {
+    return {
+      name: 'material-discovery',
+      query: { ...to.query, filter: to.query.filter || 'pending_review' },
+      hash: to.hash || '#candidate-pool',
+      replace: true,
+    }
+  }
   if (auth.user?.role === 'teacher' && auth.user.approval_status !== 'approved' && to.name !== 'teacher-pending') return { name: 'teacher-pending' }
   if (to.name === 'teacher-pending' && auth.user?.approval_status === 'approved') return { name: 'dashboard' }
   if (to.meta.public && auth.isAuthenticated) return { name: 'dashboard' }

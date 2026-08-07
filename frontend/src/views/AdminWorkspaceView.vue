@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { knowledgeApi, type KnowledgeDocument } from '@/api/knowledge'
+import { knowledgeApi, type CandidateDecisionSummary, type KnowledgeDocument, type MaterialCandidate } from '@/api/knowledge'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import EvidenceCard from '@/components/ui/EvidenceCard.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
@@ -12,17 +12,29 @@ import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 const router = useRouter()
 const loading = ref(true)
 const materials = ref<KnowledgeDocument[]>([])
+const pendingCandidates = ref<MaterialCandidate[]>([])
+const candidateSummary = ref<CandidateDecisionSummary>({ pending_review: 0, high_priority: 0, observed: 0, filtered: 0 })
 const classes = ref<TeachingClass[]>([])
-const pending = computed(() => materials.value.filter((item) => item.review_status === 'pending'))
 const failed = computed(() => materials.value.filter((item) => item.status === 'failed'))
 const activeClasses = computed(() => classes.value.filter((item) => item.status === 'active'))
 const centralMaterials = computed(() => materials.value.filter((item) => item.material_type === 'central' && item.review_status === 'published'))
 
+function openPendingCandidates() {
+  router.push('/material-discovery?filter=pending_review#candidate-pool')
+}
+
 onMounted(async () => {
   try {
-    const [materialResult, classResult] = await Promise.allSettled([knowledgeApi.materials(), teachingClassApi.list()])
+    const [materialResult, classResult, candidateResult, summaryResult] = await Promise.allSettled([
+      knowledgeApi.materials(),
+      teachingClassApi.list(),
+      knowledgeApi.discoveryCandidates({ status: 'pending_review', limit: 4 }),
+      knowledgeApi.candidateDecisionSummary(),
+    ])
     if (materialResult.status === 'fulfilled') materials.value = materialResult.value.data.data
     if (classResult.status === 'fulfilled') classes.value = classResult.value.data.data
+    if (candidateResult.status === 'fulfilled') pendingCandidates.value = candidateResult.value.data.data
+    if (summaryResult.status === 'fulfilled') candidateSummary.value = summaryResult.value.data.data
   } finally {
     loading.value = false
   }
@@ -36,11 +48,11 @@ onMounted(async () => {
       title="平台概览"
       description="集中处理资料审核、来源异常和教学运行事项；高风险操作必须保留确认与审计记录。"
     >
-      <template #actions><el-button type="primary" @click="router.push('/material-review')">处理待审核资料</el-button></template>
+      <template #actions><el-button type="primary" @click="openPendingCandidates">处理待审核资料</el-button></template>
     </UiPageHeader>
 
     <section class="admin-status-grid">
-      <UiCard><div class="admin-metric"><StatusChip label="待审核" status="authority" /><strong>{{ pending.length }}</strong><span>候选资料</span></div></UiCard>
+      <UiCard><div class="admin-metric"><StatusChip label="待审核" status="authority" /><strong>{{ candidateSummary.pending_review }}</strong><span>候选资料</span></div></UiCard>
       <UiCard><div class="admin-metric"><StatusChip label="异常" :status="failed.length ? 'danger' : 'success'" /><strong>{{ failed.length }}</strong><span>解析或索引失败</span></div></UiCard>
       <UiCard><div class="admin-metric"><StatusChip label="运行中" status="info" /><strong>{{ activeClasses.length }}</strong><span>活跃教学班</span></div></UiCard>
       <UiCard><div class="admin-metric"><StatusChip label="已发布" status="success" /><strong>{{ centralMaterials.length }}</strong><span>中央材料</span></div></UiCard>
@@ -49,20 +61,21 @@ onMounted(async () => {
     <section class="admin-main-grid">
       <UiCard>
         <template #title><div><p class="eyebrow">REVIEW QUEUE</p><h2>待审核资料</h2></div></template>
-        <template #actions><el-button text type="primary" @click="router.push('/material-review')">查看全部</el-button></template>
-        <div v-if="pending.length" class="admin-evidence-list">
+        <template #actions><el-button text type="primary" @click="openPendingCandidates">查看全部</el-button></template>
+        <div v-if="pendingCandidates.length" class="admin-evidence-list">
           <EvidenceCard
-            v-for="item in pending.slice(0, 4)"
+            v-for="item in pendingCandidates"
             :key="item.id"
-            :title="item.source_title"
-            :source="item.publisher || item.source_type"
+            :title="item.title"
+            :source="item.publisher || `${item.source_level}级来源`"
             :published-date="item.published_date"
+            :excerpt="item.content_preview || undefined"
             :source-url="item.source_url"
-            :authority="item.material_type === 'central'"
+            :authority="item.source_level === 'A'"
             status-label="待人工确认"
           />
         </div>
-        <UiEmptyState v-else title="没有待审核资料" description="新的批量导入或网址材料会先进入候选区，不会直接发布。" action-label="进入资料中心" @action="router.push('/knowledge')" />
+        <UiEmptyState v-else title="没有待审核资料" description="权威来源发现的新材料会先进入候选池，不会直接发布。" action-label="进入资料动态" @action="openPendingCandidates" />
       </UiCard>
       <UiCard>
         <template #title><h2>运行关注</h2></template>
@@ -92,4 +105,3 @@ onMounted(async () => {
 @media (max-width: 1023px) { .admin-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-main-grid { grid-template-columns: 1fr; } }
 @media (max-width: 767px) { .admin-status-grid { grid-template-columns: 1fr; } }
 </style>
-
