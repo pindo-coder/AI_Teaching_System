@@ -14,6 +14,7 @@ from app.api.v1.endpoints.teaching_classes import router as teaching_classes_rou
 from app.api.v1.endpoints.agents import router as agents_router
 from app.api.v1.endpoints.authority_discovery import router as authority_discovery_router
 from app.api.v1.endpoints.notifications import router as notifications_router
+from app.api.v1.endpoints.ai_operations import router as ai_operations_router
 from app.core.config import settings
 from app.schemas.common import ApiResponse, HealthData
 
@@ -33,6 +34,7 @@ router.include_router(teaching_classes_router)
 router.include_router(agents_router)
 router.include_router(authority_discovery_router)
 router.include_router(notifications_router)
+router.include_router(ai_operations_router)
 
 
 @router.get("/health", response_model=ApiResponse[HealthData], tags=["system"])

@@ -5,7 +5,6 @@ import logging
 from fastapi import HTTPException, status
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from sqlalchemy import case, or_, select
 from sqlalchemy.orm import Session
 
@@ -36,6 +35,7 @@ from app.services.llm_compat import (
     known_streaming_support,
     remember_streaming_support,
 )
+from app.services.ai_operation_service import build_chat_model
 
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,7 @@ def source_position(metadata: dict[str, object]) -> str:
 
 
 class AiGenerator(Protocol):
+    model_name: str
     def generate(self, variables: dict[str, str]) -> str: ...
     def stream(self, variables: dict[str, str]) -> Iterator[str]: ...
 
@@ -60,24 +61,25 @@ class AiGenerator(Protocol):
 class LangChainGenerator:
     """使用 OpenAI 兼容 API；通过配置即可替换具体模型供应商。"""
 
-    def __init__(self) -> None:
-        if not settings.llm_api_key:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="尚未配置 LLM_API_KEY，请启用 AI_MOCK_MODE 或配置模型服务",
-            )
+    def __init__(self, db: Session | None = None, user: User | None = None) -> None:
         prompt = ChatPromptTemplate.from_messages(
             [("system", AI_SYSTEM_PROMPT), ("human", AI_USER_PROMPT)]
         )
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            temperature=settings.llm_temperature,
-            timeout=settings.llm_timeout_seconds,
-        )
+        try:
+            model, config = build_chat_model(
+                feature="learning_assist",
+                user_id=user.id if user else None,
+                db=db,
+                streaming=True,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="尚未配置 LLM_API_KEY，请启用 AI_MOCK_MODE 或配置模型服务",
+            ) from exc
         self.chain = prompt | model | StrOutputParser()
-        self.stream_key = capability_key(settings.llm_base_url, settings.llm_model)
+        self.model_name = config.model_name
+        self.stream_key = capability_key(config.base_url, config.model_name)
 
     def generate(self, variables: dict[str, str]) -> str:
         try:
@@ -124,7 +126,7 @@ class LangChainGenerator:
                 ) from exc
             logger.warning(
                 "llm_stream_unsupported model=%s reason=%s; falling back to invoke",
-                settings.llm_model,
+                getattr(self, "model_name", "unknown"),
                 str(exc) or type(exc).__name__,
             )
             remember_streaming_support(self.stream_key, False)
@@ -142,6 +144,8 @@ class LangChainGenerator:
 
 class MockGenerator:
     """供本地开发和自动化测试使用，不调用外部模型。"""
+
+    model_name = "mock"
 
     def generate(self, variables: dict[str, str]) -> str:
         task = variables["task_type_label"]
@@ -186,7 +190,7 @@ class AiService:
         self.chapters = ChapterRepository(db)
         self.documents = KnowledgeRepository(db)
         self.user = user
-        self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator())
+        self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator(db, user))
 
     def _chapter_direct_source(self, *, course_id: int, chapter_id: int, excerpt: str) -> AiSource | None:
         """为专题正文补回其教材 PDF 定位，使非 RAG 回答同样可核对原页。"""
@@ -394,11 +398,11 @@ class AiService:
         variables, sources, rag_chunks = prepared
         answer = self.generator.generate(variables)
         logger.info("ai_assist chapter_id=%s stage=%s task=%s rag_chunks=%s", payload.chapter_id, payload.learning_stage, payload.task_type, rag_chunks)
-        return AiAssistData(answer=answer, grounded=True, model="mock" if settings.ai_mock_mode else settings.llm_model, sources=sources)
+        return AiAssistData(answer=answer, grounded=True, model=self.generator.model_name, sources=sources)
 
     def stream(self, payload: AiAssistRequest) -> tuple[Iterator[str], list[AiSource], bool, str]:
         prepared = self._prepare(payload)
         if isinstance(prepared, AiAssistData):
             return iter([prepared.answer]), prepared.sources, prepared.grounded, prepared.model
         variables, sources, _ = prepared
-        return self.generator.stream(variables), sources, True, "mock" if settings.ai_mock_mode else settings.llm_model
+        return self.generator.stream(variables), sources, True, self.generator.model_name

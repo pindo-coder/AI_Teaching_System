@@ -12,7 +12,6 @@ import logging
 from typing import Any, Iterator
 
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -24,6 +23,7 @@ from app.schemas.agent import AgentRunCreate, LessonPrepInput
 from app.schemas.ai import AiWorkspaceContextData
 from app.rag.retriever import retrieve
 from app.services.agent_service import AgentService
+from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.services.assignment_service import AssignmentService
 from app.services.study_service import StudyService
 from app.services.task_service import TaskService
@@ -198,20 +198,21 @@ class PlanningAgent:
         return set(self.TOOL_DESCRIPTIONS) - self.ROLE_TOOL_DENYLIST.get(role, set())
 
     def _llm_plan(self, question: str, role: str, context: AiWorkspaceContextData) -> list[ToolCall] | None:
-        if not settings.agent_planner_use_llm or settings.ai_mock_mode or not settings.llm_api_key:
+        runtime = AiProviderConfigService.resolve(self.db)
+        if not settings.agent_planner_use_llm or settings.ai_mock_mode or not runtime.api_key:
             return None
         prompt = ChatPromptTemplate.from_messages([
             ("system", "你是高校思政课工作流规划器。只能从给定工具中选择，不能编造工具。返回 JSON：{\"tools\":[{\"name\":\"工具名\",\"reason\":\"原因\",\"requires_confirmation\":false}]}。最多选择 5 个工具；发布、删除、通知永远不能自主调用。"),
             ("human", "角色：{role}\n问题：{question}\n当前范围：{context}\n可用工具：{tools}"),
         ])
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
+        model, _ = build_chat_model(
+            feature="agent_planning",
+            user_id=self.user.id,
+            db=self.db,
             temperature=0,
             # 工具规划不承担内容创作，短超时后立即退回确定性规划，避免 SSE
             # 长时间只有“已读取上下文”而没有后续反馈。
-            timeout=min(settings.llm_timeout_seconds, 8),
+            timeout=min(runtime.timeout_seconds, 8),
             streaming=False,
         )
         try:
@@ -304,7 +305,8 @@ class PlanningAgent:
         # 多步骤工具流程本身已经产生可用、可审计的结果。立即返回这些结果，
         # 不再额外等待一次模型“润色”，保证任务草案、资料检索和备课入口能
         # 快速呈现。单步模糊问答仍可调用模型做说明性总结。
-        if len(results) > 1 or not settings.agent_planner_use_llm or settings.ai_mock_mode or not settings.llm_api_key:
+        runtime = AiProviderConfigService.resolve(self.db)
+        if len(results) > 1 or not settings.agent_planner_use_llm or settings.ai_mock_mode or not runtime.api_key:
             yield fallback
             return
         prompt = ChatPromptTemplate.from_messages([
@@ -320,12 +322,12 @@ class PlanningAgent:
                 "角色：{role}\n问题：{question}\n当前范围：{context}\n工具结果：{results}",
             ),
         ])
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
+        model, _ = build_chat_model(
+            feature="agent_response",
+            user_id=self.user.id,
+            db=self.db,
             temperature=0.2,
-            timeout=min(settings.llm_timeout_seconds, 12),
+            timeout=min(runtime.timeout_seconds, 12),
             streaming=True,
         )
         emitted = False

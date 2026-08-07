@@ -42,6 +42,7 @@ from app.schemas.agent import (
 )
 from app.schemas.ai import AiAssistData, AiAssistRequest
 from app.services.ai_service import AiService
+from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.presentation_template_service import PresentationTemplateService
 from app.services.ppt_multimodal_service import PptMultimodalService
@@ -803,8 +804,10 @@ def _extract_json_object(raw: str, *, error_message: str) -> dict[str, Any]:
 
 
 class LessonOutlineGenerator:
-    def __init__(self) -> None:
-        self.model_name = "mock" if settings.ai_mock_mode else settings.llm_model
+    def __init__(self, db: Session | None = None, user_id: int | None = None) -> None:
+        self.db = db
+        self.user_id = user_id
+        self.model_name = "mock" if settings.ai_mock_mode else AiProviderConfigService.resolve(db).model_name
 
     def generate(self, variables: dict[str, str]) -> dict[str, Any]:
         if settings.ai_mock_mode:
@@ -849,19 +852,10 @@ class LessonOutlineGenerator:
                 "after_class_task": "整理一张包含核心概念、教材依据和个人疑问的学习卡片。",
                 "citation_notes": ["模拟模式仅用于验证流程，正式使用前请逐条核验引用。"],
             }
-        if not settings.llm_api_key:
-            raise RuntimeError("尚未配置 LLM_API_KEY")
         prompt = ChatPromptTemplate.from_messages(
             [("system", LESSON_PREP_SYSTEM_PROMPT), ("human", LESSON_PREP_USER_PROMPT)]
         )
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            temperature=settings.llm_temperature,
-            timeout=settings.llm_timeout_seconds,
-            streaming=True,
-        )
+        model, _ = build_chat_model(feature="lesson_outline", db=self.db, user_id=self.user_id, streaming=True)
         raw = _invoke_streaming_text(prompt, model, variables)
         parsed = _extract_json_object(raw, error_message="模型未返回合法的课纲 JSON")
         if not isinstance(parsed, dict) or not parsed.get("title") or not parsed.get("teaching_flow"):
@@ -870,8 +864,10 @@ class LessonOutlineGenerator:
 
 
 class LessonArtifactGenerator:
-    def __init__(self) -> None:
-        self.model_name = "mock" if settings.ai_mock_mode else settings.llm_model
+    def __init__(self, db: Session | None = None, user_id: int | None = None) -> None:
+        self.db = db
+        self.user_id = user_id
+        self.model_name = "mock" if settings.ai_mock_mode else AiProviderConfigService.resolve(db).model_name
 
     @staticmethod
     def _target_slide_count(variables: dict[str, str]) -> int | None:
@@ -896,12 +892,13 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_DESIGN_USER_PROMPT),
             ]
         )
-        design_model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            temperature=max(settings.llm_temperature, 0.55),
-            timeout=max(settings.llm_timeout_seconds, 120),
+        runtime = AiProviderConfigService.resolve()
+        design_model, _ = build_chat_model(
+            feature="ppt_design",
+            db=self.db,
+            user_id=self.user_id,
+            temperature=max(runtime.temperature, 0.55),
+            timeout=max(runtime.timeout_seconds, 120),
             streaming=True,
         )
         design_raw = _invoke_streaming_text(
@@ -1006,12 +1003,13 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_REVIEW_USER_PROMPT),
             ]
         )
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
+        runtime = AiProviderConfigService.resolve()
+        model, _ = build_chat_model(
+            feature="ppt_quality_review",
+            db=self.db,
+            user_id=self.user_id,
             temperature=0.1,
-            timeout=max(settings.llm_timeout_seconds, 120),
+            timeout=max(runtime.timeout_seconds, 120),
             streaming=True,
         )
         try:
@@ -1059,12 +1057,13 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_REVISION_USER_PROMPT),
             ]
         )
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            temperature=max(settings.llm_temperature, 0.45),
-            timeout=max(settings.llm_timeout_seconds, 120),
+        runtime = AiProviderConfigService.resolve()
+        model, _ = build_chat_model(
+            feature="ppt_slide_revision",
+            db=self.db,
+            user_id=self.user_id,
+            temperature=max(runtime.temperature, 0.45),
+            timeout=max(runtime.timeout_seconds, 120),
             streaming=True,
         )
         evidence_context = "\n\n".join(
@@ -1326,17 +1325,15 @@ class LessonArtifactGenerator:
                     }
                 ],
             }
-        if not settings.llm_api_key:
-            raise RuntimeError("尚未配置 LLM_API_KEY")
         prompt = ChatPromptTemplate.from_messages(
             [("system", LESSON_ARTIFACT_SYSTEM_PROMPT), ("human", LESSON_ARTIFACT_USER_PROMPT)]
         )
-        model = ChatOpenAI(
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_base_url,
-            model=settings.llm_model,
-            temperature=settings.llm_temperature,
-            timeout=max(settings.llm_timeout_seconds, 120),
+        runtime = AiProviderConfigService.resolve()
+        model, _ = build_chat_model(
+            feature="lesson_artifacts",
+            db=self.db,
+            user_id=self.user_id,
+            timeout=max(runtime.timeout_seconds, 120),
             streaming=True,
         )
         raw = _invoke_streaming_text(prompt, model, variables)
@@ -1485,7 +1482,7 @@ class AgentService:
             teaching_class_id=payload.teaching_class_id,
             current_step=0,
             input_data=input_data,
-            model_name="mock" if settings.ai_mock_mode else settings.llm_model,
+            model_name="mock" if settings.ai_mock_mode else AiProviderConfigService.resolve(self.db).model_name,
             retry_of_run_id=retry_of,
             started_time=_now(),
         )
@@ -1707,7 +1704,7 @@ class AgentService:
         if course is None or chapter is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="课程或专题已不存在")
         try:
-            revised = LessonArtifactGenerator().revise_slide(
+            revised = LessonArtifactGenerator(self.db, self.user.id).revise_slide(
                 course_name=course.name,
                 chapter_title=chapter.title,
                 ppt_data=ppt_data,
@@ -1717,7 +1714,7 @@ class AgentService:
             )
             self._archive_ppt_version(run, f"修改第 {slide_index + 1} 页前")
             ppt_data["slides"][slide_index] = revised
-            ppt_data["quality_report"] = LessonArtifactGenerator()._review_ppt(
+            ppt_data["quality_report"] = LessonArtifactGenerator(self.db, self.user.id)._review_ppt(
                 ppt_data,
                 {
                     "course_name": course.name,
@@ -1815,7 +1812,7 @@ def execute_lesson_outline(run_id: int, bind: Engine) -> None:
             if course is None or chapter is None:
                 raise RuntimeError("课程或专题已不存在")
             input_data = run.input_data
-            outline = LessonOutlineGenerator().generate(
+            outline = LessonOutlineGenerator(db, run.created_by).generate(
                 {
                     "course_name": course.name,
                     "chapter_title": chapter.title,
@@ -1899,7 +1896,7 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 f"{item.get('position') or ''}\n{item.get('excerpt') or ''}"
                 for index, item in enumerate(run.evidence_snapshot or [], start=1)
             )
-            generated = LessonArtifactGenerator().generate(
+            generated = LessonArtifactGenerator(db, run.created_by).generate(
                 {
                     "course_name": course.name,
                     "chapter_title": chapter.title,

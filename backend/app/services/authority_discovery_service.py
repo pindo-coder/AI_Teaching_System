@@ -19,7 +19,6 @@ import xml.etree.ElementTree as ET
 import httpx
 from fastapi import HTTPException
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
 from sqlalchemy import Engine, and_, delete, func, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
@@ -45,6 +44,7 @@ from app.services.authority_source_adapters import get_source_adapter
 from app.services.knowledge_service import KnowledgeService
 from app.services.notification_service import NotificationService
 from app.services.llm_compat import clean_model_text
+from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.rag.retriever import retrieve
 
 
@@ -766,7 +766,8 @@ class AuthorityDiscoveryService:
         candidates: list[tuple[float, Course, Chapter]],
     ) -> tuple[list[int], float, str] | None:
         """只对召回集合做受约束复核；失败时由确定性混合检索兜底。"""
-        if settings.ai_mock_mode or not settings.llm_api_key or not candidates:
+        runtime = AiProviderConfigService.resolve(self.db)
+        if settings.ai_mock_mode or not runtime.api_key or not candidates:
             return None
         options = [
             {
@@ -783,9 +784,11 @@ class AuthorityDiscoveryService:
             ("human", "权威资料：\n{source}\n\n候选专题：\n{options}\n\n输出格式：{{\"chapter_ids\":[1],\"confidence\":0.8,\"reason\":\"简短说明实际关联点\"}}"),
         ])
         try:
-            model = ChatOpenAI(
-                api_key=settings.llm_api_key, base_url=settings.llm_base_url,
-                model=settings.llm_model, temperature=0, timeout=settings.llm_timeout_seconds,
+            model, _ = build_chat_model(
+                feature="material_association",
+                db=self.db,
+                temperature=0,
+                timeout=runtime.timeout_seconds,
             )
             raw = clean_model_text((prompt | model).invoke({
                 "source": source[:7000], "options": json.dumps(options, ensure_ascii=False),

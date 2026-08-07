@@ -63,8 +63,10 @@ def test_all_mvp_tables_are_registered() -> None:
                 "material_candidates",
                     "material_snapshots",
                     "policy_changes",
-                    "teaching_notifications",
-                }
+                        "teaching_notifications",
+                        "ai_provider_configs",
+                        "ai_call_logs",
+                    }
 
 
 def test_document_page_uses_longtext_on_mysql() -> None:

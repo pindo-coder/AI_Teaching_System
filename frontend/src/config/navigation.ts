@@ -5,6 +5,7 @@ import {
   Document,
   House,
   Management,
+  Monitor,
   Reading,
   School,
   User,
@@ -38,9 +39,9 @@ const roleNavigation: Record<UserRole, NavigationItem[]> = {
   admin: [
     { label: '平台概览', description: '资料、教学与系统状态', path: '/', icon: House },
     { label: '教学管理', description: '教学班、教师与课程', path: '/classes', icon: Management, match: ['/classes', '/courses'] },
-    { label: '资料动态', description: '来源发现、候选与发布确认', path: '/material-discovery', icon: DataAnalysis, match: ['/material-discovery', '/material-review', '/knowledge'] },
-    { label: '任务监督', description: '教学任务与完成状态', path: '/assignments', icon: Bell },
-    { label: '内容互动', description: '课堂互动与内容复核', path: '/interaction', icon: User },
+    { label: '资料动态', description: '来源发现、候选与发布确认', path: '/material-discovery', icon: DataAnalysis, match: ['/material-discovery', '/material-review'] },
+    { label: '知识库治理', description: 'RAG 资料、索引与版本状态', path: '/knowledge', icon: Collection, match: ['/knowledge'] },
+    { label: 'AI 运行中心', description: '模型调用、异常诊断与服务配置', path: '/ai-operations', icon: Monitor },
   ],
 }
 
