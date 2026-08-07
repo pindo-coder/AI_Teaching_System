@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Collection, Delete, EditPen, MagicStick, Promotion, Reading, Search, Download, RefreshRight, Operation, Notebook, Brush, Connection, ArrowLeftBold, ArrowRightBold } from '@element-plus/icons-vue'
+import { Collection, EditPen, MagicStick, Promotion, Reading, Search, RefreshRight, Operation, Notebook, Brush, Connection, ArrowLeftBold, ArrowRightBold, MoreFilled } from '@element-plus/icons-vue'
 import { studyApi, type NoteRelatedData, type NoteSearchItem, type StudyChatMessage, type StudyNote } from '@/api/study'
 import { renderTeachingDocument } from '@/utils/richText'
 import { aiApi, type AiSource } from '@/api/ai'
@@ -33,6 +33,8 @@ const relatedLoading = ref(false)
 const writingLoading = ref(false)
 const writingResult = ref('')
 const writingTitle = ref('')
+const writingSource = ref('')
+const writingCompareVisible = ref(false)
 type ToolPanel = 'index' | 'writing' | 'format' | 'related'
 const activeTool = ref<ToolPanel>('index')
 const toolboxOpen = ref(localStorage.getItem('notes_toolbox_open') !== 'false')
@@ -40,6 +42,7 @@ const splitWorkspace = ref<HTMLElement | null>(null)
 const editorRatio = ref(Math.min(72, Math.max(48, Number(localStorage.getItem('notes_editor_ratio')) || 64)))
 const aiCollapsed = ref(localStorage.getItem('notes_ai_collapsed') === 'true')
 const richEditor = ref<InstanceType<typeof NoteRichEditor> | null>(null)
+const previewContent = ref<HTMLElement | null>(null)
 const viewFontScale = ref(Number(localStorage.getItem('notes_font_scale')) || 1)
 const viewLineHeight = ref(Number(localStorage.getItem('notes_line_height')) || 1.9)
 const formatBarOpen = ref(localStorage.getItem('notes_format_bar_open') === 'true')
@@ -51,6 +54,10 @@ const createChapterId = ref<number | null>(null)
 const createLoading = ref(false)
 const citationVisible = ref(false)
 const selectedSource = ref<AiSource | null>(null)
+const heroCompact = ref(localStorage.getItem('notes_hero_compact') !== 'false')
+const saveStatus = ref<'saved' | 'unsaved' | 'saving' | 'error'>('saved')
+const lastSavedContent = ref('')
+let autosaveTimer: ReturnType<typeof setTimeout> | undefined
 
 function openCitation(source: AiSource) {
   if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true }
@@ -66,6 +73,16 @@ const filteredNotes = computed(() => {
 const selected = computed(() => notes.value.find((item) => item.id === selectedId.value) || null)
 const renderedContent = computed(() => sanitizeNoteHtml(editorContent.value))
 const wordCount = computed(() => notePlainText(editorContent.value).replace(/\s/g, '').length)
+const saveStatusLabel = computed(() => ({ saved: '已自动保存', unsaved: '等待自动保存', saving: '正在保存…', error: '自动保存失败' }[saveStatus.value]))
+const noteOutline = computed(() => {
+  if (!editorContent.value) return []
+  const document = new DOMParser().parseFromString(editorContent.value, 'text/html')
+  return Array.from(document.querySelectorAll('h2, h3')).map((item, index) => ({
+    index,
+    level: item.tagName.toLowerCase(),
+    title: item.textContent?.trim() || `未命名标题 ${index + 1}`,
+  }))
+})
 const workspaceStyle = computed(() => aiCollapsed.value
   ? { gridTemplateColumns: 'minmax(0, 1fr)' }
   : { gridTemplateColumns: `minmax(420px, ${editorRatio.value}fr) 8px minmax(320px, ${100 - editorRatio.value}fr)` })
@@ -81,8 +98,13 @@ async function load() {
   } finally { loading.value = false }
 }
 function selectNote(note: StudyNote) {
+  if (selected.value && editorContent.value !== lastSavedContent.value) void save(true)
+  if (autosaveTimer) clearTimeout(autosaveTimer)
   selectedId.value = note.id
-  editorContent.value = sanitizeNoteHtml(note.content)
+  const content = sanitizeNoteHtml(note.content)
+  lastSavedContent.value = content
+  editorContent.value = content
+  saveStatus.value = 'saved'
   mode.value = 'edit'
   void loadChatHistory(note.chapter_id)
   void loadRelated(note.chapter_id)
@@ -102,15 +124,40 @@ async function scrollChatToBottom() {
   await nextTick()
   if (chatScroll.value) chatScroll.value.scrollTop = chatScroll.value.scrollHeight
 }
-async function save() {
-  if (!selected.value) return
+function scheduleAutosave() {
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  if (!selected.value || editorContent.value === lastSavedContent.value) return
+  autosaveTimer = setTimeout(() => { void save(true) }, 1800)
+}
+async function save(silent = false) {
+  if (!selected.value || saving.value) return
+  if (editorContent.value === lastSavedContent.value) {
+    saveStatus.value = 'saved'
+    if (!silent) ElMessage.success('笔记内容已保存')
+    return
+  }
+  const noteToSave = selected.value
+  const contentToSave = editorContent.value
   saving.value = true
+  saveStatus.value = 'saving'
   try {
-    const saved = (await studyApi.saveNote(selected.value.chapter_id, editorContent.value)).data.data
-    Object.assign(selected.value, saved)
-    await loadRelated(selected.value.chapter_id)
-    ElMessage.success('笔记已保存')
-  } finally { saving.value = false }
+    const saved = (await studyApi.saveNote(noteToSave.chapter_id, contentToSave)).data.data
+    Object.assign(noteToSave, saved)
+    if (selected.value?.id === noteToSave.id) {
+      lastSavedContent.value = sanitizeNoteHtml(saved.content)
+      saveStatus.value = editorContent.value === lastSavedContent.value ? 'saved' : 'unsaved'
+    }
+    if (!silent) {
+      await loadRelated(noteToSave.chapter_id)
+      ElMessage.success('笔记已保存')
+    }
+  } catch (error: unknown) {
+    if (selected.value?.id === noteToSave.id) saveStatus.value = 'error'
+    if (!silent) ElMessage.error(getErrorMessage(error, '笔记保存失败'))
+  } finally {
+    saving.value = false
+    if (editorContent.value !== lastSavedContent.value) scheduleAutosave()
+  }
 }
 async function semanticSearch() {
   const keyword = query.value.trim()
@@ -165,6 +212,15 @@ function setAiCollapsed(value: boolean) {
   aiCollapsed.value = value
   localStorage.setItem('notes_ai_collapsed', String(value))
 }
+function setHeroCompact(value: boolean) {
+  heroCompact.value = value
+  localStorage.setItem('notes_hero_compact', String(value))
+}
+async function scrollToOutline(index: number) {
+  await nextTick()
+  if (mode.value === 'edit') richEditor.value?.scrollToHeading(index)
+  else previewContent.value?.querySelectorAll<HTMLElement>('h2, h3')[index]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
 function startResize(event: PointerEvent) {
   if (aiCollapsed.value || !splitWorkspace.value) return
   event.preventDefault()
@@ -196,6 +252,13 @@ async function exportNote(format: 'markdown' | 'docx') {
   link.download = `${selected.value.chapter_title}-学习笔记.${format === 'markdown' ? 'md' : 'docx'}`
   link.click(); URL.revokeObjectURL(link.href)
 }
+function handleEditorAction(command: string) {
+  if (command === 'export-markdown') void exportNote('markdown')
+  else if (command === 'export-docx') void exportNote('docx')
+  else if (command === 'toggle-ai') setAiCollapsed(!aiCollapsed.value)
+  else if (command === 'return' && selected.value) void router.push(`/courses/${selected.value.course_id}/chapters/${selected.value.chapter_id}/review`)
+  else if (command === 'delete') void remove()
+}
 async function clearChat() {
   if (!selected.value) return
   await ElMessageBox.confirm('清空后将无法恢复本章问答记录，是否继续？', '清空本章会话', { type: 'warning' })
@@ -212,7 +275,7 @@ async function runWriting(taskType: typeof writingActions[number][0], label: str
   if (!note) return
   const plainContent = notePlainText(editorContent.value)
   if (!plainContent) return ElMessage.warning('请先写下笔记内容，再使用 AI 写作辅助')
-  writingLoading.value = true; writingResult.value = ''; writingTitle.value = label
+  writingLoading.value = true; writingResult.value = ''; writingTitle.value = label; writingSource.value = plainContent
   const prompt = `以下是学生围绕“${note.chapter_title}”整理的个人笔记。请完成“${label}”任务；只能使用当前专题教材与这份笔记的信息，不得补充其他章节或教材外事实。\n\n个人笔记：\n${plainContent.slice(0, 9000)}`
   try {
     await aiApi.assistStream({ course_id: note.course_id, chapter_id: note.chapter_id, learning_stage: 'review', task_type: taskType, question: prompt }, {
@@ -230,6 +293,7 @@ async function remove() {
   if (!selected.value) return
   await ElMessageBox.confirm(`确定删除“${selected.value.chapter_title}”的学习笔记吗？`, '删除笔记', { type: 'warning' })
   await studyApi.deleteNote(selected.value.id)
+  if (autosaveTimer) clearTimeout(autosaveTimer)
   selectedId.value = null
   editorContent.value = ''
   chatMessages.value = []
@@ -271,12 +335,20 @@ function onEscape(event: KeyboardEvent) {
   if (event.key === 'Escape' && toolboxOpen.value) { toolboxOpen.value = false; localStorage.setItem('notes_toolbox_open', 'false') }
 }
 onMounted(() => { window.addEventListener('keydown', onEscape); void load() })
-onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
+watch(editorContent, (value) => {
+  if (!selected.value || value === lastSavedContent.value) return
+  saveStatus.value = 'unsaved'
+  scheduleAutosave()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onEscape)
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+})
 </script>
 
 <template>
   <div v-loading="loading" class="notes-knowledge-desk">
-    <header class="notes-hero notes-command-hero">
+    <header class="notes-hero notes-command-hero" :class="{ compact: heroCompact }">
       <div class="notes-hero-grid"></div>
       <div class="notes-command-copy">
         <div class="notes-value-line"><span></span>个人知识沉淀 · AI 学习书房</div>
@@ -305,7 +377,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
         <div class="notes-loop-caption"><span></span>{{ selected ? selected.chapter_title : '选择专题，开始建立属于自己的知识体系' }}</div>
       </div>
     </header>
-    <div class="notes-studio-intro"><div><p class="eyebrow">Knowledge Workspace</p><h2>专题笔记工作台</h2></div><span>工具栏管理专题、AI 写作、格式和教材关联 · 拖动中线可调整编辑区与 AI 区宽度</span></div>
+    <div class="notes-studio-intro"><div><p class="eyebrow">Knowledge Workspace</p><h2>专题笔记工作台</h2></div><div class="notes-studio-intro-actions"><span>工具栏管理专题、AI 写作、格式和教材关联 · 拖动中线可调整编辑区与 AI 区宽度</span><el-button text type="primary" @click="setHeroCompact(!heroCompact)">{{ heroCompact ? '展开顶部导览' : '收起顶部导览' }}</el-button></div></div>
     <section class="notes-studio" :class="{ 'toolbox-open': toolboxOpen }">
       <nav class="notes-tool-rail" aria-label="笔记工具">
         <button class="toolbox-brand" :class="{ active: toolboxOpen }" title="展开或收起笔记工具" @click="setToolboxOpen(!toolboxOpen)"><el-icon><Operation /></el-icon><span>工具</span></button>
@@ -323,13 +395,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
           <el-input v-model="query" :prefix-icon="Search" clearable placeholder="搜索专题或笔记内容" @input="semanticSearch" />
           <p class="toolbox-hint">支持语义搜索，例如输入“全过程人民民主”。</p>
           <div v-if="semanticResults.length" class="toolbox-search-results"><strong>语义相关</strong><button v-for="item in semanticResults" :key="item.id" @click="selectNote(notes.find((note) => note.id === item.id) || notes[0])"><span>{{ item.chapter_title }}</span><small>{{ item.excerpt }}</small></button></div>
+          <div v-if="noteOutline.length" class="note-outline"><strong>当前笔记目录</strong><button v-for="item in noteOutline" :key="`${item.level}-${item.index}`" :class="item.level" @click="scrollToOutline(item.index)"><span>{{ item.index + 1 }}</span>{{ item.title }}</button></div>
           <div class="notes-index-list"><button v-for="note in filteredNotes" :key="note.id" :class="{ active: selectedId === note.id }" @click="selectNote(note)"><span>{{ note.course_name }}</span><strong>{{ note.chapter_title }}</strong><small>{{ new Date(note.updated_time).toLocaleDateString('zh-CN') }}</small></button><el-empty v-if="!filteredNotes.length" :image-size="50" description="暂无匹配笔记" /></div>
         </section>
 
         <section v-else-if="activeTool === 'writing'" class="toolbox-section ai-writing-panel">
           <p class="toolbox-hint">AI 只使用当前专题教材和个人笔记，生成后由你决定是否写入正文。</p>
           <button v-for="[task, label] in writingActions" :key="task" class="writing-action" :disabled="writingLoading" @click="runWriting(task, label)"><el-icon><MagicStick /></el-icon><span><strong>{{ label }}</strong><small>{{ task === 'note_polish' ? '优化语句但不改变原意' : task === 'note_expand' ? '补充观点逻辑和教材概念' : task === 'note_outline' ? '压缩为层级清晰的复习材料' : task === 'note_knowledge_structure' ? '整理章节知识关系' : task === 'note_real_significance' ? '补充教材范围内的现实分析' : '辨析容易混淆的概念' }}</small></span></button>
-          <section v-if="writingResult || writingLoading" class="toolbox-writing-result"><header><strong>{{ writingTitle }}结果</strong><span v-if="writingLoading">生成中…</span></header><article class="teaching-document" v-html="renderTeachingDocument(writingResult)"></article><footer v-if="!writingLoading"><el-button size="small" @click="applyWriting('append')">插入文末</el-button><el-button size="small" type="primary" @click="applyWriting('replace')">替换正文</el-button></footer></section>
+          <section v-if="writingResult || writingLoading" class="toolbox-writing-result"><header><strong>{{ writingTitle }}结果</strong><span v-if="writingLoading">生成中…</span></header><article class="teaching-document" v-html="renderTeachingDocument(writingResult)"></article><footer v-if="!writingLoading"><el-button size="small" @click="writingCompareVisible = true">对比原文</el-button><el-button size="small" @click="applyWriting('append')">插入文末</el-button><el-button size="small" type="primary" @click="applyWriting('replace')">替换正文</el-button></footer></section>
         </section>
 
         <section v-else-if="activeTool === 'format'" class="toolbox-section format-panel">
@@ -357,17 +430,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
       <section ref="splitWorkspace" class="notes-workspace" :class="{ 'ai-collapsed': aiCollapsed }" :style="workspaceStyle">
         <main class="note-editor-panel">
           <template v-if="selected">
-            <header class="note-editor-heading"><div><span>{{ selected.course_name }}</span><h2>{{ selected.chapter_title }}</h2></div><div class="note-editor-actions"><el-button-group><el-button :type="mode === 'edit' ? 'primary' : 'default'" :icon="EditPen" @click="mode = 'edit'">编辑</el-button><el-button :type="mode === 'preview' ? 'primary' : 'default'" @click="mode = 'preview'">预览</el-button></el-button-group><el-dropdown @command="exportNote"><el-button :icon="Download">导出</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="markdown">Markdown</el-dropdown-item><el-dropdown-item command="docx">Word</el-dropdown-item></el-dropdown-menu></template></el-dropdown><el-button v-if="aiCollapsed" :icon="ArrowLeftBold" @click="setAiCollapsed(false)">打开 AI</el-button><el-button :icon="Reading" @click="router.push(`/courses/${selected.course_id}/chapters/${selected.chapter_id}/review`)">返回专题</el-button></div></header>
-            <section v-if="formatBarOpen" class="note-format-ribbon">
-              <div class="ribbon-group"><span>文字</span><div @mousedown.prevent><button title="加粗" @click="richEditor?.command('bold')"><strong>B</strong></button><button title="斜体" @click="richEditor?.command('italic')"><em>I</em></button><button title="下划线" @click="richEditor?.command('underline')"><u>U</u></button><button title="清除格式" @click="richEditor?.command('removeFormat')">清除</button></div></div>
-              <div class="ribbon-group"><span>段落</span><div @mousedown.prevent><button @click="richEditor?.setBlock('h2')">标题1</button><button @click="richEditor?.setBlock('h3')">标题2</button><button @click="richEditor?.setBlock('p')">正文</button><button @click="richEditor?.command('insertOrderedList')">编号</button><button @click="richEditor?.command('insertUnorderedList')">列表</button></div></div>
-              <div class="ribbon-group"><span>字号</span><div @mousedown.prevent><button v-for="size in [14, 16, 18, 20, 24]" :key="size" @click="richEditor?.setFontSize(size)">{{ size }}</button></div></div>
-              <div class="ribbon-group"><span>记号笔</span><div class="ribbon-highlights" @mousedown.prevent><button title="黄色重点" style="--highlight: #fff1a8" @click="richEditor?.highlight('#fff1a8')"></button><button title="蓝色概念" style="--highlight: #cde4ff" @click="richEditor?.highlight('#cde4ff')"></button><button title="绿色意义" style="--highlight: #d3f3dc" @click="richEditor?.highlight('#d3f3dc')"></button><button title="红色易错" style="--highlight: #ffd7d7" @click="richEditor?.highlight('#ffd7d7')"></button></div></div>
-              <div class="ribbon-preferences"><el-select :model-value="viewFontScale" size="small" @change="(value: number) => setViewPreference('font', value)"><el-option label="小字号" :value="0.9" /><el-option label="标准字号" :value="1" /><el-option label="大字号" :value="1.12" /><el-option label="特大字号" :value="1.25" /></el-select><el-select :model-value="viewLineHeight" size="small" @change="(value: number) => setViewPreference('line', value)"><el-option label="紧凑行距" :value="1.6" /><el-option label="标准行距" :value="1.9" /><el-option label="宽松行距" :value="2.2" /></el-select></div>
-            </section>
-            <NoteRichEditor v-if="mode === 'edit'" ref="richEditor" v-model="editorContent" :font-scale="viewFontScale" :line-height="viewLineHeight" />
-            <article v-else class="note-preview rich-note-content" :style="{ fontSize: `${16 * viewFontScale}px`, lineHeight: String(viewLineHeight) }" v-html="renderedContent"></article>
-            <footer class="note-editor-footer"><span>{{ wordCount }} 字 · 仅本人可见 · 格式自动保留</span><div><el-button type="danger" plain :icon="Delete" @click="remove">删除</el-button><el-button type="primary" :loading="saving" @click="save">保存笔记</el-button></div></footer>
+            <header class="note-editor-heading"><div><span>{{ selected.course_name }}</span><h2>{{ selected.chapter_title }}</h2></div><div class="note-editor-actions"><el-button-group><el-button :type="mode === 'edit' ? 'primary' : 'default'" :icon="EditPen" @click="mode = 'edit'">编辑</el-button><el-button :type="mode === 'preview' ? 'primary' : 'default'" @click="mode = 'preview'">预览</el-button></el-button-group><el-dropdown trigger="click" @command="handleEditorAction"><el-button :icon="MoreFilled">更多</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="export-markdown">导出 Markdown</el-dropdown-item><el-dropdown-item command="export-docx">导出 Word</el-dropdown-item><el-dropdown-item divided command="toggle-ai">{{ aiCollapsed ? '打开 AI 助手' : '收起 AI 助手' }}</el-dropdown-item><el-dropdown-item command="return">返回当前专题</el-dropdown-item><el-dropdown-item divided command="delete">删除当前笔记</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
+            <div class="note-editor-scroll">
+              <section v-if="formatBarOpen" class="note-format-ribbon">
+                <div class="ribbon-group"><span>文字</span><div @mousedown.prevent><button title="加粗" @click="richEditor?.command('bold')"><strong>B</strong></button><button title="斜体" @click="richEditor?.command('italic')"><em>I</em></button><button title="下划线" @click="richEditor?.command('underline')"><u>U</u></button><button title="清除格式" @click="richEditor?.command('removeFormat')">清除</button></div></div>
+                <div class="ribbon-group"><span>段落</span><div @mousedown.prevent><button @click="richEditor?.setBlock('h2')">标题1</button><button @click="richEditor?.setBlock('h3')">标题2</button><button @click="richEditor?.setBlock('p')">正文</button><button @click="richEditor?.command('insertOrderedList')">编号</button><button @click="richEditor?.command('insertUnorderedList')">列表</button></div></div>
+                <div class="ribbon-group"><span>字号</span><div @mousedown.prevent><button v-for="size in [14, 16, 18, 20, 24]" :key="size" @click="richEditor?.setFontSize(size)">{{ size }}</button></div></div>
+                <div class="ribbon-group"><span>记号笔</span><div class="ribbon-highlights" @mousedown.prevent><button title="黄色重点" style="--highlight: #fff1a8" @click="richEditor?.highlight('#fff1a8')"></button><button title="蓝色概念" style="--highlight: #cde4ff" @click="richEditor?.highlight('#cde4ff')"></button><button title="绿色意义" style="--highlight: #d3f3dc" @click="richEditor?.highlight('#d3f3dc')"></button><button title="红色易错" style="--highlight: #ffd7d7" @click="richEditor?.highlight('#ffd7d7')"></button></div></div>
+                <div class="ribbon-preferences"><el-select :model-value="viewFontScale" size="small" @change="(value: number) => setViewPreference('font', value)"><el-option label="小字号" :value="0.9" /><el-option label="标准字号" :value="1" /><el-option label="大字号" :value="1.12" /><el-option label="特大字号" :value="1.25" /></el-select><el-select :model-value="viewLineHeight" size="small" @change="(value: number) => setViewPreference('line', value)"><el-option label="紧凑行距" :value="1.6" /><el-option label="标准行距" :value="1.9" /><el-option label="宽松行距" :value="2.2" /></el-select></div>
+              </section>
+              <NoteRichEditor v-if="mode === 'edit'" ref="richEditor" v-model="editorContent" :font-scale="viewFontScale" :line-height="viewLineHeight" />
+              <article v-else ref="previewContent" class="note-preview rich-note-content" :style="{ fontSize: `${16 * viewFontScale}px`, lineHeight: String(viewLineHeight) }" v-html="renderedContent"></article>
+            </div>
+            <footer class="note-editor-footer"><span :class="`save-state ${saveStatus}`">{{ wordCount }} 字 · {{ saveStatusLabel }} · 仅本人可见</span><div><el-button type="primary" :loading="saving" :disabled="saveStatus === 'saved'" @click="save()">立即保存</el-button></div></footer>
           </template>
           <section v-else class="notes-empty-editor">
             <div class="empty-editor-mark"><el-icon><Notebook /></el-icon><span>01</span></div>
@@ -399,6 +474,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onEscape))
     </section>
     <el-dialog v-model="createDialogVisible" title="新建章节笔记" width="480px">
       <el-form label-position="top"><el-form-item label="选择教材"><el-select v-model="createCourseId" style="width:100%" @change="loadCreateChapters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="选择专题章节"><el-select v-model="createChapterId" filterable style="width:100%" placeholder="请选择需要整理的章节"><el-option v-for="chapter in availableChapters" :key="chapter.id" :label="`${chapter.title}${notes.some((note) => note.chapter_id === chapter.id) ? '（已有笔记）' : ''}`" :value="chapter.id" /></el-select></el-form-item></el-form><p class="create-note-hint">每个专题保留一篇个人主笔记；如果已经创建，系统会直接打开原笔记。</p><template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="createLoading" @click="createOrOpenNote">创建并编辑</el-button></template>
+    </el-dialog>
+    <el-dialog v-model="writingCompareVisible" :title="`${writingTitle} · 修改前后对比`" width="min(94vw, 1180px)" top="6vh">
+      <div class="writing-compare-grid"><section><header><strong>原始笔记</strong><span>{{ writingSource.length }} 字</span></header><article>{{ writingSource }}</article></section><section><header><strong>AI 建议结果</strong><span>{{ writingResult.length }} 字</span></header><article class="teaching-document" v-html="renderTeachingDocument(writingResult)"></article></section></div>
+      <template #footer><el-button @click="writingCompareVisible = false">继续修改</el-button><el-button @click="applyWriting('append'); writingCompareVisible = false">插入文末</el-button><el-button type="primary" @click="applyWriting('replace'); writingCompareVisible = false">采用建议结果</el-button></template>
     </el-dialog>
     <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
   </div>

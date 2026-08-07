@@ -37,7 +37,12 @@ function onPaste(event: ClipboardEvent) {
   command('insertText', event.clipboardData?.getData('text/plain') || '')
 }
 
-defineExpose({ command, setBlock, setFontSize, highlight, focus: () => editable.value?.focus() })
+function scrollToHeading(index: number) {
+  const heading = editable.value?.querySelectorAll<HTMLElement>('h2, h3')[index]
+  heading?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+defineExpose({ command, setBlock, setFontSize, highlight, scrollToHeading, focus: () => editable.value?.focus() })
 watch(() => props.modelValue, () => void nextTick(syncFromModel))
 onMounted(syncFromModel)
 </script>
