@@ -15,6 +15,7 @@ from app.exceptions import register_exception_handlers
 from app.services.material_import_service import recover_material_batches
 from app.services.agent_service import recover_agent_runs
 from app.services.agent_execution_service import recover_agent_executions
+from app.services.ai_media_service import cleanup_expired_media_assets
 from app.services.authority_discovery_service import start_discovery_scheduler
 
 
@@ -34,6 +35,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     interrupted_workspace_agents = recover_agent_executions(engine)
     if interrupted_workspace_agents:
         logger.warning("marked interrupted workspace agent executions as failed count=%s", interrupted_workspace_agents)
+    try:
+        expired_media = cleanup_expired_media_assets(engine)
+        if expired_media:
+            logger.info("removed expired private ai media assets count=%s", expired_media)
+    except Exception:
+        # The request path retries cleanup.  Do not make unrelated text-only
+        # teaching functions unavailable when an old deployment lacks the new
+        # media table or the media volume is temporarily read-only.
+        logger.exception("expired private ai media startup cleanup failed")
     start_discovery_scheduler(engine)
     yield
 

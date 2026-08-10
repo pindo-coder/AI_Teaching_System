@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     debug: bool = True
     api_v1_prefix: str = "/api/v1"
     database_url: str = "sqlite:///./data/app.db"
+    # SQLite 开发库仍可自动建表；MySQL 等持久数据库必须由 Alembic 管理，
+    # 启动时只校验 revision，避免 create_all 产生“有表但缺列”的混合结构。
+    database_schema_check_enabled: bool = True
     cors_origins: list[str] = ["http://localhost:5173"]
     log_level: str = "INFO"
     jwt_secret_key: str = "please-change-this-development-secret"
@@ -29,6 +32,37 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4o-mini", validation_alias=AliasChoices("LLM_MODEL", "OPENAI_MODEL", "DEEPSEEK_MODEL"))
     llm_temperature: float = 0.2
     llm_timeout_seconds: int = 60
+    # 百炼视觉、语音、Embedding 共用同一地域的 API Key；各能力仍可用独立 Key 覆盖。
+    dashscope_api_key: str | None = None
+    # 学习助手的输入侧多模态保持轻量：文件分块落盘，推理交给外部兼容 API，
+    # 小服务器不加载视觉或语音模型。独立配置允许文本、视觉和转写使用不同供应商。
+    ai_media_directory: str = "../knowledge_base/ai_media"
+    ai_media_max_images: int = Field(default=2, ge=1, le=2)
+    ai_media_max_image_mb: int = Field(default=5, ge=1, le=20)
+    ai_media_max_audio_mb: int = Field(default=10, ge=1, le=25)
+    ai_media_max_audio_seconds: int = Field(default=60, ge=1, le=60)
+    # 临时媒体必须有服务端生命周期、用户总额和可信时长校验，不能依赖浏览器清理。
+    ai_media_retention_hours: int = Field(default=24, ge=1, le=168)
+    ai_media_user_quota_mb: int = Field(default=50, ge=10, le=500)
+    ai_media_ffprobe_binary: str = "ffprobe"
+    ai_vision_enabled: bool = True
+    # 媒体专用配置只表示显式覆盖；百炼/向量配置的复用由 provider 统一解析，
+    # 避免 OPENAI_* 文本模型变量意外抢占图片或语音供应商。
+    ai_vision_api_key: str | None = None
+    ai_vision_base_url: str | None = None
+    ai_vision_model: str = Field(
+        default="qwen3-vl-plus",
+        validation_alias=AliasChoices("AI_VISION_MODEL", "DASHSCOPE_VISION_MODEL"),
+    )
+    ai_vision_timeout_seconds: int = 90
+    ai_asr_enabled: bool = True
+    ai_asr_api_key: str | None = None
+    ai_asr_base_url: str | None = None
+    ai_asr_model: str = Field(
+        default="qwen3-asr-flash",
+        validation_alias=AliasChoices("AI_ASR_MODEL", "DASHSCOPE_ASR_MODEL"),
+    )
+    ai_asr_timeout_seconds: int = 120
     ai_config_encryption_key: str | None = None
     embedding_provider: str = "mock"
     embedding_api_key: str | None = Field(default=None, validation_alias=AliasChoices("EMBEDDING_API_KEY", "DASHSCOPE_API_KEY", "OPENAI_API_KEY"))

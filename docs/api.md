@@ -7,6 +7,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/health` | 服务健康检查 |
+| GET | `/ready` | 服务与数据库就绪检查 |
 | POST | `/auth/register` | 注册学生账号 |
 | POST | `/auth/login` | 登录并获取 JWT |
 | GET | `/auth/me` | 获取当前用户 |
@@ -34,6 +35,13 @@
 | GET | `/learning/progress` | 当前用户学习记录 |
 | PUT | `/learning/progress` | 新增或更新阶段学习进度 |
 
+### 教师任务时间
+
+`POST /assignments` 的 `due_time` 必须是带 `Z` 或 UTC offset 的 ISO 8601
+时间（例如 `2026-08-20T10:00:00+08:00`）；缺少时区的值会被拒绝。任务截止与
+完成时间在响应中统一返回 UTC `Z`。其他没有历史时间基准标记的 naive 字段不会
+由通用响应层猜测为 UTC。
+
 ## AI 辅助
 
 ### POST `/ai/assist`
@@ -53,6 +61,17 @@
 任务类型支持 `question_answer`、`chapter_summary`、`preview_questions`、
 `review_outline` 和 `mock_questions`。响应包含 `grounded`、`model` 与 `sources`；
 当前章节无资料时不会调用模型，并明确返回资料不足。
+
+Chat 请求可额外传 `attachment_ids: [1, 2]` 引用本人已上传图片；每轮最多两张，Agent 模式不接受该字段。语音先通过转写接口得到文字，不直接进入 `/ai/assist`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/ai/media/capabilities` | 返回图片/语音是否可用及服务端限制 |
+| POST | `/ai/media/assets` | 分块上传本人图片或录音（multipart） |
+| GET | `/ai/media/assets` | 列出本人临时媒体资产 |
+| GET | `/ai/media/assets/{id}` | 获取本人媒体资产元数据 |
+| DELETE | `/ai/media/assets/{id}` | 删除本人媒体资产及磁盘文件 |
+| POST | `/ai/media/assets/{id}/transcribe` | 把本人录音转成可编辑文字 |
 
 ## 资料中心与知识库
 

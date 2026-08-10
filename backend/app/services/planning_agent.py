@@ -12,20 +12,25 @@ import logging
 from typing import Any, Iterator
 
 from langchain_core.prompts import ChatPromptTemplate
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.agent_run import AgentRun
+from app.models.authority_discovery import AuthoritySourceRegistry, DiscoveryJob, MaterialCandidate
+from app.models.course import Course
 from app.models.knowledge_document import KnowledgeDocument
+from app.models.teacher_assignment import TeacherAssignment
+from app.models.teaching_class import TeachingClass
 from app.models.user import User
 from app.schemas.agent import AgentRunCreate, LessonPrepInput
 from app.schemas.ai import AiWorkspaceContextData
 from app.rag.retriever import retrieve
 from app.services.agent_service import AgentService
-from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
+from app.services.ai_operation_service import AiOperationQueryService, AiProviderConfigService, build_chat_model
 from app.services.assignment_service import AssignmentService
 from app.services.study_service import StudyService
+from app.services.student_learning_summary_service import StudentLearningSummaryService
 from app.services.task_service import TaskService
 from app.services.llm_compat import clean_model_text
 
@@ -71,6 +76,7 @@ class PlanningAgent:
         "inspect_context": "读取当前课程、教材专题、教学班和学习阶段",
         "inspect_tasks": "读取当前用户可见的待完成或已发布任务状态",
         "inspect_learning_state": "读取学生任务点、学习进度和个人笔记状态",
+        "summarize_recent_learning": "汇总当前学生近 7 天的网站学习行为、任务、练习和薄弱点",
         "search_materials": "在当前教材专题范围内检索可引用的教材与权威资料",
         "check_lesson_readiness": "检查当前专题是否已有证据、课纲和可继续生成的成果",
         "create_lesson_draft": "根据当前专题创建待确认的备课草稿和教材证据快照",
@@ -84,14 +90,28 @@ class PlanningAgent:
         "generate_lesson_plan": "沿用备课工作流生成教案",
         "generate_classroom_activity": "沿用备课工作流生成课堂互动",
         "generate_all_artifacts": "沿用备课工作流生成 PPT、教案和课堂互动",
+        "inspect_admin_overview": "汇总管理员平台概览中的待处理事项与运行风险",
+        "inspect_discovery_status": "检查权威来源、发现任务和候选资料审核队列",
+        "inspect_knowledge_governance": "检查知识库资料发布、校准、索引与失败状态",
+        "inspect_ai_operations": "检查近 24 小时模型调用、失败率和当前服务配置",
+        "inspect_teaching_governance": "检查教师审核、教学班和教学任务的运行状态",
     }
 
-    ROLE_TOOL_DENYLIST = {
+    ROLE_TOOL_ALLOWLIST = {
         "student": {
-            "create_lesson_draft", "draft_assignment", "check_lesson_readiness",
+            "inspect_context", "inspect_tasks", "inspect_learning_state",
+            "search_materials", "draft_study_plan", "summarize_recent_learning",
+        },
+        "teacher": {
+            "inspect_context", "inspect_tasks", "inspect_learning_state", "search_materials",
+            "check_lesson_readiness", "create_lesson_draft", "draft_assignment",
+            "prepare_grading_rubric", "prepare_follow_up", "check_material_health",
             "generate_lesson_outline", "generate_ppt", "generate_lesson_plan",
             "generate_classroom_activity", "generate_all_artifacts",
-            "prepare_grading_rubric", "prepare_follow_up", "check_material_health",
+        },
+        "admin": {
+            "inspect_admin_overview", "inspect_discovery_status", "inspect_knowledge_governance",
+            "inspect_ai_operations", "inspect_teaching_governance",
         },
     }
 
@@ -124,46 +144,60 @@ class PlanningAgent:
 
     def _deterministic_plan(self, question: str, role: str) -> list[ToolCall]:
         text = question.lower().replace(" ", "")
+        if role == "admin":
+            if any(term in text for term in ("发现", "候选", "审核队列", "权威来源", "抓取", "爬取", "资料动态")):
+                return [ToolCall("inspect_discovery_status", "检查权威来源、发现任务和候选审核队列")]
+            if any(term in text for term in ("ai调用", "模型调用", "接口", "apikey", "服务配置", "失败率", "运行中心", "模型状态")):
+                return [ToolCall("inspect_ai_operations", "检查 AI 调用与服务运行状态")]
+            if any(term in text for term in ("知识库", "索引", "校准", "教材版本", "中央材料", "资料健康", "材料健康")):
+                return [ToolCall("inspect_knowledge_governance", "检查知识库、教材版本和索引状态")]
+            if any(term in text for term in ("教师审核", "教师", "教学班", "教学任务", "任务发布", "教学组织", "学情")):
+                return [ToolCall("inspect_teaching_governance", "检查教师、教学班和教学任务运行状态")]
+            return [ToolCall("inspect_admin_overview", "汇总平台待处理事项与运行风险")]
         if any(term in text for term in ("引用", "原文", "教材依据", "查资料", "找资料", "关联教材", "知识点")):
             return [
                 ToolCall("inspect_context", "确认教材专题和学习范围"),
                 ToolCall("search_materials", "检索可引用的教材与权威资料"),
             ]
+        if role == "student" and any(term in text for term in (
+            "近7天", "最近7天", "七天总结", "近期总结", "学习周报", "最近学了什么", "本周学习"
+        )):
+            return [ToolCall("summarize_recent_learning", "汇总近 7 天个人学习情况")]
         if role == "student" and any(term in text for term in ("我的进度", "学习状态", "笔记情况", "完成了什么", "还要做什么")):
             return [
                 ToolCall("inspect_context", "确认当前学习专题"),
                 ToolCall("inspect_learning_state", "读取任务点、进度和个人笔记状态"),
             ]
-        if role in {"teacher", "admin"} and any(term in text for term in ("备课状态", "准备好了吗", "课纲状态", "生成到哪", "成果状态")):
+        if role == "teacher" and any(term in text for term in ("备课状态", "准备好了吗", "课纲状态", "生成到哪", "成果状态")):
             return [
                 ToolCall("inspect_context", "确认当前备课专题"),
                 ToolCall("check_lesson_readiness", "检查证据、课纲和教学成果状态"),
             ]
-        if role in {"teacher", "admin"} and any(term in text for term in ("批改", "批阅", "评分", "量规", "反馈模板")):
+        if role == "teacher" and any(term in text for term in ("批改", "批阅", "评分", "量规", "反馈模板")):
             return [
                 ToolCall("inspect_context", "确认批改所对应的教材专题"),
                 ToolCall("prepare_grading_rubric", "生成可审阅的批改量规与反馈模板"),
             ]
-        if role in {"teacher", "admin"} and any(term in text for term in ("提醒", "催办", "谁没完成", "未完成学生", "跟进学生")):
+        if role == "teacher" and any(term in text for term in ("提醒", "催办", "谁没完成", "未完成学生", "跟进学生")):
             return [
                 ToolCall("inspect_context", "确认教学范围"),
                 ToolCall("inspect_tasks", "读取任务完成状态"),
                 ToolCall("prepare_follow_up", "形成不自动发送的跟进建议"),
             ]
-        if role in {"teacher", "admin"} and any(term in text for term in ("索引状态", "资料状态", "资料健康", "材料健康", "检查资料")):
+        if role == "teacher" and any(term in text for term in ("索引状态", "资料状态", "资料健康", "材料健康", "检查资料")):
             return [
                 ToolCall("inspect_context", "确认资料对应教材"),
                 ToolCall("check_material_health", "检查教材、中央材料与索引状态"),
             ]
-        if role in {"teacher", "admin"} and any(term in text for term in ("一键生成全部", "生成全部成果", "全部教学成果")):
+        if role == "teacher" and any(term in text for term in ("一键生成全部", "生成全部成果", "全部教学成果")):
             return [ToolCall("inspect_context", "确认当前备课专题"), ToolCall("generate_all_artifacts", "生成 PPT、教案和课堂互动")]
-        if role in {"teacher", "admin"} and any(term in text for term in ("生成ppt", "生成课件", "制作ppt")):
+        if role == "teacher" and any(term in text for term in ("生成ppt", "生成课件", "制作ppt")):
             return [ToolCall("inspect_context", "确认当前备课专题"), ToolCall("generate_ppt", "生成 PPT")]
-        if role in {"teacher", "admin"} and any(term in text for term in ("生成教案", "制作教案")):
+        if role == "teacher" and any(term in text for term in ("生成教案", "制作教案")):
             return [ToolCall("inspect_context", "确认当前备课专题"), ToolCall("generate_lesson_plan", "生成教案")]
-        if role in {"teacher", "admin"} and any(term in text for term in ("生成课堂互动", "生成讨论题", "生成活动")):
+        if role == "teacher" and any(term in text for term in ("生成课堂互动", "生成讨论题", "生成活动")):
             return [ToolCall("inspect_context", "确认当前备课专题"), ToolCall("generate_classroom_activity", "生成课堂互动")]
-        if role in {"teacher", "admin"} and any(
+        if role == "teacher" and any(
             term in text
             for term in ("课纲", "备课", "教案", "ppt", "课件", "课堂互动", "讨论题", "活动设计")
         ):
@@ -171,7 +205,7 @@ class PlanningAgent:
                 ToolCall("inspect_context", "确认教材专题和教学班"),
                 ToolCall("create_lesson_draft", "构建教材证据并创建待确认备课草稿", True),
             ]
-        if role in {"teacher", "admin"} and any(
+        if role == "teacher" and any(
             term in text
             for term in ("学习任务", "课后任务", "任务单", "研讨任务", "实践任务", "布置任务", "作业任务")
         ):
@@ -195,7 +229,7 @@ class PlanningAgent:
         return [ToolCall("inspect_context", "确认当前教学上下文")]
 
     def _allowed_tools(self, role: str) -> set[str]:
-        return set(self.TOOL_DESCRIPTIONS) - self.ROLE_TOOL_DENYLIST.get(role, set())
+        return set(self.ROLE_TOOL_ALLOWLIST.get(role, self.ROLE_TOOL_ALLOWLIST["student"]))
 
     def _llm_plan(self, question: str, role: str, context: AiWorkspaceContextData) -> list[ToolCall] | None:
         runtime = AiProviderConfigService.resolve(self.db)
@@ -243,6 +277,10 @@ class PlanningAgent:
 
     def plan(self, question: str, role: str, context: AiWorkspaceContextData) -> list[ToolCall]:
         deterministic = self._deterministic_plan(question, role)
+        # Admin 工具是平台状态查询，意图边界清晰且结果必须可审计，不需要先请求
+        # 外部模型做二次规划。这样 AI 服务配置异常时，管理员仍能读取平台进度。
+        if role == "admin":
+            return deterministic[: settings.agent_planner_max_steps]
         # 备课、任务、资料检索等明确目标已有可审计的安全路径。先直接采用它们，
         # 不能让一次外部模型规划调用卡住整个 SSE 首屏；大模型仅用于模糊问题的
         # 工具补充与最终结果归纳。
@@ -305,6 +343,9 @@ class PlanningAgent:
         # 多步骤工具流程本身已经产生可用、可审计的结果。立即返回这些结果，
         # 不再额外等待一次模型“润色”，保证任务草案、资料检索和备课入口能
         # 快速呈现。单步模糊问答仍可调用模型做说明性总结。
+        if role == "admin" or any(call.name == "summarize_recent_learning" for call, _result in results):
+            yield fallback
+            return
         runtime = AiProviderConfigService.resolve(self.db)
         if len(results) > 1 or not settings.agent_planner_use_llm or settings.ai_mock_mode or not runtime.api_key:
             yield fallback
@@ -330,7 +371,7 @@ class PlanningAgent:
             timeout=min(runtime.timeout_seconds, 12),
             streaming=True,
         )
-        emitted = False
+        raw_parts: list[str] = []
         try:
             stream = (prompt | model).stream({
                 "role": role,
@@ -341,11 +382,13 @@ class PlanningAgent:
             for value in stream:
                 text = self._chunk_text(value)
                 if text:
-                    emitted = True
-                    yield text
+                    raw_parts.append(text)
         except Exception as exc:
             logger.warning("agent_summary_llm_failed reason=%s", str(exc) or type(exc).__name__)
-        if not emitted:
+        cleaned = clean_model_text("".join(raw_parts))
+        if cleaned:
+            yield cleaned
+        else:
             yield fallback
 
     def invoke(
@@ -356,6 +399,201 @@ class PlanningAgent:
         role: str,
         context: AiWorkspaceContextData,
     ) -> ToolResult:
+        if call.name not in self._allowed_tools(role):
+            return ToolResult(
+                f"当前{role}角色无权调用“{call.reason}”。请使用该角色对应的 Agent 任务。",
+                status="failed",
+                warnings=[f"角色 {role} 不允许调用工具 {call.name}"],
+                data={"denied_tool": call.name, "role": role},
+            )
+        if call.name == "inspect_admin_overview":
+            pending_candidates = int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+                MaterialCandidate.status == "pending_review",
+            )) or 0)
+            failed_materials = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.status == "failed",
+            )) or 0)
+            active_classes = int(self.db.scalar(select(func.count(TeachingClass.id)).where(
+                TeachingClass.status == "active",
+            )) or 0)
+            ai_summary = AiOperationQueryService.summary(self.db)
+            risk_count = pending_candidates + failed_materials + int(ai_summary["failed_24h"])
+            return ToolResult(
+                f"平台当前有 {pending_candidates} 条候选资料待审核、{failed_materials} 份资料处理失败、"
+                f"近 24 小时 AI 调用失败 {ai_summary['failed_24h']} 次；现有 {active_classes} 个活跃教学班。"
+                + ("建议先处理资料审核和运行异常。" if risk_count else "当前没有需要立即处理的运行异常。"),
+                action={
+                    "kind": "open_admin_overview", "label": "返回平台概览", "href": "/",
+                    "requires_confirmation": False,
+                },
+                data={
+                    "pending_candidates": pending_candidates,
+                    "failed_materials": failed_materials,
+                    "failed_ai_calls_24h": int(ai_summary["failed_24h"]),
+                    "active_classes": active_classes,
+                },
+            )
+        if call.name == "inspect_discovery_status":
+            pending = int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+                MaterialCandidate.status == "pending_review",
+            )) or 0)
+            high_priority = int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+                MaterialCandidate.status == "pending_review",
+                MaterialCandidate.importance_level == "high",
+            )) or 0)
+            running_jobs = int(self.db.scalar(select(func.count(DiscoveryJob.id)).where(
+                DiscoveryJob.status.in_(["queued", "running"]),
+            )) or 0)
+            failed_jobs = int(self.db.scalar(select(func.count(DiscoveryJob.id)).where(
+                DiscoveryJob.status == "failed",
+            )) or 0)
+            enabled_sources = int(self.db.scalar(select(func.count(AuthoritySourceRegistry.id)).where(
+                AuthoritySourceRegistry.is_enabled.is_(True),
+            )) or 0)
+            unhealthy_sources = int(self.db.scalar(select(func.count(AuthoritySourceRegistry.id)).where(
+                AuthoritySourceRegistry.is_enabled.is_(True),
+                AuthoritySourceRegistry.consecutive_failures > 0,
+            )) or 0)
+            current_job = self.db.scalars(
+                select(DiscoveryJob)
+                .where(DiscoveryJob.status.in_(["queued", "running"]))
+                .order_by(DiscoveryJob.id.desc())
+            ).first()
+            latest_job = current_job or self.db.scalars(
+                select(DiscoveryJob).order_by(DiscoveryJob.id.desc())
+            ).first()
+            if current_job:
+                job_progress = (
+                    f"当前任务 #{current_job.id} 处于{current_job.progress_stage}阶段，"
+                    f"已处理来源 {current_job.processed_sources}/{current_job.total_sources}，"
+                    f"发现 {current_job.discovered_count} 条、提取正文 {current_job.fetched_count} 条、"
+                    f"进入待审核 {current_job.pending_review_count} 条、自动过滤 {current_job.filtered_count} 条、"
+                    f"失败 {current_job.failed_count + current_job.extraction_failed_count} 条。"
+                )
+            elif latest_job:
+                job_progress = (
+                    f"当前没有运行中的发现任务；最近任务 #{latest_job.id} 状态为 {latest_job.status}，"
+                    f"最终阶段为{latest_job.progress_stage}，发现 {latest_job.discovered_count} 条、"
+                    f"进入待审核 {latest_job.pending_review_count} 条。"
+                )
+            else:
+                job_progress = "当前还没有资料发现任务。"
+            return ToolResult(
+                f"资料发现当前启用 {enabled_sources} 个权威来源，其中 {unhealthy_sources} 个存在连续抓取失败；"
+                f"有 {running_jobs} 个发现任务正在排队或运行、{failed_jobs} 个任务失败；"
+                f"候选池有 {pending} 条待审核，其中 {high_priority} 条为高优先级。"
+                f"{job_progress}"
+                + ("建议优先处理高优先级候选和失败来源。" if high_priority or unhealthy_sources or failed_jobs else "审核队列暂无高风险异常。"),
+                action={
+                    "kind": "open_material_discovery", "label": "进入资料动态",
+                    "href": "/material-discovery?filter=pending_review#candidate-pool",
+                    "requires_confirmation": False,
+                },
+                data={
+                    "enabled_sources": enabled_sources, "unhealthy_sources": unhealthy_sources,
+                    "running_jobs": running_jobs, "failed_jobs": failed_jobs,
+                    "pending_candidates": pending, "high_priority_candidates": high_priority,
+                    "current_job": ({
+                        "id": current_job.id,
+                        "status": current_job.status,
+                        "progress_stage": current_job.progress_stage,
+                        "processed_sources": current_job.processed_sources,
+                        "total_sources": current_job.total_sources,
+                        "discovered_count": current_job.discovered_count,
+                        "fetched_count": current_job.fetched_count,
+                        "pending_review_count": current_job.pending_review_count,
+                        "filtered_count": current_job.filtered_count,
+                        "failed_count": current_job.failed_count + current_job.extraction_failed_count,
+                    } if current_job else None),
+                },
+            )
+        if call.name == "inspect_knowledge_governance":
+            active = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.is_active.is_(True),
+            )) or 0)
+            ready = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.is_active.is_(True), KnowledgeDocument.status == "ready",
+            )) or 0)
+            failed = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.status == "failed",
+            )) or 0)
+            pending_review = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.review_status == "pending",
+            )) or 0)
+            pending_calibration = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.material_type == "textbook",
+                KnowledgeDocument.calibration_status != "published",
+            )) or 0)
+            published_central = int(self.db.scalar(select(func.count(KnowledgeDocument.id)).where(
+                KnowledgeDocument.material_type == "central",
+                KnowledgeDocument.review_status == "published",
+                KnowledgeDocument.status == "ready",
+            )) or 0)
+            return ToolResult(
+                f"知识库共有 {active} 份启用资料，其中 {ready} 份索引就绪、{failed} 份处理失败；"
+                f"{pending_review} 份等待审核，{pending_calibration} 份教材尚未完成校准发布，"
+                f"当前有 {published_central} 份已发布中央材料。"
+                + ("建议先处理失败资料和待校准教材。" if failed or pending_calibration else "当前索引与发布状态正常。"),
+                action={
+                    "kind": "open_knowledge_governance", "label": "进入知识库治理", "href": "/knowledge",
+                    "requires_confirmation": False,
+                },
+                data={
+                    "active_documents": active, "ready_documents": ready, "failed_documents": failed,
+                    "pending_review": pending_review, "pending_calibration": pending_calibration,
+                    "published_central": published_central,
+                },
+            )
+        if call.name == "inspect_ai_operations":
+            summary = AiOperationQueryService.summary(self.db)
+            success_percent = round(float(summary["success_rate"]) * 100)
+            latency = "暂无完成请求" if summary["average_latency_ms"] is None else f"平均耗时 {summary['average_latency_ms']} 毫秒"
+            return ToolResult(
+                f"近 24 小时共有 {summary['total_24h']} 次 AI 调用，成功率 {success_percent}%，"
+                f"失败 {summary['failed_24h']} 次，当前运行中 {summary['running']} 次，{latency}。"
+                f"当前模型为 {summary['active_model']}，配置来源为"
+                f"{'管理员配置' if summary['config_source'] == 'database' else '服务器环境变量'}。"
+                + ("建议进入运行中心查看失败调用详情。" if summary["failed_24h"] else "当前未发现调用失败。"),
+                action={
+                    "kind": "open_ai_operations", "label": "进入 AI 运行中心", "href": "/ai-operations",
+                    "requires_confirmation": False,
+                },
+                data=summary,
+            )
+        if call.name == "inspect_teaching_governance":
+            approved_teachers = int(self.db.scalar(select(func.count(User.id)).where(
+                User.role == "teacher", User.approval_status == "approved",
+            )) or 0)
+            pending_teachers = int(self.db.scalar(select(func.count(User.id)).where(
+                User.role == "teacher", User.approval_status == "pending",
+            )) or 0)
+            total_classes = int(self.db.scalar(select(func.count(TeachingClass.id))) or 0)
+            active_classes = int(self.db.scalar(select(func.count(TeachingClass.id)).where(
+                TeachingClass.status == "active",
+            )) or 0)
+            total_courses = int(self.db.scalar(select(func.count(Course.id))) or 0)
+            published_assignments = int(self.db.scalar(select(func.count(TeacherAssignment.id)).where(
+                TeacherAssignment.status == "published",
+            )) or 0)
+            text = question.lower().replace(" ", "")
+            assignment_focus = any(term in text for term in ("任务", "发布", "学情", "完成"))
+            return ToolResult(
+                f"平台现有 {approved_teachers} 名已审核教师、{pending_teachers} 名教师等待审核；"
+                f"共 {total_classes} 个教学班，其中 {active_classes} 个处于活跃状态；"
+                f"维护 {total_courses} 门教材课程，当前有 {published_assignments} 项已发布教学任务。"
+                + ("建议先处理待审核教师。" if pending_teachers else "教师准入当前没有待处理项。"),
+                action={
+                    "kind": "open_teaching_governance",
+                    "label": "查看任务监督" if assignment_focus else "进入教学管理",
+                    "href": "/assignments" if assignment_focus else "/classes",
+                    "requires_confirmation": False,
+                },
+                data={
+                    "approved_teachers": approved_teachers, "pending_teachers": pending_teachers,
+                    "total_classes": total_classes, "active_classes": active_classes,
+                    "total_courses": total_courses, "published_assignments": published_assignments,
+                },
+            )
         if call.name == "inspect_context":
             if not context.course_id or not context.chapter_id:
                 return ToolResult(
@@ -372,6 +610,28 @@ class PlanningAgent:
                 f"已锁定《{context.course_name}》·{context.chapter_title}"
                 + (f"·教学班：{context.teaching_class_name}" if context.teaching_class_name else ""),
                 data={"grounded": True},
+            )
+        if call.name == "summarize_recent_learning":
+            summary = StudentLearningSummaryService(self.db).summarize(self.user.id)
+            active = summary["active"]
+            tasks = summary["task_points"]
+            assignments = summary["assignments"]
+            actions = summary["learning_actions"]
+            weak_text = "；".join(summary["weak_points"]) if summary["weak_points"] else "暂未形成足够证据判断薄弱点"
+            suggestion_text = "；".join(summary["suggestions"])
+            return ToolResult(
+                f"近 7 天你学习了 {active['course_count']} 门课程、{active['chapter_count']} 个专题；"
+                f"完成 {tasks['completed']} 个任务点，另有 {tasks['in_progress']} 个进行中。"
+                f"教师任务本期完成 {assignments['completed_in_period']} 项、待完成 {assignments['pending']} 项、"
+                f"逾期 {assignments['overdue']} 项。更新笔记 {actions['notes_updated']} 篇，"
+                f"完成复习练习 {actions['practice_answered']} 题（答对 {actions['practice_correct']} 题）。"
+                f"记录到 AI 任务辅助 {actions['ai_assist_events']} 次、笔记空间 AI 提问 {actions['ai_chat_questions']} 次；"
+                f"这些仅作为学习投入参考，不计为知识掌握。\n薄弱点：{weak_text}。\n下一步：{suggestion_text}。",
+                action={
+                    "kind": "open_student_assignments", "label": "查看我的任务", "href": "/assignments",
+                    "requires_confirmation": False,
+                },
+                data=summary,
             )
         if call.name == "inspect_tasks":
             if role == "student":

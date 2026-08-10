@@ -199,7 +199,8 @@ a { color: var(--primary); text-decoration: none; }
 .guide-grid, .exam-task-grid { display: grid; gap: 12px; }
 .guide-grid > div, .exam-task-grid > div { padding: 14px 16px; background: #f6f8fc; border-radius: 10px; }
 .guide-grid strong, .exam-task-grid strong { color: #273a58; }.guide-grid p, .exam-task-grid p { margin: 6px 0 0; color: var(--muted); line-height: 1.7; }
-.preview-text, .exam-preview { max-height: 520px; overflow: auto; padding-right: 8px; }
+.textbook-scroll-window { max-height: min(60vh, 560px); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding-right: 12px; scrollbar-gutter: stable; }
+.textbook-scroll-window:focus-visible { outline: 3px solid rgba(40, 87, 215, .24); outline-offset: 4px; }
 .note-guide { margin: 0 0 14px; color: var(--muted); line-height: 1.7; }
 .note-save-button { margin-top: 14px; }
 .stage-task-panel { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, .8fr); gap: 28px; align-items: center; margin-top: 18px; padding: 22px 26px; background: #fff; border: 1px solid var(--border); border-radius: 15px; }

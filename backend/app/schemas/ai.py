@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.learning import LearningStage
 
@@ -24,16 +24,28 @@ AiWorkspaceMode = Literal["chat", "agent"]
 AiWorkspaceRole = Literal["student", "teacher", "admin"]
 
 
+class AiConversationMessage(BaseModel):
+    """A bounded prior turn supplied by the workspace chat client."""
+
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=600)
+
+
 class AiAssistRequest(BaseModel):
     course_id: int
     chapter_id: int
     learning_stage: LearningStage
     task_type: AiTaskType = "question_answer"
-    question: str = Field(min_length=1, max_length=2000)
+    # Workspace Chat may prepend a bounded conversation transcript before
+    # delegating to the existing grounded answer path. Direct user input is
+    # still limited to 2,000 characters by AiWorkspaceAssistRequest/the UI.
+    question: str = Field(min_length=1, max_length=8000)
     # 工作台助手使用这两个字段切换 Chat / Agent 和角色化提示；
     # 普通章节助手保持默认值即可，不影响现有接口。
     assistant_mode: AiWorkspaceMode = "chat"
     assistant_role: AiWorkspaceRole = "student"
+    # 只引用已上传的临时图片资产；音频先转写为可编辑文字，不直接进入模型。
+    attachment_ids: list[int] = Field(default_factory=list, max_length=2)
 
 
 class AiWorkspaceAssistRequest(BaseModel):
@@ -44,6 +56,20 @@ class AiWorkspaceAssistRequest(BaseModel):
     learning_stage: LearningStage = "preview"
     task_type: AiTaskType = "question_answer"
     question: str = Field(min_length=1, max_length=2000)
+    attachment_ids: list[int] = Field(default_factory=list, max_length=2)
+    conversation_history: list[AiConversationMessage] = Field(default_factory=list, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_completed_chat_turns(self) -> "AiWorkspaceAssistRequest":
+        if self.mode != "chat" or not self.conversation_history:
+            return self
+        if len(self.conversation_history) % 2:
+            raise ValueError("对话历史必须由完整的用户与助手轮次组成")
+        for index, item in enumerate(self.conversation_history):
+            expected = "user" if index % 2 == 0 else "assistant"
+            if item.role != expected:
+                raise ValueError("对话历史角色顺序无效")
+        return self
 
 
 class AiWorkspaceContextCandidate(BaseModel):

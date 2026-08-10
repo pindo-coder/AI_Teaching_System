@@ -1,9 +1,12 @@
-"""根据 backend/.env 初始化数据库表。适用于 SQLite 和 MySQL。"""
+"""根据 backend/.env 将数据库升级到最新 Alembic revision。"""
+
+from alembic import command
 
 from app.core.config import settings
-from app.db.init_db import init_db
+from app.db.init_db import _alembic_config, create_bootstrap_admin
 
 
 if __name__ == "__main__":
-    init_db()
-    print(f"数据库初始化完成：{settings.database_url.split('@')[-1]}")
+    command.upgrade(_alembic_config(), "head")
+    create_bootstrap_admin()
+    print(f"数据库迁移完成：{settings.database_url.split('@')[-1]}")

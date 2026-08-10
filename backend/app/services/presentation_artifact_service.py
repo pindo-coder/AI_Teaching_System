@@ -45,7 +45,7 @@ class PresentationArtifactService:
         path = Path(configured)
         if path.exists():
             return str(path)
-        raise RuntimeError("未找到 Node.js，请安装 Node 20+ 或配置 PRESENTATION_NODE_BINARY")
+        raise RuntimeError("未找到 Node.js，请安装受支持的 Node 24+ 或配置 PRESENTATION_NODE_BINARY")
 
     def render_pptx(
         self,
@@ -126,6 +126,8 @@ class PresentationArtifactService:
         document.styles["Normal"].font.size = Pt(11)
         heading = document.add_heading(title, level=0)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        compliance = document.add_paragraph("AI 生成内容｜请教师核验后使用")
+        compliance.alignment = WD_ALIGN_PARAGRAPH.CENTER
         document.add_paragraph(f"课程：{course_name}")
         document.add_paragraph(f"专题：{chapter_title}")
         document.add_heading("一、课程定位", level=1)
@@ -182,6 +184,8 @@ class PresentationArtifactService:
         document.styles["Normal"].font.size = Pt(11)
         heading = document.add_heading(title, level=0)
         heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        compliance = document.add_paragraph("AI 生成内容｜请教师核验后使用")
+        compliance.alignment = WD_ALIGN_PARAGRAPH.CENTER
         document.add_paragraph(f"课程：{course_name}")
         for index, item in enumerate(activities, start=1):
             document.add_heading(f"活动{index}：{item.get('title') or '课堂活动'}", level=1)

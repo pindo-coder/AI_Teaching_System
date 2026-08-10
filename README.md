@@ -15,7 +15,7 @@ MVP 阶段 0～5 已完成：用户与课程系统、阶段化 AI 助手、分�
 
 ## 环境要求
 
-- Node.js 20+
+- Node.js 24+
 - Python 3.11+
 
 ## 启动后端
@@ -34,7 +34,8 @@ uvicorn app.main:app --reload
 
 访问：
 
-- 健康检查：`http://localhost:8000/api/v1/health`
+- 存活检查：`http://localhost:8000/api/v1/health`
+- 数据库就绪检查：`http://localhost:8000/api/v1/ready`
 - OpenAPI 文档：`http://localhost:8000/docs`
 
 开发环境首次启动会按照 `.env` 中的 `BOOTSTRAP_ADMIN_USERNAME` 和
@@ -83,11 +84,26 @@ LLM_MODEL=your-model-name
 
 AI 请求必须携带课程、章节和学习阶段。存在已入库资料时，系统优先使用 Chroma 检索结果；尚未上传资料时回退到章节正文。
 
+## 图片与语音输入
+
+Chat 支持图片理解和语音转文字，Agent 暂不接收媒体附件。图片作为用户临时材料，不能替代教材或权威资料；语音会先转成可编辑文字，再进入原有教材 RAG。两项能力均调用阿里云百炼兼容 API，小服务器不加载本地视觉或语音模型。
+
+```env
+DASHSCOPE_API_KEY=your-dashscope-key
+AI_VISION_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_VISION_MODEL=qwen3-vl-plus
+
+AI_ASR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+AI_ASR_MODEL=qwen3-asr-flash
+```
+
+`DASHSCOPE_API_KEY` 与下方 DashScope Embedding 共用，不需要再申请或配置媒体 Key；如需拆分账号或额度，仍可通过 `AI_VISION_API_KEY`、`AI_ASR_API_KEY` 单独覆盖。默认每轮最多 2 张 JPEG/PNG/WebP，浏览器先将长边压到 2048px，服务端再按 5 MB/张分块落盘并验证文件魔数；录音最长 60 秒、10 MB，支持 WebM/WAV/MP3/MP4/OGG。语音转写成功、图片回答结束后，前端会立即请求删除临时资产。媒体表和迁移同时兼容 SQLite 与 MySQL；Docker 部署会把临时文件写入独立 `ai_media` volume。
+
 ## 教师备课 Agent 与教学成果
 
 教师备课工作区采用“设置任务—构建证据—生成课纲—生成成果—预览发布”流程，每次只展示一个阶段，避免把任务、证据、课纲和成果挤在同一窗口。证据快照需要教师确认后才能生成课纲；课纲确认后可以生成可编辑的 PPTX、Word 教案和课堂活动设计。成果生成后仍保持草稿，只有教师在最后一步勾选确认，才会发布到指定教学班。
 
-PPTX 由公开可部署的 PptxGenJS 运行时生成，需要 Node.js 20+：
+PPTX 由公开可部署的 PptxGenJS 运行时生成，需要受支持的 Node.js 24+：
 
 ```bash
 cd backend/presentation_runtime
@@ -185,7 +201,7 @@ cd backend
 PYTHONPATH=. python scripts/init_database.py
 ```
 
-初始化脚本适用于 SQLite 和 MySQL；正式环境应使用独立数据库用户，不要使用 root。
+初始化脚本会执行 `alembic upgrade head`，适用于 SQLite 和 MySQL；正式环境应使用独立数据库用户，不要使用 root。应用启动不会再尝试为 MySQL 自动补表，数据库版本落后时会给出明确迁移提示。
 
 ## 升级现有数据库与教材
 
@@ -197,6 +213,12 @@ alembic upgrade head
 PYTHONPATH=. python -m scripts.bootstrap_default_class
 PYTHONPATH=. python -m scripts.migrate_existing_citations
 PYTHONPATH=. python -m scripts.rebuild_precise_index --activate
+```
+
+迁移后可执行只读兼容性检查，确认 revision、关键索引、MySQL `LONGTEXT` 和字符集：
+
+```bash
+PYTHONPATH=. python -m scripts.check_database_compatibility
 ```
 
 `20260730_01` 迁移会创建 PPT 风格模板表，`20260731_01` 会创建教学成果发布记录表。升级完成后重启 FastAPI，教师即可在“课程备课 → PPT 生成偏好”上传并选择模板，并在最终核验后发布 PPT 与课堂讨论。

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import CheckConstraint, DateTime, String, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -28,7 +28,9 @@ class User(Base):
     approval_status: Mapped[str] = mapped_column(String(20), default="approved", nullable=False, index=True)
     approval_note: Mapped[str | None] = mapped_column(String(500))
     approved_time: Mapped[datetime | None] = mapped_column(DateTime)
-    approved_by: Mapped[int | None] = mapped_column(nullable=True, index=True)
+    approved_by: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     learning_progress: Mapped[list["LearningProgress"]] = relationship(

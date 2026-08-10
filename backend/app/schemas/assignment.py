@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+
+from app.core.time import to_utc_naive, utc_iso
 
 
 LearningStage = Literal["preview", "review", "exam"]
@@ -20,6 +22,13 @@ class AssignmentCreate(BaseModel):
     target_scope: Literal["all_students", "selected_students", "selected_groups"] = "all_students"
     student_ids: list[int] = Field(default_factory=list)
     group_ids: list[int] = Field(default_factory=list)
+
+    @field_validator("due_time")
+    @classmethod
+    def normalize_due_time(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("截止时间必须包含 Z 或 UTC 偏移")
+        return to_utc_naive(value)
 
     @model_validator(mode="after")
     def selected_students_required(self):
@@ -54,6 +63,14 @@ class StudentAssignmentRead(BaseModel):
     created_time: datetime
     teacher_name: str
 
+    @field_serializer("due_time", when_used="json")
+    def serialize_due_time(self, value: datetime) -> str:
+        return utc_iso(value)
+
+    @field_serializer("completed_time", when_used="json")
+    def serialize_completed_time(self, value: datetime | None) -> str | None:
+        return utc_iso(value) if value is not None else None
+
 
 class TeacherAssignmentRead(BaseModel):
     id: int
@@ -75,6 +92,10 @@ class TeacherAssignmentRead(BaseModel):
     in_progress_count: int
     overdue_count: int
 
+    @field_serializer("due_time", when_used="json")
+    def serialize_due_time(self, value: datetime) -> str:
+        return utc_iso(value)
+
 
 class AssignmentRecipientRead(BaseModel):
     user_id: int
@@ -85,3 +106,7 @@ class AssignmentRecipientRead(BaseModel):
     progress_value: int
     completed_time: datetime | None
     last_activity_time: datetime | None
+
+    @field_serializer("completed_time", when_used="json")
+    def serialize_completed_time(self, value: datetime | None) -> str | None:
+        return utc_iso(value) if value is not None else None

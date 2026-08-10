@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import escape, unescape
 from html.parser import HTMLParser
@@ -10,9 +10,10 @@ import re
 import xml.etree.ElementTree as ET
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.core.time import BUSINESS_TIMEZONE, to_business_time, to_utc_naive, utc_now
 from app.models.news_item import NewsItem
 from app.models.news_study_note import NewsStudyNote
 from app.models.chapter import Chapter
@@ -81,9 +82,26 @@ def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
     try:
-        return parsedate_to_datetime(value).replace(tzinfo=None)
+        # 中国来源常把 China Standard Time 简写为 CST，而 email.utils
+        # 会将 CST 按北美中部时间解释。仅改写末尾的时区 token，避免影响
+        # 已明确携带数值 offset 的合法日期。
+        normalized = re.sub(r"\s+CST\s*$", " +0800", value.strip(), flags=re.IGNORECASE)
+        parsed = parsedate_to_datetime(normalized)
+        return to_utc_naive(parsed, naive_timezone=BUSINESS_TIMEZONE)
     except (TypeError, ValueError, OverflowError):
         return None
+
+
+def _published_time_utc(item: NewsItem) -> datetime | None:
+    """Interpret a news timestamp without rewriting ambiguous historical rows."""
+    if item.published_time is None:
+        return None
+    naive_timezone = UTC if item.published_time_is_utc else BUSINESS_TIMEZONE
+    return to_utc_naive(item.published_time, naive_timezone=naive_timezone)
+
+
+def _effective_news_time(item: NewsItem) -> datetime:
+    return _published_time_utc(item) or to_utc_naive(item.fetched_time)
 
 
 def _parse_feed(payload: bytes) -> ET.Element:
@@ -101,7 +119,9 @@ class NewsService:
         self.db = db
 
     def list(self, limit: int = 20) -> list[NewsItem]:
-        return list(self.db.scalars(select(NewsItem).order_by(NewsItem.published_time.desc(), NewsItem.id.desc()).limit(limit)).all())
+        items = list(self.db.scalars(select(NewsItem)).all())
+        items.sort(key=lambda item: (_effective_news_time(item), item.id), reverse=True)
+        return items[:limit]
 
     def source_names(self) -> list[str]:
         configured = [name for name, _ in FEEDS]
@@ -131,25 +151,25 @@ class NewsService:
             statement = statement.where(or_(NewsItem.title.ilike(pattern), NewsItem.summary.ilike(pattern)))
         if sources:
             statement = statement.where(NewsItem.source_name.in_(sources))
-        if days is not None:
-            cutoff = datetime.utcnow() - timedelta(days=days)
-            statement = statement.where(func.coalesce(NewsItem.published_time, NewsItem.fetched_time) >= cutoff)
         items = list(self.db.scalars(statement).all())
+        if days is not None:
+            cutoff = utc_now() - timedelta(days=days)
+            items = [item for item in items if _effective_news_time(item) >= cutoff]
 
         def relevance(item: NewsItem) -> tuple[float, datetime, int]:
             if not keyword:
-                return 0.0, item.published_time or item.fetched_time, item.id
+                return 0.0, _effective_news_time(item), item.id
             haystack = f"{item.title} {item.summary or ''}".lower()
             lowered = keyword.lower()
             query_grams = self._grams(lowered)
             overlap = len(query_grams & self._grams(haystack)) / max(1, len(query_grams))
             score = item.title.lower().count(lowered) * 5 + haystack.count(lowered) + overlap
-            return score, item.published_time or item.fetched_time, item.id
+            return score, _effective_news_time(item), item.id
 
         if sort_by == "relevance" and keyword:
             items.sort(key=relevance, reverse=True)
         else:
-            items.sort(key=lambda item: (item.published_time or item.fetched_time, item.id), reverse=True)
+            items.sort(key=lambda item: (_effective_news_time(item), item.id), reverse=True)
         total = len(items)
         start = (page - 1) * page_size
         return {
@@ -229,7 +249,10 @@ class NewsService:
                 blocks.append(f"<h3>{escape(heading.group(1))}</h3>")
             else:
                 blocks.append(f"<p>{escape(line)}</p>")
-        published = published_time.strftime("%Y-%m-%d %H:%M") if published_time else "发布时间未注明"
+        published = (
+            to_business_time(published_time).strftime("%Y-%m-%d %H:%M")
+            if published_time else "发布时间未注明"
+        )
         blocks.append(f"<p><strong>资料来源：</strong>{escape(source_name)}，{published}，{escape(source_url)}</p>")
         return "".join(blocks)
 
@@ -243,7 +266,8 @@ class NewsService:
         ))
         if payload.mode == "create" and existing is not None and StudyService.plain_note_content(existing.content):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该章节已有笔记，请选择追加到现有笔记")
-        section = self._draft_html(item.title, item.source_name, item.article_url, item.published_time, payload.content)
+        published_time = _published_time_utc(item)
+        section = self._draft_html(item.title, item.source_name, item.article_url, published_time, payload.content)
         combined = section if existing is None or not StudyService.plain_note_content(existing.content) else f"{existing.content}<hr>{section}"
         if len(combined) > 30000:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="现有笔记内容较多，请精简研学草稿后再添加")
@@ -257,7 +281,7 @@ class NewsService:
             link = NewsStudyNote(
                 user_id=user_id, note_id=note.id, news_id=item.id, course_id=chapter.course_id,
                 chapter_id=chapter.id, ai_summary=payload.content, textbook_relation=payload.textbook_relation,
-                source_title=item.title, source_url=item.article_url, published_at=item.published_time,
+                source_title=item.title, source_url=item.article_url, published_at=published_time,
             )
             self.db.add(link)
         else:
@@ -284,7 +308,16 @@ class NewsService:
                         continue
                     summary = _clean(item.findtext("description"))[:1000] or None
                     published_time = _parse_time(item.findtext("pubDate"))
-                    self.db.add(NewsItem(title=title, summary=summary, source_name=source_name, source_url=source_url, article_url=article_url, published_time=published_time, fetched_time=datetime.utcnow()))
+                    self.db.add(NewsItem(
+                        title=title,
+                        summary=summary,
+                        source_name=source_name,
+                        source_url=source_url,
+                        article_url=article_url,
+                        published_time=published_time,
+                        published_time_is_utc=True,
+                        fetched_time=utc_now(),
+                    ))
                     known_urls.add(article_url)
                     created += 1
             except (OSError, ET.ParseError, ValueError) as exc:
@@ -295,7 +328,7 @@ class NewsService:
 
     def refresh_if_stale(self) -> int:
         latest = self.db.scalar(select(NewsItem).order_by(NewsItem.fetched_time.desc()))
-        if latest and latest.fetched_time > datetime.utcnow() - timedelta(minutes=30):
+        if latest and latest.fetched_time > utc_now() - timedelta(minutes=30):
             return 0
         return self.refresh()
 

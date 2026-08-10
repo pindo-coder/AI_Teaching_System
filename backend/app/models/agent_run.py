@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -30,7 +31,10 @@ class AgentRun(TimestampMixin, Base):
     current_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     input_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     evidence_snapshot: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)
-    context_snapshot: Mapped[str | None] = mapped_column(Text)
+    # 备课任务会保存完整章节上下文，MySQL 普通 TEXT 容量不足。
+    context_snapshot: Mapped[str | None] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql")
+    )
     output_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     model_name: Mapped[str | None] = mapped_column(String(120))
     prompt_version: Mapped[str] = mapped_column(String(40), default="lesson-prep-v1", nullable=False)

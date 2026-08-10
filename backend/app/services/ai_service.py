@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.prompts import (
+    AI_IMAGE_ATTACHMENT_INSTRUCTIONS,
     AI_SYSTEM_PROMPT,
     AI_USER_PROMPT,
     STAGE_INSTRUCTIONS,
@@ -36,6 +37,8 @@ from app.services.llm_compat import (
     remember_streaming_support,
 )
 from app.services.ai_operation_service import build_chat_model
+from app.services.ai_media_service import AiMediaNotFoundError, AiMediaService
+from app.services.multimodal_provider import MultimodalProviderError, VisionProvider
 
 
 logger = logging.getLogger(__name__)
@@ -184,13 +187,83 @@ class MockGenerator:
 
 class AiService:
     def __init__(self, db: Session, generator: AiGenerator | None = None,
-                 user: User | None = None) -> None:
+                 user: User | None = None, vision_provider: VisionProvider | None = None) -> None:
         self.db = db
         self.courses = CourseRepository(db)
         self.chapters = ChapterRepository(db)
         self.documents = KnowledgeRepository(db)
         self.user = user
         self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator(db, user))
+        self.vision_provider = vision_provider or VisionProvider(db=db)
+
+    def _vision_inputs(self, payload: AiAssistRequest) -> list[str]:
+        """Resolve private image IDs to bounded local paths after ownership checks."""
+        attachment_ids = list(dict.fromkeys(payload.attachment_ids))
+        if not attachment_ids:
+            return []
+        if payload.assistant_mode != "chat":
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片附件仅支持 Chat 模式")
+        if len(attachment_ids) != len(payload.attachment_ids):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请勿重复提交同一张图片")
+        max_images = int(getattr(settings, "ai_media_max_images", 2))
+        if len(attachment_ids) > max_images:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"每轮最多提交 {max_images} 张图片",
+            )
+        if self.user is None:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录后再使用图片理解")
+        if not bool(getattr(self.vision_provider, "available", True)):
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="图片理解服务尚未配置")
+        media = AiMediaService(self.db)
+        try:
+            assets = media.get_owned_many(attachment_ids, self.user.id)
+        except AiMediaNotFoundError as exc:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        paths: list[str] = []
+        max_image_bytes = int(getattr(settings, "ai_media_max_image_mb", 5)) * 1024 * 1024
+        for asset in assets:
+            if asset.media_kind != "image" or asset.status != "ready":
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="附件必须是已就绪的图片")
+            if asset.course_id is not None and asset.course_id != payload.course_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片不属于当前课程")
+            if asset.chapter_id is not None and asset.chapter_id != payload.chapter_id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片不属于当前专题")
+            if asset.byte_size > max_image_bytes:
+                raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="图片超过当前大小限制")
+            paths.append(str(media.path_for(asset)))
+        return paths
+
+    @staticmethod
+    def _vision_prompt(variables: dict[str, str]) -> str:
+        return "\n\n".join(
+            (
+                AI_SYSTEM_PROMPT.strip(),
+                AI_IMAGE_ATTACHMENT_INSTRUCTIONS.strip(),
+                AI_USER_PROMPT.format(**variables).strip(),
+            )
+        )
+
+    def _vision_max_total_bytes(self) -> int:
+        count = int(getattr(settings, "ai_media_max_images", 2))
+        per_image_mb = int(getattr(settings, "ai_media_max_image_mb", 5))
+        return count * per_image_mb * 1024 * 1024
+
+    def _generate_with_images(self, variables: dict[str, str], paths: list[str]) -> str:
+        try:
+            return self.vision_provider.generate(
+                self._vision_prompt(variables), paths, max_total_bytes=self._vision_max_total_bytes()
+            )
+        except MultimodalProviderError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    def _stream_with_images(self, variables: dict[str, str], paths: list[str]) -> Iterator[str]:
+        try:
+            yield from self.vision_provider.stream(
+                self._vision_prompt(variables), paths, max_total_bytes=self._vision_max_total_bytes()
+            )
+        except MultimodalProviderError as exc:
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     def _chapter_direct_source(self, *, course_id: int, chapter_id: int, excerpt: str) -> AiSource | None:
         """为专题正文补回其教材 PDF 定位，使非 RAG 回答同样可核对原页。"""
@@ -285,7 +358,12 @@ class AiService:
             output.append(source)
         return output
 
-    def _prepare(self, payload: AiAssistRequest) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
+    def _prepare(
+        self,
+        payload: AiAssistRequest,
+        *,
+        retrieval_question: str | None = None,
+    ) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
         course = self.courses.get(payload.course_id)
         chapter = self.chapters.get(payload.chapter_id)
         if course is None:
@@ -303,7 +381,7 @@ class AiService:
         retrieved_chunks = []
         if any(layer_document_ids.values()):
             retrieved_chunks = retrieve_layered(
-                f"{chapter.title} {payload.question}", layer_document_ids=layer_document_ids,
+                f"{chapter.title} {retrieval_question or payload.question}", layer_document_ids=layer_document_ids,
                 chapter_id=chapter.id, top_k=6,
             )
         if not chapter_content and any(layer_document_ids.values()) and not retrieved_chunks:
@@ -391,18 +469,33 @@ class AiService:
             ]
         return variables, self._validated_sources(sources), len(retrieved_chunks)
 
-    def assist(self, payload: AiAssistRequest) -> AiAssistData:
-        prepared = self._prepare(payload)
+    def assist(
+        self,
+        payload: AiAssistRequest,
+        *,
+        retrieval_question: str | None = None,
+    ) -> AiAssistData:
+        image_paths = self._vision_inputs(payload)
+        prepared = self._prepare(payload, retrieval_question=retrieval_question)
         if isinstance(prepared, AiAssistData):
             return prepared
         variables, sources, rag_chunks = prepared
-        answer = self.generator.generate(variables)
+        answer = self._generate_with_images(variables, image_paths) if image_paths else self.generator.generate(variables)
         logger.info("ai_assist chapter_id=%s stage=%s task=%s rag_chunks=%s", payload.chapter_id, payload.learning_stage, payload.task_type, rag_chunks)
-        return AiAssistData(answer=answer, grounded=True, model=self.generator.model_name, sources=sources)
+        model_name = self.vision_provider.model_name if image_paths else self.generator.model_name
+        return AiAssistData(answer=answer, grounded=True, model=model_name, sources=sources)
 
-    def stream(self, payload: AiAssistRequest) -> tuple[Iterator[str], list[AiSource], bool, str]:
-        prepared = self._prepare(payload)
+    def stream(
+        self,
+        payload: AiAssistRequest,
+        *,
+        retrieval_question: str | None = None,
+    ) -> tuple[Iterator[str], list[AiSource], bool, str]:
+        image_paths = self._vision_inputs(payload)
+        prepared = self._prepare(payload, retrieval_question=retrieval_question)
         if isinstance(prepared, AiAssistData):
             return iter([prepared.answer]), prepared.sources, prepared.grounded, prepared.model
         variables, sources, _ = prepared
+        if image_paths:
+            return self._stream_with_images(variables, image_paths), sources, True, self.vision_provider.model_name
         return self.generator.stream(variables), sources, True, self.generator.model_name

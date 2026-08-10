@@ -3,22 +3,42 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 import re
+from threading import BoundedSemaphore
 import time
 from typing import Any
 from urllib.parse import urlparse
+from uuid import uuid4
 
 import httpx
+from sqlalchemy.orm import Session
 
 from app.core.config import BACKEND_DIR, settings
+from app.services.ai_operation_service import AiProviderConfigService
 
 
 logger = logging.getLogger(__name__)
+
+MAX_GENERATED_IMAGE_BYTES = 20 * 1024 * 1024
+IMAGE_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+# Small deployments must not run multiple 2K image jobs in the same process.
+# Busy requests fall back immediately instead of occupying another worker.
+_PPT_IMAGE_CALL_GATE = BoundedSemaphore(1)
 
 
 class PptMultimodalService:
     """调用百炼图像模型，为少量关键页面生成可本地持久化的辅助视觉。"""
 
-    def __init__(self, run_id: int) -> None:
+    def __init__(
+        self,
+        run_id: int,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        timeout_seconds: float | None = None,
+        enabled: bool | None = None,
+        db: Session | None = None,
+    ) -> None:
         root = Path(settings.generated_artifact_directory)
         if not root.is_absolute():
             root = (BACKEND_DIR / root).resolve()
@@ -26,12 +46,45 @@ class PptMultimodalService:
         self.asset_dir = root / str(run_id) / "ppt_visuals"
         self.asset_dir.mkdir(parents=True, exist_ok=True)
 
+        runtime = AiProviderConfigService.resolve_capability("image_generation", db)
+        if runtime.source == "database":
+            selected_key = api_key if api_key is not None else runtime.api_key
+            selected_base_url = base_url if base_url is not None else runtime.base_url
+            selected_model = model if model is not None else runtime.model_name
+            selected_timeout = (
+                timeout_seconds if timeout_seconds is not None else runtime.timeout_seconds
+            )
+            selected_enabled = enabled if enabled is not None else runtime.enabled
+        else:
+            selected_key = api_key if api_key is not None else settings.ppt_multimodal_api_key
+            selected_base_url = (
+                base_url if base_url is not None else settings.ppt_multimodal_base_url
+            )
+            selected_model = model if model is not None else settings.ppt_multimodal_model
+            selected_timeout = (
+                timeout_seconds
+                if timeout_seconds is not None
+                else settings.ppt_multimodal_timeout_seconds
+            )
+            selected_enabled = (
+                enabled if enabled is not None else settings.ppt_multimodal_enabled
+            )
+        self.api_key = str(selected_key or "").strip() or None
+        self.base_url = str(selected_base_url or "").strip().rstrip("/")
+        self.model_name = str(selected_model or "").strip()
+        try:
+            self.timeout_seconds = float(selected_timeout)
+        except (TypeError, ValueError):
+            self.timeout_seconds = 180.0
+        self.enabled = bool(selected_enabled)
+
     @property
     def available(self) -> bool:
         return bool(
-            settings.ppt_multimodal_enabled
-            and settings.ppt_multimodal_api_key
-            and settings.ppt_multimodal_model
+            self.enabled
+            and self.api_key
+            and self.base_url
+            and self.model_name
         )
 
     @staticmethod
@@ -179,11 +232,24 @@ class PptMultimodalService:
         ):
             raise RuntimeError("百炼返回了不受信任的图片地址")
 
+    @staticmethod
+    def _remove_image_slots(slides: list[dict[str, Any]]) -> None:
+        """Remove unresolved image placeholders when falling back to vector shapes."""
+
+        for slide in slides:
+            canvas = slide.get("canvas")
+            if isinstance(canvas, list):
+                slide["canvas"] = [
+                    item
+                    for item in canvas
+                    if not isinstance(item, dict) or item.get("type") != "image"
+                ]
+            slide.pop("visual_asset", None)
+
     def _generate_one(self, slide: dict[str, Any], design: dict[str, Any], index: int) -> dict[str, Any]:
-        base_url = settings.ppt_multimodal_base_url.rstrip("/")
-        endpoint = f"{base_url}/services/aigc/multimodal-generation/generation"
+        endpoint = f"{self.base_url}/services/aigc/multimodal-generation/generation"
         request_body = {
-            "model": settings.ppt_multimodal_model,
+            "model": self.model_name,
             "input": {
                 "messages": [
                     {
@@ -199,57 +265,97 @@ class PptMultimodalService:
                 "thinking_mode": True,
             },
         }
-        timeout = httpx.Timeout(settings.ppt_multimodal_timeout_seconds)
-        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-            response = None
-            for attempt in range(2):
-                try:
-                    response = client.post(
-                        endpoint,
-                        headers={
-                            "Authorization": f"Bearer {settings.ppt_multimodal_api_key}",
-                            "Content-Type": "application/json",
-                        },
-                        json=request_body,
+        timeout = httpx.Timeout(self.timeout_seconds)
+        temporary_path: Path | None = None
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                response = None
+                for attempt in range(2):
+                    try:
+                        response = client.post(
+                            endpoint,
+                            headers={
+                                "Authorization": f"Bearer {self.api_key}",
+                                "Content-Type": "application/json",
+                            },
+                            json=request_body,
+                        )
+                    except httpx.RequestError as exc:
+                        if attempt == 0:
+                            time.sleep(1)
+                            continue
+                        raise RuntimeError(f"百炼图像服务连接失败：{exc}") from exc
+                    if response.status_code not in {429, 500, 502, 503, 504} or attempt == 1:
+                        break
+                    time.sleep(1.5)
+                if response is None or response.status_code >= 400:
+                    detail = response.text[:500] if response is not None else "无响应"
+                    code = response.status_code if response is not None else "连接失败"
+                    raise RuntimeError(f"百炼图像生成失败（{code}）：{detail}")
+                image_url = self._extract_image_url(response.json())
+                self._validate_result_url(image_url)
+
+                with client.stream("GET", image_url) as image_response:
+                    if image_response.status_code >= 400:
+                        raise RuntimeError(
+                            f"百炼生成图片下载失败（{image_response.status_code}）"
+                        )
+                    content_type = image_response.headers.get("content-type", "").lower()
+                    media_type = content_type.split(";", 1)[0].strip()
+                    if not media_type.startswith("image/"):
+                        raise RuntimeError("百炼生成结果不是有效图片")
+                    content_length = image_response.headers.get("content-length")
+                    if content_length:
+                        try:
+                            declared_bytes = int(content_length)
+                        except (TypeError, ValueError):
+                            declared_bytes = -1
+                        if declared_bytes > MAX_GENERATED_IMAGE_BYTES:
+                            raise RuntimeError("百炼生成图片超过 20MB")
+
+                    suffix = (
+                        ".jpg"
+                        if "jpeg" in media_type
+                        else ".webp"
+                        if "webp" in media_type
+                        else ".png"
                     )
-                except httpx.RequestError as exc:
-                    if attempt == 0:
-                        time.sleep(1)
-                        continue
-                    raise RuntimeError(f"百炼图像服务连接失败：{exc}") from exc
-                if response.status_code not in {429, 500, 502, 503, 504} or attempt == 1:
-                    break
-                time.sleep(1.5)
-            if response is None or response.status_code >= 400:
-                detail = response.text[:500] if response is not None else "无响应"
-                code = response.status_code if response is not None else "连接失败"
-                raise RuntimeError(f"百炼图像生成失败（{code}）：{detail}")
-            image_url = self._extract_image_url(response.json())
-            self._validate_result_url(image_url)
-            image_response = client.get(image_url)
-            if image_response.status_code >= 400:
-                raise RuntimeError(f"百炼生成图片下载失败（{image_response.status_code}）")
-            content_type = image_response.headers.get("content-type", "").lower()
-            if "image/" not in content_type:
-                raise RuntimeError("百炼生成结果不是有效图片")
-            content = image_response.content
-        if not content or len(content) > 20 * 1024 * 1024:
-            raise RuntimeError("百炼生成图片为空或超过 20MB")
-        suffix = ".jpg" if "jpeg" in content_type else ".webp" if "webp" in content_type else ".png"
-        path = self.asset_dir / f"slide-{index + 1}{suffix}"
-        path.write_bytes(content)
-        return {
-            "storage_path": str(path.relative_to(self.root)),
-            "file_name": path.name,
-            "media_type": content_type.split(";")[0],
-            "model": settings.ppt_multimodal_model,
-            "prompt": self._safe_prompt(slide, design),
-        }
+                    path = self.asset_dir / f"slide-{index + 1}{suffix}"
+                    temporary_path = path.with_name(
+                        f".{path.name}.{uuid4().hex}.part"
+                    )
+                    downloaded_bytes = 0
+                    with temporary_path.open("wb") as output:
+                        for chunk in image_response.iter_bytes(
+                            chunk_size=IMAGE_DOWNLOAD_CHUNK_BYTES
+                        ):
+                            if not chunk:
+                                continue
+                            downloaded_bytes += len(chunk)
+                            if downloaded_bytes > MAX_GENERATED_IMAGE_BYTES:
+                                raise RuntimeError("百炼生成图片超过 20MB")
+                            output.write(chunk)
+                    if downloaded_bytes == 0:
+                        raise RuntimeError("百炼生成图片为空")
+                    temporary_path.replace(path)
+                    temporary_path = None
+
+            return {
+                "storage_path": str(path.relative_to(self.root)),
+                "file_name": path.name,
+                "media_type": media_type,
+                "model": self.model_name,
+                "prompt": self._safe_prompt(slide, design),
+            }
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def enhance(self, ppt_data: dict[str, Any]) -> dict[str, Any]:
         slides = ppt_data.get("slides") or []
         design = ppt_data.get("design") or {}
         if not self.available:
+            self._remove_image_slots(slides)
             ppt_data["multimodal"] = {
                 "status": "unavailable",
                 "generated_count": 0,
@@ -257,30 +363,46 @@ class PptMultimodalService:
             }
             return ppt_data
         candidates = self._select_candidates(slides)
-        # 设计 Agent 未输出图片槽位时自动补槽；失败的页面保留原有文字构图。
-        candidates = [
-            (index, slide)
-            for index, slide in candidates
-            if self._append_auto_image_slot(slide)
-        ]
+        if candidates and not _PPT_IMAGE_CALL_GATE.acquire(blocking=False):
+            self._remove_image_slots(slides)
+            ppt_data["multimodal"] = {
+                "status": "fallback",
+                "generated_count": 0,
+                "requested_count": len(candidates),
+                "selected_slides": [index + 1 for index, _ in candidates],
+                "model": self.model_name,
+                "message": "配图服务正忙，已立即回退为纯图形课件。",
+                "errors": ["配图服务正忙"],
+            }
+            return ppt_data
+
+        gate_acquired = bool(candidates)
         generated = 0
         errors: list[str] = []
-        for index, slide in candidates:
-            try:
-                slide["visual_asset"] = self._generate_one(slide, design, index)
-                generated += 1
-            except Exception as exc:
-                logger.warning("ppt_multimodal_fallback slide=%s reason=%s", index + 1, exc)
-                errors.append(f"第 {index + 1} 页：{exc}")
-                slide["canvas"] = [
-                    item for item in (slide.get("canvas") or []) if item.get("type") != "image"
-                ]
+        try:
+            # 设计 Agent 未输出图片槽位时自动补槽；失败的页面保留原有文字构图。
+            candidates = [
+                (index, slide)
+                for index, slide in candidates
+                if self._append_auto_image_slot(slide)
+            ]
+            for index, slide in candidates:
+                try:
+                    slide["visual_asset"] = self._generate_one(slide, design, index)
+                    generated += 1
+                except Exception as exc:
+                    logger.warning("ppt_multimodal_fallback slide=%s reason=%s", index + 1, exc)
+                    errors.append(f"第 {index + 1} 页：{exc}")
+                    self._remove_image_slots([slide])
+        finally:
+            if gate_acquired:
+                _PPT_IMAGE_CALL_GATE.release()
         ppt_data["multimodal"] = {
             "status": "completed" if generated else "fallback",
             "generated_count": generated,
             "requested_count": len(candidates),
             "selected_slides": [index + 1 for index, _ in candidates],
-            "model": settings.ppt_multimodal_model,
+            "model": self.model_name,
             "message": "辅助插图已保存到本地课件资源目录。" if generated else "多模态生成未成功，已回退为纯图形课件。",
             "errors": errors[:3],
         }

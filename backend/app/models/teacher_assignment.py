@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -21,6 +21,13 @@ class TeacherAssignment(Base):
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     due_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    # 旧前端提交的是中国本地 naive 时间；新协议提交带 offset 并存 UTC naive。
+    due_time_is_utc: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=false(),
+        nullable=False,
+    )
     status: Mapped[str] = mapped_column(String(20), default="published", nullable=False, index=True)
     target_scope: Mapped[str] = mapped_column(String(30), default="all_students", nullable=False)
     target_group_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)

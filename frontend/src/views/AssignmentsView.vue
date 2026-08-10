@@ -71,6 +71,10 @@ const recipientCounts = computed(() => ({
 
 function taskPath(task: StudentAssignment) { return `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
 function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
+function localDateTimeValue(value: Date) {
+  const pad = (part: number) => String(part).padStart(2, '0')
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`
+}
 function statusLabel(status: StudentAssignment['status']) { return status === 'completed' ? '已完成' : status === 'overdue' ? '已逾期' : status === 'in_progress' ? '进行中' : '未开始' }
 function statusTagType(status: AssignmentRecipientDetail['status']) {
   return status === 'completed' ? 'success' : status === 'overdue' ? 'danger' : status === 'in_progress' ? 'warning' : 'primary'
@@ -116,16 +120,18 @@ function openCreate() {
   if (selected && !form.course_id) form.course_id = selected.primary_course_id
   if (!form.due_time) {
     const tomorrow = new Date(Date.now() + 24 * 3600 * 1000)
-    form.due_time = tomorrow.toISOString().slice(0, 16)
+    form.due_time = localDateTimeValue(tomorrow)
   }
 }
 async function publish() {
   if (!form.teaching_class_id || !form.course_id || !form.chapter_id || !form.title.trim() || !form.due_time) return ElMessage.warning('请完整填写教学班、教材、章节、任务名称和截止时间')
   if (form.target_scope === 'selected_students' && !form.student_ids.length) return ElMessage.warning('请选择至少一名学生')
   if (form.target_scope === 'selected_groups' && !form.group_ids.length) return ElMessage.warning('请选择至少一个学习小组')
+  const dueTime = new Date(form.due_time)
+  if (Number.isNaN(dueTime.getTime())) return ElMessage.warning('请选择有效的截止时间')
   publishing.value = true
   try {
-    await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: `${form.due_time}:00` })
+    await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: dueTime.toISOString() })
     dialogVisible.value = false
     form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []
     await load()

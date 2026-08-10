@@ -1,7 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.api.v1.endpoints.auth import router as auth_router
 from app.api.v1.endpoints.ai import router as ai_router
+from app.api.v1.endpoints.ai_media import router as ai_media_router
 from app.api.v1.endpoints.courses import router as courses_router
 from app.api.v1.endpoints.learning import router as learning_router
 from app.api.v1.endpoints.knowledge import router as knowledge_router
@@ -16,12 +20,14 @@ from app.api.v1.endpoints.authority_discovery import router as authority_discove
 from app.api.v1.endpoints.notifications import router as notifications_router
 from app.api.v1.endpoints.ai_operations import router as ai_operations_router
 from app.core.config import settings
+from app.db.session import get_db
 from app.schemas.common import ApiResponse, HealthData
 
 
 router = APIRouter()
 router.include_router(auth_router)
 router.include_router(ai_router)
+router.include_router(ai_media_router)
 router.include_router(courses_router)
 router.include_router(learning_router)
 router.include_router(knowledge_router)
@@ -42,4 +48,21 @@ def health_check() -> ApiResponse[HealthData]:
     return ApiResponse(
         message="服务运行正常",
         data=HealthData(status="ok", environment=settings.app_env),
+    )
+
+
+@router.get("/ready", response_model=ApiResponse[HealthData], tags=["system"])
+def readiness_check(db: Session = Depends(get_db)) -> ApiResponse[HealthData]:
+    """Report whether the application can serve database-backed requests."""
+
+    try:
+        db.execute(text("SELECT 1"))
+    except SQLAlchemyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="数据库暂时不可用",
+        ) from exc
+    return ApiResponse(
+        message="服务已就绪",
+        data=HealthData(status="ready", environment=settings.app_env),
     )

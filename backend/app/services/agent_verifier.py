@@ -40,6 +40,7 @@ class AgentVerifier:
         context: AiWorkspaceContextData,
         results: list[tuple[ToolCall, ToolResult]],
         summary: str,
+        role: str = "student",
     ) -> VerificationResult:
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -63,7 +64,7 @@ class AgentVerifier:
         context_ok = not needs_context or bool(context.course_id and context.chapter_id)
         checks.append({
             "key": "context_grounded",
-            "label": "教材与专题范围可验证",
+            "label": "平台治理范围可验证" if role == "admin" else "教材与专题范围可验证",
             "passed": context_ok,
         })
         if not context_ok:

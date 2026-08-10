@@ -35,8 +35,24 @@ def upgrade() -> None:
             if default is not None:
                 kwargs["server_default"] = default
             op.add_column("material_candidates", sa.Column(name, column_type, **kwargs))
-    op.create_index("ix_material_candidates_importance_score", "material_candidates", ["importance_score"], unique=False, if_not_exists=True)
-    op.create_index("ix_material_candidates_importance_level", "material_candidates", ["importance_level"], unique=False, if_not_exists=True)
+    # MySQL versions commonly bundled with server panels do not support
+    # ``CREATE INDEX IF NOT EXISTS``. Inspect first and then issue a regular
+    # CREATE INDEX so the migration remains idempotent after partial DDL.
+    indexes = {index["name"] for index in sa.inspect(bind).get_indexes("material_candidates")}
+    if "ix_material_candidates_importance_score" not in indexes:
+        op.create_index(
+            "ix_material_candidates_importance_score",
+            "material_candidates",
+            ["importance_score"],
+            unique=False,
+        )
+    if "ix_material_candidates_importance_level" not in indexes:
+        op.create_index(
+            "ix_material_candidates_importance_level",
+            "material_candidates",
+            ["importance_level"],
+            unique=False,
+        )
     # 首次启用自动巡检时，系统初始化的三个默认来源按每日一次执行；
     # 管理员已经改过周期的来源不覆盖其配置。
     op.execute(sa.text(

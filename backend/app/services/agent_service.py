@@ -60,7 +60,14 @@ STEP_DEFINITIONS = [
 
 
 def _now() -> datetime:
+    # AgentRun/AgentStep are legacy local-wall-time columns without a marker.
+    # Keep their write basis stable so old and new rows remain comparable.
     return datetime.now()
+
+
+def _local_now_iso() -> str:
+    """Return a new protocol timestamp with the host's actual UTC offset."""
+    return datetime.now().astimezone().isoformat()
 
 
 def _clean_ppt_visible_text(value: Any) -> Any:
@@ -688,7 +695,7 @@ def _deterministic_ppt_quality(ppt_data: dict[str, Any]) -> dict[str, Any]:
         "summary": "自动版面与结构检查完成。",
         "issues": issues[:30],
         "reviewer": "ppt-quality-gate-v1",
-        "checked_time": _now().isoformat(),
+        "checked_time": _local_now_iso(),
     }
 
 
@@ -892,7 +899,7 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_DESIGN_USER_PROMPT),
             ]
         )
-        runtime = AiProviderConfigService.resolve()
+        runtime = AiProviderConfigService.resolve(self.db)
         design_model, _ = build_chat_model(
             feature="ppt_design",
             db=self.db,
@@ -1003,7 +1010,7 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_REVIEW_USER_PROMPT),
             ]
         )
-        runtime = AiProviderConfigService.resolve()
+        runtime = AiProviderConfigService.resolve(self.db)
         model, _ = build_chat_model(
             feature="ppt_quality_review",
             db=self.db,
@@ -1057,7 +1064,7 @@ class LessonArtifactGenerator:
                 ("human", LESSON_PPT_REVISION_USER_PROMPT),
             ]
         )
-        runtime = AiProviderConfigService.resolve()
+        runtime = AiProviderConfigService.resolve(self.db)
         model, _ = build_chat_model(
             feature="ppt_slide_revision",
             db=self.db,
@@ -1328,7 +1335,7 @@ class LessonArtifactGenerator:
         prompt = ChatPromptTemplate.from_messages(
             [("system", LESSON_ARTIFACT_SYSTEM_PROMPT), ("human", LESSON_ARTIFACT_USER_PROMPT)]
         )
-        runtime = AiProviderConfigService.resolve()
+        runtime = AiProviderConfigService.resolve(self.db)
         model, _ = build_chat_model(
             feature="lesson_artifacts",
             db=self.db,
@@ -1649,7 +1656,7 @@ class AgentService:
         versions.append(
             {
                 "version_id": _now().strftime("%Y%m%d%H%M%S%f"),
-                "created_time": _now().isoformat(),
+                "created_time": _local_now_iso(),
                 "reason": reason,
                 "title": ppt_data.get("title") or "教学 PPT",
                 "slide_count": len(ppt_data.get("slides") or []),

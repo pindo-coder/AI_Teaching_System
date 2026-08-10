@@ -53,6 +53,7 @@ export interface AiAssistPayload {
   learning_stage: LearningStage
   task_type: AiTaskType
   question: string
+  attachment_ids?: number[]
 }
 
 export interface AiWorkspacePayload {
@@ -63,6 +64,8 @@ export interface AiWorkspacePayload {
   learning_stage?: LearningStage
   task_type?: AiTaskType
   question: string
+  attachment_ids?: number[]
+  conversation_history?: Array<{ role: 'user' | 'assistant'; content: string }>
 }
 
 export interface AiWorkspaceContextCandidate {

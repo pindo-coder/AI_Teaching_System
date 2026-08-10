@@ -2,7 +2,8 @@ from datetime import date
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.dialects import mysql
 
 from app.models.authority_discovery import MaterialCandidate, MaterialSnapshot, PolicyChange
 from app.models.chapter import Chapter
@@ -269,6 +270,17 @@ def test_scoped_central_material_participates_in_policy_comparison(db) -> None:
 
     references = AuthorityDiscoveryService(db)._reference_sources(candidate)
     assert any(item[0] == document.id for item in references)
+
+
+def test_reference_document_ordering_is_mysql_compatible() -> None:
+    statement = select(KnowledgeDocument).order_by(
+        *discovery._published_date_desc_nulls_last(),
+    )
+
+    sql = str(statement.compile(dialect=mysql.dialect()))
+
+    assert "NULLS LAST" not in sql.upper()
+    assert "IS NULL" in sql.upper()
 
 
 def test_source_can_disable_teacher_alerts(db) -> None:

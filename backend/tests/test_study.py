@@ -64,6 +64,20 @@ def test_review_question_loop(client: TestClient, db: Session) -> None:
                              json={"answer": "本题围绕核心概念、主要观点和现实意义进行分析，并说明它们之间的逻辑关系。"})
         assert answer.status_code == 200
     assert answer.json()["data"]["completed"] is True
+    task_summary = client.get(
+        "/api/v1/learning/task-points",
+        headers=headers,
+        params={
+            "course_id": course.id,
+            "chapter_id": chapter.id,
+            "learning_stage": "exam",
+        },
+    )
+    quiz_task = next(
+        item for item in task_summary.json()["data"]["tasks"]
+        if item["task_type"] == "exam_question"
+    )
+    assert quiz_task["status"] == "completed"
 
 
 def test_note_ai_chat_history_is_private(client: TestClient, db: Session) -> None:

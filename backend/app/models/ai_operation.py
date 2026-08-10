@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, true
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -11,9 +11,19 @@ class AiProviderConfig(TimestampMixin, Base):
     __tablename__ = "ai_provider_configs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    capability: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="text", server_default="text", index=True
+    )
+    provider_name: Mapped[str] = mapped_column(
+        String(80), nullable=False, default="openai_compatible", server_default="openai_compatible"
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
     base_url: Mapped[str] = mapped_column(String(500), nullable=False)
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)
     api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    dimensions: Mapped[int | None] = mapped_column(Integer)
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.2)
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
     streaming_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)

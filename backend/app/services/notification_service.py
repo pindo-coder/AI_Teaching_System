@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime
-
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.time import utc_now
 from app.models.authority_discovery import AuthoritySourceRegistry, MaterialCandidate, PolicyChange
 from app.models.teaching_class import TeachingClass, TeachingClassMaterial, TeachingClassTeacher
 from app.models.teaching_notification import TeachingNotification
@@ -127,7 +126,7 @@ class NotificationService:
             TeachingNotification.action_url == f"/material-discovery?candidate={candidate_id}",
             TeachingNotification.is_read.is_(False),
         )).all())
-        now = datetime.utcnow()
+        now = utc_now()
         for item in items:
             item.is_read = True
             item.read_time = now
@@ -142,7 +141,7 @@ class NotificationService:
             TeachingNotification.is_read.is_(False),
         )).all())
         resolved = 0
-        now = datetime.utcnow()
+        now = utc_now()
         threshold = float(settings.authority_discovery_min_association_score)
         relevance_threshold = float(settings.authority_discovery_min_relevance_score)
         for item in items:
@@ -189,14 +188,14 @@ class NotificationService:
         if item is None:
             raise ValueError("教学提醒不存在")
         item.is_read = True
-        item.read_time = datetime.utcnow()
+        item.read_time = utc_now()
         self.db.commit()
         self.db.refresh(item)
         return item
 
     def mark_all_read(self, user_id: int) -> int:
         items = self.list_for_user(user_id, unread_only=True, limit=1000)
-        now = datetime.utcnow()
+        now = utc_now()
         for item in items:
             item.is_read = True
             item.read_time = now

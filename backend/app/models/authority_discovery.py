@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -74,7 +75,11 @@ class MaterialCandidate(TimestampMixin, Base):
     )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     source_url: Mapped[str] = mapped_column(String(1000), nullable=False)
-    canonical_url: Mapped[str] = mapped_column(String(1000), nullable=False, index=True)
+    # MySQL utf8mb4 cannot index VARCHAR(1000) within its 3072-byte key limit.
+    # Keep the complete URL for audit/display and index its fixed-length digest
+    # for duplicate detection instead.
+    canonical_url: Mapped[str] = mapped_column(String(1000), nullable=False)
+    canonical_url_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False, index=True)
     publisher: Mapped[str | None] = mapped_column(String(255))
     published_date: Mapped[date | None] = mapped_column(Date)
     source_level: Mapped[str] = mapped_column(String(4), nullable=False, index=True)
@@ -117,7 +122,11 @@ class MaterialSnapshot(TimestampMixin, Base):
         ForeignKey("material_candidates.id", ondelete="CASCADE"), index=True
     )
     fetched_url: Mapped[str] = mapped_column(String(1000), nullable=False)
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 官方网页正文可能远超 MySQL TEXT 的 65KB 上限；SQLite 仍使用无长度限制的 TEXT。
+    content: Mapped[str] = mapped_column(
+        Text().with_variant(LONGTEXT(), "mysql"),
+        nullable=False,
+    )
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     response_etag: Mapped[str | None] = mapped_column(String(255))
     last_modified: Mapped[str | None] = mapped_column(String(255))

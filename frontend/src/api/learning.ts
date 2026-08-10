@@ -15,7 +15,13 @@ export const learningApi = {
     course_id: number
     chapter_id: number
     learning_stage: LearningStage
-    event_type: 'chapter_opened' | 'reading_progress' | 'ai_assist_used' | 'question_submitted' | 'note_saved' | 'activity_submitted' | 'quiz_completed'
+    event_type: 'chapter_opened' | 'reading_progress'
     event_data?: Record<string, unknown>
   }) => http.post<ApiResponse<TaskProgressSummary>>('/learning/events', payload),
+  submitQuestion: (payload: {
+    course_id: number
+    chapter_id: number
+    learning_stage: LearningStage
+    content: string
+  }) => http.post<ApiResponse<TaskProgressSummary>>('/learning/questions', payload),
 }

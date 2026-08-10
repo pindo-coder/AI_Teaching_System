@@ -3,7 +3,7 @@ import json
 import pytest
 
 from app.core.config import settings
-from app.rag.embeddings import configured_embedding_dimensions, get_embedding_profile
+from app.rag.embeddings import configured_embedding_dimensions, get_embedding_profile, get_embeddings
 from app.rag.vector_store import (
     INDEX_MANIFEST_VERSION,
     IncompatibleVectorIndexError,
@@ -31,6 +31,33 @@ def test_v4_profile_uses_configured_dimensions(monkeypatch):
     profile = get_embedding_profile()
     assert profile.dimensions == 1024
     assert "text-embedding-v4" in profile_collection_name(profile)
+
+
+def test_dashscope_embedding_prefers_shared_dashscope_key(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class FakeEmbeddings:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(settings, "embedding_provider", "dashscope")
+    # Docker Compose 会显式传入空的通用变量；它不能阻止共用 Key 回退。
+    monkeypatch.setattr(settings, "embedding_api_key", "")
+    monkeypatch.setattr(settings, "dashscope_api_key", "shared-dashscope-key")
+    monkeypatch.setattr(settings, "embedding_base_url", "")
+    monkeypatch.setattr(settings, "embedding_model", "text-embedding-v4")
+    monkeypatch.setattr(settings, "embedding_dimensions", 1024)
+    monkeypatch.setattr("app.rag.embeddings.OpenAICompatibleEmbeddings", FakeEmbeddings)
+
+    embedding = get_embeddings()
+
+    assert isinstance(embedding, FakeEmbeddings)
+    assert captured == {
+        "api_key": "shared-dashscope-key",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "model": "text-embedding-v4",
+        "dimensions": 1024,
+    }
 
 
 def test_legacy_active_manifest_is_rejected(tmp_path, monkeypatch):

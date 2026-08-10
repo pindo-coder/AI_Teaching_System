@@ -1,6 +1,10 @@
 import json
 from datetime import date
+import socket
 
+import httpx
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -13,6 +17,7 @@ from app.models.teaching_class import (
 from app.models.user import User
 from app.rag.retriever import RetrievedChunk, retrieve_layered
 from app.repositories.knowledge_repository import KnowledgeRepository
+from app.services.material_center_service import _default_fetch
 
 
 def _headers(user: User) -> dict[str, str]:
@@ -115,3 +120,135 @@ def test_layered_retrieval_respects_source_quotas(monkeypatch) -> None:
     assert len([item for item in ids if str(item).startswith("c")]) == 2
     assert len([item for item in ids if str(item).startswith("l")]) == 1
     assert len([item for item in ids if str(item).startswith("t")]) == 3
+
+
+def _mock_public_dns(host: str, port: int, *args, **kwargs):
+    address = "127.0.0.1" if host == "127.0.0.1" else "93.184.216.34"
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+
+@pytest.mark.parametrize(
+    "redirect_target",
+    ["https://127.0.0.1/internal", "http://public.example/internal"],
+)
+def test_central_material_redirect_is_validated_before_following(
+    monkeypatch, redirect_target: str
+) -> None:
+    requested_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": redirect_target}, request=request)
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("app.services.material_center_service.socket.getaddrinfo", _mock_public_dns)
+    monkeypatch.setattr("app.services.material_center_service.httpx.Client", client_factory)
+
+    with pytest.raises(HTTPException) as error:
+        _default_fetch("https://public.example/start")
+
+    assert error.value.status_code == 400
+    assert requested_urls == ["https://93.184.216.34/start"]
+
+
+def test_central_material_fetch_follows_valid_relative_redirect(monkeypatch) -> None:
+    requested_urls: list[str] = []
+    body = "<html><article><h1>中央材料</h1><p>" + "这是经过逐跳校验后获取的权威材料正文。" * 12 + "</p></article></html>"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        if request.url.path == "/start":
+            return httpx.Response(302, headers={"Location": "/article"}, request=request)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            content=body.encode(),
+            request=request,
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("app.services.material_center_service.socket.getaddrinfo", _mock_public_dns)
+    monkeypatch.setattr("app.services.material_center_service.httpx.Client", client_factory)
+
+    text, final_url, title, _, _ = _default_fetch("https://public.example/start")
+
+    assert requested_urls == ["https://93.184.216.34/start", "https://93.184.216.34/article"]
+    assert final_url == "https://public.example/article"
+    assert title == "中央材料"
+    assert "逐跳校验" in text
+
+
+def test_central_material_fetch_limits_redirect_hops(monkeypatch) -> None:
+    requested_urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        return httpx.Response(
+            302,
+            headers={"Location": f"/redirect-{len(requested_urls)}"},
+            request=request,
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("app.services.material_center_service.socket.getaddrinfo", _mock_public_dns)
+    monkeypatch.setattr("app.services.material_center_service.httpx.Client", client_factory)
+
+    with pytest.raises(HTTPException, match="重定向次数过多"):
+        _default_fetch("https://public.example/start")
+
+    assert len(requested_urls) == 6
+
+
+def test_central_material_fetch_pins_validated_dns_result(
+    monkeypatch,
+) -> None:
+    dns_calls: list[tuple[str, int]] = []
+    observed: dict[str, object] = {}
+    body = "<html><article><h1>固定解析</h1><p>" + "正文用于验证 DNS 解析结果在连接时不会被重新查询。" * 12 + "</p></article></html>"
+
+    def rebinding_dns(host: str, port: int, *args, **kwargs):
+        dns_calls.append((host, port))
+        address = "93.184.216.34" if len(dns_calls) == 1 else "127.0.0.1"
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, port))]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        observed["url"] = str(request.url)
+        observed["host"] = request.headers["host"]
+        observed["sni"] = request.extensions.get("sni_hostname")
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            content=body.encode(),
+            request=request,
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        return real_client(*args, transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr("app.services.material_center_service.socket.getaddrinfo", rebinding_dns)
+    monkeypatch.setattr("app.services.material_center_service.httpx.Client", client_factory)
+
+    text, final_url, *_ = _default_fetch("https://public.example/start")
+
+    assert "DNS 解析结果" in text
+    assert final_url == "https://public.example/start"
+    assert dns_calls == [("public.example", 443)]
+    assert observed == {
+        "url": "https://93.184.216.34/start",
+        "host": "public.example",
+        "sni": "public.example",
+    }

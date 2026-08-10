@@ -1,8 +1,10 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, model_validator
+
+from app.core.time import BUSINESS_TIMEZONE, utc_iso
 
 
 class NewsItemRead(BaseModel):
@@ -15,7 +17,26 @@ class NewsItemRead(BaseModel):
     source_url: str
     article_url: str
     published_time: datetime | None
+    published_time_is_utc: bool = Field(default=True, exclude=True)
     fetched_time: datetime
+
+    @model_validator(mode="after")
+    def attach_published_timezone(self):
+        if self.published_time is not None and (
+            self.published_time.tzinfo is None or self.published_time.utcoffset() is None
+        ):
+            source_timezone = UTC if self.published_time_is_utc else BUSINESS_TIMEZONE
+            self.published_time = self.published_time.replace(tzinfo=source_timezone)
+        return self
+
+    @field_serializer("published_time", when_used="json")
+    def serialize_published_time(self, value: datetime | None) -> str | None:
+        return utc_iso(value) if value is not None else None
+
+    @field_serializer("fetched_time", when_used="json")
+    def serialize_fetched_time(self, value: datetime) -> str:
+        # fetched_time has always been written with datetime.utcnow/utc_now.
+        return utc_iso(value)
 
 
 class NewsSearchData(BaseModel):

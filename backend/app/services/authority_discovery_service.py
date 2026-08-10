@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.core.time import utc_now
 from app.models.authority_discovery import (
     AuthoritySourceRegistry, DiscoveryJob, MaterialCandidate, MaterialSnapshot, PolicyChange,
 )
@@ -49,6 +50,19 @@ from app.rag.retriever import retrieve
 
 
 logger = get_logger(__name__)
+
+
+def _published_date_desc_nulls_last():
+    """Return a portable newest-first ordering with missing dates at the end.
+
+    MySQL does not support the ``NULLS LAST`` clause emitted by SQLAlchemy's
+    ``nullslast()`` modifier.  Sorting by the null predicate first keeps the
+    same behavior across MySQL and SQLite.
+    """
+    return (
+        KnowledgeDocument.published_date.is_(None).asc(),
+        KnowledgeDocument.published_date.desc(),
+    )
 
 
 DEFAULT_SOURCES = (
@@ -321,7 +335,7 @@ def _candidate_links(source: AuthoritySourceRegistry, keywords: list[str]) -> li
 
 
 def _now() -> datetime:
-    return datetime.utcnow()
+    return utc_now()
 
 
 _job_creation_lock = Lock()
@@ -893,7 +907,7 @@ class AuthorityDiscoveryService:
                     KnowledgeDocument.course_id.in_(course_ids),
                     (DocumentCourseScope.course_id.in_(course_ids) & DocumentCourseScope.confirmed.is_(True)),
                 ),
-            ).distinct().order_by(KnowledgeDocument.published_date.desc().nullslast()).limit(20)).all()
+            ).distinct().order_by(*_published_date_desc_nulls_last()).limit(20)).all()
             for document in docs:
                 text = self._document_text(document)
                 if text:
@@ -1159,7 +1173,7 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
             AuthoritySourceRegistry.id.in_(job.source_ids), AuthoritySourceRegistry.is_enabled.is_(True)
         )).all())
         daily_limit = max(1, int(settings.authority_discovery_daily_fetch_limit))
-        day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
         daily_fetch_count = db.scalar(select(func.count(MaterialCandidate.id)).where(
             MaterialCandidate.created_time >= day_start,
         )) or 0
@@ -1211,8 +1225,10 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                     )
                     job.fetched_count += 1
                     canonical = _canonical_url(final_url)
+                    canonical_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
                     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                     existing = db.scalar(select(MaterialCandidate).where(
+                        MaterialCandidate.canonical_url_hash == canonical_hash,
                         MaterialCandidate.canonical_url == canonical,
                         MaterialCandidate.content_hash == content_hash,
                     ))
@@ -1243,7 +1259,8 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                     freshness = 1.0 if published_date and published_date >= date.today() - timedelta(days=30) else 0.4
                     candidate = MaterialCandidate(
                         discovery_job_id=job.id, source_registry_id=source.id, title=title,
-                        source_url=final_url, canonical_url=canonical, publisher=publisher,
+                        source_url=final_url, canonical_url=canonical,
+                        canonical_url_hash=canonical_hash, publisher=publisher,
                         published_date=published_date, source_level=source.source_level,
                         recommended_material_type="central" if source.source_level in {"A", "B"} else "local",
                         status="pending_review", content_hash=content_hash,

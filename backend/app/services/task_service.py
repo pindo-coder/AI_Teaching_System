@@ -1,9 +1,8 @@
-from datetime import datetime
-
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.time import utc_now
 from app.models.chapter import Chapter
 from app.models.learning_progress import LearningProgress
 from app.models.learning_task import LearningEvent, LearningTaskPoint, UserTaskProgress
@@ -68,10 +67,13 @@ class TaskService:
             "completed_time": progresses[task.id].completed_time if task.id in progresses else None,
         }) for task in tasks]
         total_weight = sum(task.weight for task in tasks) or 1
-        done_weight = sum(task.weight for task in tasks if progresses.get(task.id, None) and progresses[task.id].status == "completed")
+        earned_weight = sum(
+            task.weight * min(100, max(0, progresses[task.id].progress_value)) / 100
+            for task in tasks if task.id in progresses
+        )
         return TaskProgressSummary(course_id=course_id, chapter_id=chapter_id, learning_stage=stage,
                                    completed_count=sum(item.status == "completed" for item in reads), total_count=len(reads),
-                                   progress=round(done_weight / total_weight * 100), tasks=reads)
+                                   progress=round(earned_weight / total_weight * 100), tasks=reads)
 
     def record(self, user_id: int, payload: LearningEventCreate) -> TaskProgressSummary:
         chapter = self.db.get(Chapter, payload.chapter_id)
@@ -82,19 +84,29 @@ class TaskService:
                                   event_data=payload.event_data))
         tasks = self.ensure_tasks(payload.course_id, payload.chapter_id, payload.learning_stage)
         for task in tasks:
-            if task.completion_rule.get("event") != payload.event_type:
+            is_primary_event = task.completion_rule.get("event") == payload.event_type
+            is_ai_follow_up = (
+                task.completion_rule.get("event") == "ai_assist_used"
+                and payload.event_type in {"question_submitted", "note_saved", "quiz_completed"}
+            )
+            if not is_primary_event and not is_ai_follow_up:
                 continue
             current = self.db.scalar(select(UserTaskProgress).where(UserTaskProgress.user_id == user_id,
                                                                     UserTaskProgress.task_point_id == task.id))
+            if is_ai_follow_up and (current is None or current.progress_value < 50):
+                continue
             if current is None:
                 current = UserTaskProgress(user_id=user_id, task_point_id=task.id)
                 self.db.add(current)
             current.status = "in_progress"
-            current.progress_value = max(current.progress_value or 0, self._event_progress(task, payload))
-            current.evidence_summary = self._evidence(task, payload)
+            event_progress = 100 if is_ai_follow_up else self._event_progress(task, payload)
+            current.progress_value = max(current.progress_value or 0, event_progress)
+            current.evidence_summary = (
+                "已在 AI 辅助后补充自主学习证据" if is_ai_follow_up else self._evidence(task, payload)
+            )
             if current.progress_value >= 100:
                 current.status = "completed"
-                current.completed_time = current.completed_time or datetime.utcnow()
+                current.completed_time = current.completed_time or utc_now()
         self.db.flush()
         summary = self.summary(user_id, payload.course_id, payload.chapter_id, payload.learning_stage)
         progress = self.db.scalar(select(LearningProgress).where(
@@ -120,7 +132,8 @@ class TaskService:
         if "min_length" in rule:
             return 100 if len(str(data.get("content", ""))) >= rule["min_length"] else 40
         if rule.get("tasks"):
-            return 100 if data.get("task_type") in rule["tasks"] else 0
+            # AI use is supporting evidence, not proof that the student has mastered the topic.
+            return 50 if data.get("task_type") in rule["tasks"] else 0
         return 100
 
     @staticmethod

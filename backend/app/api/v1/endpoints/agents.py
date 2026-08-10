@@ -24,12 +24,13 @@ from app.schemas.agent import (
     PptVersionRestoreRequest,
     PresentationTemplateData,
 )
-from app.schemas.common import ApiResponse
+from app.schemas.common import ApiResponse, api_json_value
 from app.services.agent_service import (
     AgentService,
     execute_lesson_artifacts,
     execute_lesson_outline,
 )
+from app.services.ai_operation_service import AiProviderConfigService
 from app.services.presentation_template_service import PresentationTemplateService
 from app.services.lesson_publication_service import LessonPublicationService
 
@@ -40,16 +41,19 @@ router = APIRouter(prefix="/agent", tags=["agent"])
 @router.get("/capabilities", response_model=ApiResponse[AgentCapabilities])
 def agent_capabilities(
     _: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
 ) -> ApiResponse[AgentCapabilities]:
+    config = AiProviderConfigService.resolve_capability("image_generation", db)
     available = bool(
-        settings.ppt_multimodal_enabled
-        and settings.ppt_multimodal_api_key
-        and settings.ppt_multimodal_model
+        config.enabled
+        and config.api_key
+        and config.base_url
+        and config.model_name
     )
     return ApiResponse(
         data=AgentCapabilities(
             ppt_multimodal_available=available,
-            ppt_multimodal_model=settings.ppt_multimodal_model if available else None,
+            ppt_multimodal_model=config.model_name if available else None,
             ppt_multimodal_max_images=settings.ppt_multimodal_max_images if available else 0,
         )
     )
@@ -275,7 +279,7 @@ def run_events(
                 if run is None or (not is_admin and run.created_by != user_id):
                     yield f"event: error\ndata: {json.dumps({'message': '任务不存在或无权访问'}, ensure_ascii=False)}\n\n"
                     return
-                data = AgentService.serialize(event_db, run).model_dump(mode="json")
+                data = api_json_value(AgentService.serialize(event_db, run))
                 serialized = json.dumps(data, ensure_ascii=False)
                 if serialized != previous:
                     yield f"event: snapshot\ndata: {serialized}\n\n"

@@ -13,6 +13,7 @@ ROLE_TEMPLATES: dict[str, list[dict[str, object]]] = {
         {"key": "follow_up", "category": "monitor", "title": "跟进未完成学生", "description": "分析任务进度并准备提醒草案", "prompt": "请检查当前教学任务，找出需要跟进的未完成情况并生成提醒草案，不要自动发送。", "requires_context": False},
     ],
     "student": [
+        {"key": "recent_summary", "category": "monitor", "title": "近 7 天学习总结", "description": "汇总个人学习投入、任务与薄弱点", "prompt": "请汇总我近 7 天在本网站的个人学习情况，并给出下一步建议。", "requires_context": False},
         {"key": "study_plan", "category": "plan", "title": "制定本次学习计划", "description": "结合任务点、进度与笔记安排顺序", "prompt": "请根据当前专题、我的任务点和笔记状态制定本次学习计划。", "requires_context": True},
         {"key": "pending", "category": "task", "title": "整理待完成任务", "description": "优先安排教师任务和截止事项", "prompt": "请读取我的待完成任务并安排今天最应先完成的事项。", "requires_context": False},
         {"key": "preview", "category": "interaction", "title": "生成预习问题", "description": "依据教材带着问题进入课堂", "prompt": "请严格依据当前专题教材生成 5 个预习问题，并说明每题对应的学习目标。", "requires_context": True},
@@ -20,10 +21,10 @@ ROLE_TEMPLATES: dict[str, list[dict[str, object]]] = {
         {"key": "notes", "category": "generate", "title": "完善专题笔记", "description": "补充结构、教材依据和易混点", "prompt": "请检查当前专题的个人笔记状态，并给出完善笔记的具体步骤。", "requires_context": True},
     ],
     "admin": [
-        {"key": "material_health", "category": "monitor", "title": "检查资料健康", "description": "检查教材、中央材料和索引状态", "prompt": "请检查当前教材、中央材料和索引是否具备可用依据。", "requires_context": False},
-        {"key": "update_plan", "category": "plan", "title": "规划资料更新", "description": "形成版本与中央材料更新清单", "prompt": "请基于当前资料状态生成教材版本和中央材料更新检查清单。", "requires_context": False},
-        {"key": "class_progress", "category": "monitor", "title": "查看教学任务学情", "description": "汇总完成进度与待跟进事项", "prompt": "请汇总当前教学任务完成情况和需要教师跟进的事项。", "requires_context": False},
-        {"key": "lesson_audit", "category": "review", "title": "检查备课成果", "description": "核对证据、课纲和成果状态", "prompt": "请检查当前专题备课证据、课纲和教学成果是否完整。", "requires_context": True},
+        {"key": "discovery_queue", "category": "review", "title": "梳理资料审核队列", "description": "汇总待审核、高优先级与来源异常", "prompt": "请检查资料发现和候选审核队列，告诉我最需要先处理的事项。", "requires_context": False},
+        {"key": "knowledge_governance", "category": "monitor", "title": "检查知识库健康", "description": "检查发布、索引、校准与失败资料", "prompt": "请检查知识库、教材版本和索引状态，列出需要管理员处理的异常。", "requires_context": False},
+        {"key": "ai_operations", "category": "monitor", "title": "诊断 AI 运行状态", "description": "汇总模型调用、失败率与当前配置", "prompt": "请检查近 24 小时 AI 调用和服务配置状态，指出运行风险。", "requires_context": False},
+        {"key": "teaching_governance", "category": "review", "title": "监督教学组织运行", "description": "检查教师、教学班与任务发布状态", "prompt": "请汇总教师审核、教学班和已发布教学任务的运行状态。", "requires_context": False},
     ],
 }
 

@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.time import BUSINESS_TIMEZONE, to_business_time, to_utc_naive, utc_now
 from app.models.chapter import Chapter
 from app.models.course import Course
 from app.models.learning_task import LearningEvent, UserTaskProgress
@@ -12,6 +13,30 @@ from app.models.user import User
 from app.models.teaching_class import ClassGroup, ClassGroupMember, ClassMembership, TeachingClassMaterial, TeachingClassTeacher
 from app.schemas.assignment import AssignmentCreate
 from app.services.task_service import TaskService
+
+
+def _assignment_time_utc(
+    assignment: TeacherAssignment,
+    value: datetime | None,
+) -> datetime | None:
+    if value is None:
+        return None
+    naive_timezone = UTC if assignment.due_time_is_utc else BUSINESS_TIMEZONE
+    return to_utc_naive(value, naive_timezone=naive_timezone)
+
+
+def _assignment_due_time_utc(assignment: TeacherAssignment) -> datetime:
+    value = _assignment_time_utc(assignment, assignment.due_time)
+    assert value is not None
+    return value
+
+
+def _assignment_now_for_storage(assignment: TeacherAssignment) -> datetime:
+    """Store recipient completion in the same basis as its assignment marker."""
+    now = utc_now()
+    if assignment.due_time_is_utc:
+        return now
+    return to_business_time(now).replace(tzinfo=None)
 
 
 class AssignmentService:
@@ -50,8 +75,8 @@ class AssignmentService:
         chapter = self.db.get(Chapter, payload.chapter_id)
         if chapter is None or chapter.course_id != payload.course_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="专题与教材不匹配")
-        due_time = payload.due_time.replace(tzinfo=None)
-        if due_time <= datetime.now():
+        due_time = to_utc_naive(payload.due_time)
+        if due_time <= utc_now():
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="截止时间必须晚于当前时间")
         if payload.task_kind == "note" and payload.learning_stage != "review":
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节笔记任务应关联课后巩固阶段")
@@ -75,6 +100,7 @@ class AssignmentService:
             title=payload.title.strip(),
             description=payload.description.strip(),
             due_time=due_time,
+            due_time_is_utc=True,
             status="published",
             target_scope=payload.target_scope,
             target_group_ids=payload.group_ids,
@@ -127,7 +153,7 @@ class AssignmentService:
         recipient.progress_value = round(sum(progresses.get(task_id).progress_value if progresses.get(task_id) else 0 for task_id in task_ids) / max(1, len(task_ids)))
         if task_ids and all(progresses.get(task_id) and progresses[task_id].status == "completed" for task_id in task_ids):
             recipient.status = "completed"
-            recipient.completed_time = recipient.completed_time or datetime.now()
+            recipient.completed_time = recipient.completed_time or _assignment_now_for_storage(assignment)
         elif recipient.progress_value > 0:
             recipient.status = "in_progress"
         else:
@@ -154,20 +180,21 @@ class AssignmentService:
 
     def student_assignments(self, user_id: int, include_completed: bool = True) -> list[dict[str, object]]:
         self._ensure_all_student_recipients(user_id)
-        rows = self.db.execute(
+        rows = list(self.db.execute(
             select(TeacherAssignment, AssignmentRecipient, Course.name, Chapter.title, User.username)
             .join(AssignmentRecipient, AssignmentRecipient.assignment_id == TeacherAssignment.id)
             .join(Course, Course.id == TeacherAssignment.course_id)
             .join(Chapter, Chapter.id == TeacherAssignment.chapter_id)
             .join(User, User.id == TeacherAssignment.created_by)
             .where(AssignmentRecipient.user_id == user_id, TeacherAssignment.status == "published")
-            .order_by(TeacherAssignment.due_time, TeacherAssignment.id.desc())
-        ).all()
+        ).all())
+        rows.sort(key=lambda row: (_assignment_due_time_utc(row[0]), -row[0].id))
         output: list[dict[str, object]] = []
-        now = datetime.now()
+        now = utc_now()
         for assignment, recipient, course_name, chapter_title, teacher_name in rows:
             self._sync_recipient(assignment, recipient)
-            display_status = "overdue" if recipient.status != "completed" and assignment.due_time < now else recipient.status
+            due_time = _assignment_due_time_utc(assignment)
+            display_status = "overdue" if recipient.status != "completed" and due_time < now else recipient.status
             if not include_completed and display_status == "completed":
                 continue
             output.append({
@@ -175,9 +202,10 @@ class AssignmentService:
                 "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
-                "title": assignment.title, "description": assignment.description, "due_time": assignment.due_time,
+                "title": assignment.title, "description": assignment.description, "due_time": due_time,
                 "status": display_status, "progress_value": recipient.progress_value,
-                "completed_time": recipient.completed_time, "created_time": assignment.created_time,
+                "completed_time": _assignment_time_utc(assignment, recipient.completed_time),
+                "created_time": assignment.created_time,
                 "teacher_name": teacher_name,
             })
         self.db.commit()
@@ -199,8 +227,9 @@ class AssignmentService:
                 TeacherAssignment.teaching_class_id.in_(class_ids),
             ))
         output = []
-        now = datetime.now()
+        now = utc_now()
         for assignment, course_name, chapter_title in self.db.execute(statement).all():
+            due_time = _assignment_due_time_utc(assignment)
             recipients = list(self.db.scalars(select(AssignmentRecipient).where(
                 AssignmentRecipient.assignment_id == assignment.id
             )).all())
@@ -211,12 +240,12 @@ class AssignmentService:
                 "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
-                "title": assignment.title, "description": assignment.description, "due_time": assignment.due_time,
+                "title": assignment.title, "description": assignment.description, "due_time": due_time,
                 "status": assignment.status, "target_scope": assignment.target_scope, "created_time": assignment.created_time,
                 "total_count": len(recipients),
                 "completed_count": sum(item.status == "completed" for item in recipients),
                 "in_progress_count": sum(item.status == "in_progress" for item in recipients),
-                "overdue_count": sum(item.status != "completed" and assignment.due_time < now for item in recipients),
+                "overdue_count": sum(item.status != "completed" and due_time < now for item in recipients),
             })
         self.db.commit()
         return output
@@ -245,14 +274,15 @@ class AssignmentService:
             .where(AssignmentRecipient.assignment_id == assignment.id)
             .order_by(User.username, User.id)
         ).all()
-        now = datetime.now()
+        now = utc_now()
+        due_time = _assignment_due_time_utc(assignment)
         output: list[dict[str, object]] = []
         status_order = {"overdue": 0, "not_started": 1, "in_progress": 2, "completed": 3}
         for recipient, student, group_name in rows:
             self._sync_recipient(assignment, recipient)
             display_status = (
                 "overdue"
-                if recipient.status != "completed" and assignment.due_time < now
+                if recipient.status != "completed" and due_time < now
                 else recipient.status
             )
             last_activity_time = self.db.scalar(
@@ -270,7 +300,7 @@ class AssignmentService:
                 "group_name": group_name,
                 "status": display_status,
                 "progress_value": recipient.progress_value,
-                "completed_time": recipient.completed_time,
+                "completed_time": _assignment_time_utc(assignment, recipient.completed_time),
                 "last_activity_time": last_activity_time,
             })
         self.db.commit()

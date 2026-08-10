@@ -1,8 +1,12 @@
-from sqlalchemy import create_engine, inspect
-from sqlalchemy.dialects import mysql
+from sqlalchemy import Text, create_engine, inspect
+from sqlalchemy.dialects import mysql, sqlite
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from app.db.base import Base
+from app.models.agent_run import AgentRun
+from app.models.authority_discovery import MaterialSnapshot
 from app.models.citation import DocumentPage
+from app.models.ai_media_asset import AiMediaAsset
 
 
 def test_all_mvp_tables_are_registered() -> None:
@@ -66,9 +70,34 @@ def test_all_mvp_tables_are_registered() -> None:
                         "teaching_notifications",
                         "ai_provider_configs",
                         "ai_call_logs",
+                        "ai_media_assets",
                     }
 
 
 def test_document_page_uses_longtext_on_mysql() -> None:
     column_type = DocumentPage.__table__.c.text.type.dialect_impl(mysql.dialect())
     assert isinstance(column_type, mysql.LONGTEXT)
+
+
+def test_ai_media_error_text_uses_longtext_on_mysql() -> None:
+    column_type = AiMediaAsset.__table__.c.error_message.type.dialect_impl(mysql.dialect())
+    assert isinstance(column_type, mysql.LONGTEXT)
+
+
+def test_ai_media_table_and_indexes_compile_for_sqlite_and_mysql() -> None:
+    for dialect in (sqlite.dialect(), mysql.dialect()):
+        table_ddl = str(CreateTable(AiMediaAsset.__table__).compile(dialect=dialect))
+        assert "ai_media_assets" in table_ddl
+        for index in AiMediaAsset.__table__.indexes:
+            assert str(CreateIndex(index).compile(dialect=dialect))
+
+
+def test_full_text_snapshots_use_longtext_only_on_mysql() -> None:
+    columns = (
+        MaterialSnapshot.__table__.c.content,
+        AgentRun.__table__.c.context_snapshot,
+    )
+
+    for column in columns:
+        assert isinstance(column.type.dialect_impl(mysql.dialect()), mysql.LONGTEXT)
+        assert isinstance(column.type.dialect_impl(sqlite.dialect()), Text)

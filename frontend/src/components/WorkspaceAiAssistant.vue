@@ -10,19 +10,25 @@ import {
   type AiAgentPlan,
   type AiAgentTemplate,
   type AiSource,
+  type AiTaskType,
   type AiWorkspaceContext,
   type AiWorkspaceMode,
   type AiWorkspaceRole,
 } from '@/api/ai'
 import { agentApi, type AgentRun } from '@/api/agents'
+import { aiMediaApi, type AiMediaAsset } from '@/api/aiMedia'
+import { learningApi } from '@/api/learning'
+import AiMediaComposer from '@/components/AiMediaComposer.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { LearningStage } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
 
 interface AssistantMessage {
   id: number
+  mode: AiWorkspaceMode
   role: 'user' | 'assistant'
   content: string
+  failed?: boolean
   grounded?: boolean
   model?: string
   sources?: AiSource[]
@@ -32,6 +38,7 @@ interface AssistantMessage {
   toolCalls?: Array<{ name: string; title: string; status: string; error?: string; requires_confirmation?: boolean }>
   execution?: AiAgentExecution
   run?: AgentRun
+  attachments?: Array<{ id: number; name: string }>
   createdAt: string
 }
 
@@ -41,6 +48,7 @@ interface QuickAction {
   prompt: string
   icon: typeof Setting
   requiresContext?: boolean
+  taskType?: AiTaskType
 }
 
 const props = defineProps<{
@@ -57,24 +65,58 @@ const emit = defineEmits<{ (event: 'context-updated', context: AiWorkspaceContex
 const auth = useAuthStore()
 const router = useRouter()
 const mode = ref<AiWorkspaceMode>(auth.user?.role === 'student' ? 'chat' : 'agent')
-const messages = ref<AssistantMessage[]>([])
-const question = ref('')
-const loading = ref(false)
+const chatMessages = ref<AssistantMessage[]>([])
+const agentMessages = ref<AssistantMessage[]>([])
+const chatQuestion = ref('')
+const agentQuestion = ref('')
+const chatTaskType = ref<AiTaskType>('question_answer')
+const chatQuestionIsUserAuthored = ref(false)
+const loadingByMode = ref<Record<AiWorkspaceMode, boolean>>({ chat: false, agent: false })
+const messages = computed<AssistantMessage[]>({
+  get: () => mode.value === 'chat' ? chatMessages.value : agentMessages.value,
+  set: (value) => { if (mode.value === 'chat') chatMessages.value = value; else agentMessages.value = value },
+})
+const question = computed<string>({
+  get: () => mode.value === 'chat' ? chatQuestion.value : agentQuestion.value,
+  set: (value) => { if (mode.value === 'chat') chatQuestion.value = value; else agentQuestion.value = value },
+})
+const loading = computed(() => loadingByMode.value[mode.value])
 const historyVisible = ref(false)
 const taskCenterVisible = ref(false)
 const executions = ref<AiAgentExecution[]>([])
 const serverTemplates = ref<AiAgentTemplate[]>([])
 const executionLoading = ref(false)
+const mediaAssets = ref<AiMediaAsset[]>([])
+const mediaBusy = ref(false)
 const messageList = ref<HTMLElement | null>(null)
 const role = computed<AiWorkspaceRole>(() => auth.user?.role || 'student')
-const roleLabel = computed(() => ({ student: '学生学习助手', teacher: '教师备课助手', admin: '教学管理助手' }[role.value]))
+const roleLabel = computed(() => ({ student: '学生学习助手', teacher: '教师备课助手', admin: '平台治理助手' }[role.value]))
 const contextLabel = computed(() => {
   if (props.context?.course_name && props.context.chapter_title) return `${props.context.course_name} · ${props.context.chapter_title}`
   if (props.context?.course_name) return `${props.context.course_name} · 待选专题`
   if (props.courseId && props.chapterId) return props.learningStage === 'review' ? '当前专题 · 课后巩固' : props.learningStage === 'exam' ? '当前专题 · 考前冲刺' : '当前专题 · 课前预习'
-  return '正在自动识别教学范围'
+  return role.value === 'admin' ? '正在读取平台运行状态' : '正在自动识别教学范围'
 })
-const storageKey = computed(() => `workspace-ai-history:${auth.user?.id || 'guest'}:${props.context?.course_id || props.courseId || 0}:${props.context?.chapter_id || props.chapterId || 0}`)
+const agentWelcome = computed(() => role.value === 'admin'
+  ? '检查资料、知识库、AI 服务和教学组织状态，只提供治理建议与管理入口。'
+  : '把教学目标拆成可追踪步骤，涉及写入和发布时由你确认。')
+const composerPlaceholder = computed(() => mode.value === 'chat'
+  ? '向 Chat 提问：本章的核心观点是什么？'
+  : role.value === 'admin'
+    ? '交给 Admin Agent：检查平台当前运行风险'
+    : '交给 Agent：为当前专题制定一份学习计划')
+const modeHint = computed(() => mode.value === 'chat'
+  ? '教材问答 · 只回答'
+  : role.value === 'admin'
+    ? '治理检查 · 只读建议'
+    : '任务规划 · 操作前确认')
+const disclaimer = computed(() => role.value === 'admin'
+  ? 'AI 生成内容仅汇总平台状态并提供管理入口，不会自动审核、发布、删除或修改服务配置。'
+  : 'AI 生成内容依据当前教材资料，仅供教学参考；发布、删除、导入和通知等操作需人工确认。')
+const storageScopeKey = computed(() => `workspace-ai-history:${auth.user?.id || 'guest'}:${props.context?.course_id || props.courseId || 0}:${props.context?.chapter_id || props.chapterId || 0}`)
+function storageKey(targetMode: AiWorkspaceMode) {
+  return `${storageScopeKey.value}:${targetMode}`
+}
 function templateIcon(category: string) {
   if (category === 'interaction') return ChatDotRound
   if (category === 'monitor' || category === 'review') return RefreshRight
@@ -99,12 +141,10 @@ const quickActions = computed<QuickAction[]>(() => {
     { title: '准备批改量规', description: '不伪造批改，先建立标准', prompt: '请为当前专题准备一份作业批改量规和反馈模板。', icon: RefreshRight },
   ]
   if (role.value === 'admin') return [
-    { title: '检查资料索引', description: '查看当前教材知识库状态', prompt: '请帮我检查当前教材资料是否具备可检索的索引和引用依据。', icon: CircleCheck },
-    { title: '规划资料更新', description: '整理版本与权威材料更新事项', prompt: '请给出当前教材和中央材料的更新检查清单。', icon: RefreshRight },
-    { title: '审核资料范围', description: '检查教材与中央材料优先级', prompt: '请检查当前资料范围和中央材料优先级。', icon: MagicStick },
-    { title: '查看任务学情', description: '汇总班级任务完成情况', prompt: '请帮我分析当前教学任务的完成情况。', icon: ChatDotRound },
-    { title: '准备教师备课', description: '创建可审阅的备课草稿', prompt: '请为当前专题创建可审阅的备课草稿。', icon: Setting },
-    { title: '查看操作边界', description: '确认需要人工审核的操作', prompt: '请说明管理员当前可用的资料、索引和审核操作。', icon: CircleCheck },
+    { title: '梳理资料审核队列', description: '汇总待审核、高优先级与来源异常', prompt: '请检查资料发现和候选审核队列，告诉我最需要先处理的事项。', icon: RefreshRight },
+    { title: '检查知识库健康', description: '检查发布、索引、校准与失败资料', prompt: '请检查知识库、教材版本和索引状态，列出需要管理员处理的异常。', icon: CircleCheck },
+    { title: '诊断 AI 运行状态', description: '汇总模型调用、失败率与当前配置', prompt: '请检查近 24 小时 AI 调用和服务配置状态，指出运行风险。', icon: RefreshRight },
+    { title: '监督教学组织运行', description: '检查教师、教学班与任务发布状态', prompt: '请汇总教师审核、教学班和已发布教学任务的运行状态。', icon: Setting },
   ]
   return [
     { title: '制定学习计划', description: '结合学习阶段安排下一步', prompt: '请根据当前专题和我的学习状态制定学习计划。', icon: MagicStick },
@@ -115,6 +155,24 @@ const quickActions = computed<QuickAction[]>(() => {
     { title: '考前冲刺建议', description: '定位重点与易混概念', prompt: '请根据当前专题给出考前冲刺的复习顺序。', icon: RefreshRight },
   ]
 })
+const chatQuickActions = computed<QuickAction[]>(() => {
+  const learningStage = props.context?.learning_stage || props.learningStage || 'preview'
+  if (learningStage === 'review') return [
+    { title: '生成复习提纲', description: '梳理观点、概念和逻辑关系', prompt: '请依据当前专题教材生成一份结构清晰的复习提纲。', icon: CircleCheck, taskType: 'review_outline' },
+    { title: '梳理本章重点', description: '提炼教材核心观点', prompt: '请用简洁的层级结构梳理当前专题的核心观点。', icon: ChatDotRound, taskType: 'chapter_summary' },
+    { title: '辨析易混观点', description: '比较概念并给出教材依据', prompt: '请列出当前专题中容易混淆的概念并逐一辨析。', icon: RefreshRight, taskType: 'question_answer' },
+  ]
+  if (learningStage === 'exam') return [
+    { title: '生成模拟练习', description: '依据教材生成考前自测题', prompt: '请依据当前专题教材生成一组模拟练习题，并在题目后给出参考要点。', icon: CircleCheck, taskType: 'mock_questions' },
+    { title: '梳理重点考点', description: '形成考前冲刺提纲', prompt: '请依据当前专题教材梳理重点考点和答题线索。', icon: ChatDotRound, taskType: 'review_outline' },
+    { title: '检查知识盲点', description: '定位易错概念和薄弱点', prompt: '请列出当前专题容易遗漏或混淆的知识点，并说明检查方法。', icon: RefreshRight, taskType: 'question_answer' },
+  ]
+  return [
+    { title: '生成预习问题', description: '带着问题进入课堂', prompt: '请严格依据当前专题教材生成 5 个预习问题。', icon: CircleCheck, taskType: 'preview_questions' },
+    { title: '梳理本章重点', description: '提炼教材核心观点', prompt: '请用简洁的层级结构梳理当前专题的核心观点。', icon: ChatDotRound, taskType: 'chapter_summary' },
+    { title: '解释核心概念', description: '依据当前教材直接回答', prompt: '请依据当前专题教材解释最重要的核心概念。', icon: RefreshRight, taskType: 'question_answer' },
+  ]
+})
 
 const renderedMessages = computed(() => messages.value.map((message) => ({
   ...message,
@@ -123,30 +181,119 @@ const renderedMessages = computed(() => messages.value.map((message) => ({
 
 function loadHistory() {
   try {
-    const raw = localStorage.getItem(storageKey.value)
-    messages.value = raw ? JSON.parse(raw) as AssistantMessage[] : []
-  } catch { messages.value = [] }
+    const chatRaw = localStorage.getItem(storageKey('chat'))
+    const agentRaw = localStorage.getItem(storageKey('agent'))
+    if (chatRaw !== null || agentRaw !== null) {
+      chatMessages.value = chatRaw ? (JSON.parse(chatRaw) as AssistantMessage[]).map((item) => ({ ...item, mode: 'chat' })) : []
+      agentMessages.value = agentRaw ? (JSON.parse(agentRaw) as AssistantMessage[]).map((item) => ({ ...item, mode: 'agent' })) : []
+      return
+    }
+    // 兼容旧版共用历史：依据助手结果识别频道，并让用户提问跟随其后的回答迁移。
+    const legacyRaw = localStorage.getItem(storageScopeKey.value)
+    const legacy = legacyRaw ? JSON.parse(legacyRaw) as Array<Omit<AssistantMessage, 'mode'> & { mode?: AiWorkspaceMode }> : []
+    const migrated: Record<AiWorkspaceMode, AssistantMessage[]> = { chat: [], agent: [] }
+    for (let index = 0; index < legacy.length; index += 1) {
+      const item = legacy[index]
+      const pairedAssistant = item.role === 'user' ? legacy[index + 1] : item
+      const inferredMode: AiWorkspaceMode = item.mode || (pairedAssistant?.plan || pairedAssistant?.execution || pairedAssistant?.run || pairedAssistant?.toolCalls?.length || pairedAssistant?.actions?.length ? 'agent' : 'chat')
+      migrated[inferredMode].push({ ...item, mode: inferredMode } as AssistantMessage)
+    }
+    chatMessages.value = migrated.chat
+    agentMessages.value = migrated.agent
+    if (legacy.length) persistHistory()
+  } catch {
+    chatMessages.value = []
+    agentMessages.value = []
+  }
 }
 function persistHistory() {
-  localStorage.setItem(storageKey.value, JSON.stringify(messages.value.slice(-40)))
+  localStorage.setItem(storageKey('chat'), JSON.stringify(chatMessages.value.slice(-40)))
+  localStorage.setItem(storageKey('agent'), JSON.stringify(agentMessages.value.slice(-40)))
 }
-function scrollToBottom() {
+function scrollToBottom(targetMode: AiWorkspaceMode = mode.value) {
+  if (targetMode !== mode.value) return
   void nextTick(() => {
     if (messageList.value) messageList.value.scrollTop = messageList.value.scrollHeight
   })
 }
-function selectQuickAction(prompt: string, selectedMode: AiWorkspaceMode = mode.value) {
-  mode.value = selectedMode
-  question.value = prompt
+function selectQuickAction(prompt: string, selectedMode: AiWorkspaceMode = mode.value, taskType?: AiTaskType) {
+  switchMode(selectedMode)
+  if (selectedMode === 'chat') {
+    chatQuestion.value = prompt
+    chatTaskType.value = taskType || 'question_answer'
+    chatQuestionIsUserAuthored.value = false
+  }
+  else agentQuestion.value = prompt
+}
+function resetChatTaskType() {
+  if (mode.value === 'chat') {
+    chatTaskType.value = 'question_answer'
+    chatQuestionIsUserAuthored.value = true
+  }
+}
+function completedChatHistory() {
+  const history: Array<{ role: 'user' | 'assistant'; content: string }> = []
+  for (let index = 0; index < chatMessages.value.length - 1; index += 1) {
+    const userMessage = chatMessages.value[index]
+    const assistantMessage = chatMessages.value[index + 1]
+    if (userMessage.role !== 'user' || assistantMessage.role !== 'assistant' || assistantMessage.failed || !assistantMessage.content.trim()) continue
+    history.push(
+      { role: 'user', content: userMessage.content.trim().slice(0, 600) },
+      { role: 'assistant', content: assistantMessage.content.trim().slice(0, 600) },
+    )
+    index += 1
+  }
+  return history.slice(-6)
+}
+function discardComposerMedia() {
+  const discarded = [...mediaAssets.value]
+  mediaAssets.value = []
+  void Promise.allSettled(discarded.map((asset) => aiMediaApi.deleteAsset(asset.id)))
+}
+function switchMode(nextMode: AiWorkspaceMode) {
+  if (nextMode === 'agent' && mediaBusy.value) {
+    ElMessage.warning('请先等待图片上传或语音转写完成')
+    return
+  }
+  if (nextMode === 'agent' && mediaAssets.value.length && !loadingByMode.value.chat) {
+    discardComposerMedia()
+    ElMessage.info('Agent 暂不接收图片或语音，已清理本轮临时附件')
+  }
+  mode.value = nextMode
+  historyVisible.value = false
+  taskCenterVisible.value = false
+  scrollToBottom(nextMode)
+}
+function appendTranscription(text: string) {
+  const normalized = text.trim()
+  if (!normalized) return
+  chatTaskType.value = 'question_answer'
+  chatQuestionIsUserAuthored.value = true
+  chatQuestion.value = chatQuestion.value.trim()
+    ? `${chatQuestion.value.trim()}\n${normalized}`
+    : normalized
 }
 function newConversation() {
+  if (mediaAssets.value.length && loadingByMode.value.chat) {
+    ElMessage.warning('请等待当前图片回答完成后再新建会话')
+    return false
+  }
+  if (mediaBusy.value) {
+    ElMessage.warning('请先等待图片上传或语音转写完成')
+    return false
+  }
+  if (mediaAssets.value.length) discardComposerMedia()
   messages.value = []
+  if (mode.value === 'chat') {
+    chatTaskType.value = 'question_answer'
+    chatQuestionIsUserAuthored.value = false
+  }
   historyVisible.value = false
-  localStorage.removeItem(storageKey.value)
+  localStorage.removeItem(storageKey(mode.value))
+  return true
 }
 function clearHistory() {
-  newConversation()
-  ElMessage.success('本次 AI 会话已清空')
+  if (newConversation()) ElMessage.success('本次 AI 会话已清空')
 }
 async function loadExecutions() {
   executionLoading.value = true
@@ -169,6 +316,8 @@ async function loadTemplates() {
   }
 }
 function openTaskCenter() {
+  switchMode('agent')
+  if (mode.value !== 'agent') return
   taskCenterVisible.value = !taskCenterVisible.value
   historyVisible.value = false
   if (taskCenterVisible.value) void loadExecutions()
@@ -177,7 +326,7 @@ function executionStatusLabel(status: AiAgentExecution['status']) {
   return ({ planning: '正在规划', running: '正在执行', waiting_confirmation: '等待确认', completed: '已完成', failed: '执行异常', cancelled: '已取消' } as Record<AiAgentExecution['status'], string>)[status]
 }
 async function retryExecution(execution: AiAgentExecution) {
-  if (loading.value) return
+  if (loadingByMode.value.agent) return
   try {
     const response = await aiApi.retryWorkspaceAgentExecution(execution.id)
     taskCenterVisible.value = false
@@ -215,11 +364,29 @@ async function cancelPendingExecution(execution: AiAgentExecution) {
   }
 }
 function updateAssistantMessage(id: number, updater: (message: AssistantMessage) => void) {
-  const message = messages.value.find((item) => item.id === id)
+  const message = [...chatMessages.value, ...agentMessages.value].find((item) => item.id === id)
   if (message) updater(message)
 }
+async function submitStudentLearningQuestion(
+  scope: { course_id: number | null; chapter_id: number | null; learning_stage: LearningStage },
+  content: string,
+) {
+  if (role.value !== 'student' || !scope.course_id || !scope.chapter_id) return
+  try {
+    await learningApi.submitQuestion({
+      course_id: scope.course_id,
+      chapter_id: scope.chapter_id,
+      learning_stage: scope.learning_stage,
+      content,
+    })
+  } catch {
+    // 问题留痕失败不应把已经成功生成的 Chat 回答改成错误消息。
+  }
+}
 function generationLabel(message: AssistantMessage) {
-  return message.progress?.at(-1)?.title || '正在连接 Agent 并准备执行任务'
+  return message.mode === 'agent'
+    ? message.progress?.at(-1)?.title || '正在连接 Agent 并准备执行任务'
+    : '正在检索教材并生成回答'
 }
 function navigateAction(action: AiAgentAction) {
   if (!action.href) return
@@ -278,7 +445,7 @@ function updateRunSnapshot(messageId: number, run: AgentRun) {
     }
   })
   persistHistory()
-  scrollToBottom()
+  scrollToBottom('agent')
 }
 async function retryRun(messageId: number, run: AgentRun) {
   try {
@@ -378,18 +545,46 @@ async function send(executionId?: number | Event) {
   const safeExecutionId = typeof executionId === 'number' && Number.isInteger(executionId) && executionId > 0
     ? executionId
     : undefined
-  const content = (safeExecutionId
+  const requestMode: AiWorkspaceMode = safeExecutionId ? 'agent' : mode.value
+  const requestTaskType: AiTaskType = requestMode === 'chat' ? chatTaskType.value : 'question_answer'
+  const shouldSubmitLearningQuestion = requestMode === 'chat'
+    && requestTaskType === 'question_answer'
+    && chatQuestionIsUserAuthored.value
+  const rawContent = (safeExecutionId
     ? executions.value.find((item) => item.id === safeExecutionId)?.question || question.value
-    : question.value).trim()
-  if (!content || loading.value) return
-  question.value = ''
-  const userMessage: AssistantMessage = { id: Date.now(), role: 'user', content, createdAt: new Date().toISOString() }
-  const assistantMessage: AssistantMessage = { id: Date.now() + 1, role: 'assistant', content: '', grounded: false, sources: [], progress: [], actions: [], createdAt: new Date().toISOString() }
-  messages.value.push(userMessage, assistantMessage)
+    : requestMode === 'chat' ? chatQuestion.value : agentQuestion.value).trim()
+  const selectedImages = requestMode === 'chat'
+    ? mediaAssets.value.filter((asset) => asset.media_kind === 'image' && asset.status === 'ready')
+    : []
+  const content = rawContent || (selectedImages.length ? '请结合当前教材分析这些图片。' : '')
+  if (!content || loadingByMode.value[requestMode]) return
+  if (requestMode === 'chat' && mediaBusy.value) {
+    ElMessage.warning('图片或语音仍在处理中，请稍候再发送')
+    return
+  }
+  const conversationHistory = requestMode === 'chat' ? completedChatHistory() : []
+  if (requestMode === 'chat') {
+    chatQuestion.value = ''
+    chatTaskType.value = 'question_answer'
+    chatQuestionIsUserAuthored.value = false
+  }
+  else agentQuestion.value = ''
+  const messageId = Date.now()
+  const userMessage: AssistantMessage = {
+    id: messageId,
+    mode: requestMode,
+    role: 'user',
+    content,
+    attachments: selectedImages.map((asset) => ({ id: asset.id, name: asset.original_filename })),
+    createdAt: new Date().toISOString(),
+  }
+  const assistantMessage: AssistantMessage = { id: messageId + 1, mode: requestMode, role: 'assistant', content: '', grounded: false, sources: [], progress: [], actions: [], createdAt: new Date().toISOString() }
+  const targetMessages = requestMode === 'chat' ? chatMessages.value : agentMessages.value
+  targetMessages.push(userMessage, assistantMessage)
   historyVisible.value = false
   taskCenterVisible.value = false
-  loading.value = true
-  scrollToBottom()
+  loadingByMode.value[requestMode] = true
+  scrollToBottom(requestMode)
   try {
     const currentScope = {
       course_id: props.context?.course_id || props.courseId || null,
@@ -402,7 +597,7 @@ async function send(executionId?: number | Event) {
     const scope = safeExecutionId
       ? { course_id: null, chapter_id: null, teaching_class_id: null, learning_stage: 'preview' as LearningStage, page_name: null }
       : currentScope
-    if (mode.value === 'agent') {
+    if (requestMode === 'agent') {
       await aiApi.workspaceAgentStream({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {
         onContext: (context) => {
           emit('context-updated', context)
@@ -440,31 +635,48 @@ async function send(executionId?: number | Event) {
             })()
           }
         },
-        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom() },
+        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
         onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
       })
     } else {
-      await aiApi.workspaceStream({ mode: mode.value, role: role.value, question: content, ...scope }, {
+      await aiApi.workspaceStream({
+        mode: requestMode,
+        role: role.value,
+        question: content,
+        task_type: requestTaskType,
+        attachment_ids: selectedImages.map((asset) => asset.id),
+        conversation_history: conversationHistory,
+        ...scope,
+      }, {
         onMeta: (meta) => updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = meta.grounded; message.model = meta.model }),
-        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom() },
+        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
         onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
       })
+      if (assistantMessage.content.trim() && shouldSubmitLearningQuestion) {
+        await submitStudentLearningQuestion(scope, content)
+      }
     }
     persistHistory()
-    if (mode.value === 'agent') void loadExecutions()
+    if (requestMode === 'agent') void loadExecutions()
   } catch (error: unknown) {
     updateAssistantMessage(assistantMessage.id, (message) => {
       message.content = error instanceof Error ? error.message : 'AI 暂时无法连接，请稍后重试。'
+      message.failed = true
       message.grounded = false
     })
     persistHistory()
   } finally {
-    loading.value = false
-    scrollToBottom()
+    if (selectedImages.length) {
+      const sentIds = new Set(selectedImages.map((asset) => asset.id))
+      await Promise.allSettled(selectedImages.map((asset) => aiMediaApi.deleteAsset(asset.id)))
+      mediaAssets.value = mediaAssets.value.filter((asset) => !sentIds.has(asset.id))
+    }
+    loadingByMode.value[requestMode] = false
+    scrollToBottom(requestMode)
   }
 }
 
-watch(storageKey, loadHistory, { immediate: true })
+watch(storageScopeKey, loadHistory, { immediate: true })
 onMounted(() => { void loadTemplates() })
 </script>
 
@@ -497,7 +709,7 @@ onMounted(() => { void loadTemplates() })
       <el-empty v-if="!executions.length && !executionLoading" description="还没有可追踪的 Agent 任务" :image-size="68" />
     </div>
     <div v-else-if="historyVisible" class="workspace-ai-history">
-      <div class="workspace-ai-history-heading"><strong>本章会话</strong><span>{{ messages.length }} 条消息</span></div>
+      <div class="workspace-ai-history-heading"><strong>{{ mode === 'chat' ? 'Chat 问答记录' : 'Agent 执行记录' }}</strong><span>{{ messages.length }} 条消息</span></div>
       <button v-for="message in messages" :key="message.id" type="button" class="workspace-ai-history-item" @click="historyVisible = false; scrollToBottom()">
         <span :class="`history-role-${message.role}`">{{ message.role === 'user' ? '我' : 'AI' }}</span><p>{{ message.content || '正在生成……' }}</p>
       </button>
@@ -507,11 +719,11 @@ onMounted(() => { void loadTemplates() })
     <div v-else ref="messageList" class="workspace-ai-scroll">
       <section v-if="!messages.length" class="workspace-ai-welcome">
         <div class="workspace-ai-welcome-icon"><el-icon><MagicStick /></el-icon><span>AI</span></div>
-        <div><p class="workspace-ai-eyebrow">IDEOLOGY · SMART TUTOR</p><h2>你好，我是思政 AI 助教</h2><p>围绕教材、专题和学习阶段，帮你把问题变成可执行的学习任务。</p></div>
+        <div><p class="workspace-ai-eyebrow">{{ mode === 'chat' ? 'TEXTBOOK · CHAT' : role === 'admin' ? 'PLATFORM · GOVERNANCE' : 'TEACHING · AGENT' }}</p><h2>{{ mode === 'chat' ? 'Chat 教材问答' : role === 'admin' ? 'Admin 治理 Agent' : 'Agent 任务执行' }}</h2><p>{{ mode === 'chat' ? '围绕当前教材直接回答、解释和辨析，不触发任务操作。' : agentWelcome }}</p></div>
       </section>
       <section v-if="!messages.length" class="workspace-ai-capabilities">
         <p>我可以帮你</p>
-        <button v-for="action in quickActions" :key="action.title" type="button" @click="selectQuickAction(action.prompt, 'agent')"><el-icon><component :is="action.icon" /></el-icon><span><strong>{{ action.title }}</strong><small>{{ action.description }}</small><em v-if="action.requiresContext && !(props.context?.chapter_id || props.chapterId)">执行前需选择教材专题</em></span></button>
+        <button v-for="action in mode === 'chat' ? chatQuickActions : quickActions" :key="action.title" type="button" @click="selectQuickAction(action.prompt, mode, action.taskType)"><el-icon><component :is="action.icon" /></el-icon><span><strong>{{ action.title }}</strong><small>{{ action.description }}</small><em v-if="action.requiresContext && !(props.context?.chapter_id || props.chapterId)">执行前需选择教材专题</em></span></button>
       </section>
       <div v-for="message in renderedMessages" :key="message.id" class="workspace-ai-message" :class="`is-${message.role}`">
         <div v-if="message.role === 'assistant'" class="workspace-ai-avatar"><el-icon><MagicStick /></el-icon><span>AI</span></div>
@@ -520,7 +732,7 @@ onMounted(() => { void loadTemplates() })
           <article v-else class="teaching-document">
             <div v-if="!message.content && loading && message.id === messages[messages.length - 1]?.id" class="workspace-ai-generating" role="status" aria-live="polite">
               <span class="workspace-ai-generating-spinner"><el-icon class="is-loading"><Loading /></el-icon></span>
-              <span><strong>{{ generationLabel(message) }}</strong><small>Agent 正在执行，请保持当前页面打开。</small></span>
+              <span><strong>{{ generationLabel(message) }}</strong><small>{{ message.mode === 'agent' ? 'Agent 正在执行，可切换到 Chat 继续问答。' : 'Chat 正在组织教材依据，不会接入 Agent。' }}</small></span>
             </div>
             <div v-else v-html="message.rendered"></div>
           </article>
@@ -592,17 +804,19 @@ onMounted(() => { void loadTemplates() })
               <article v-for="(artifact, key) in message.run.output_data.artifacts" :key="key"><span>{{ artifact.title }}</span><el-button text type="primary" size="small" @click="downloadArtifact(message.run!, key, artifact.file_name)">下载</el-button></article>
             </section>
           </section>
-          <div v-if="message.role === 'assistant' && message.content" class="workspace-ai-meta"><el-tag size="small" :type="message.grounded ? 'success' : 'warning'">{{ message.grounded ? '教材依据' : '待绑定教材' }}</el-tag><span v-if="message.model">{{ message.model }}</span></div>
+          <div v-if="message.role === 'user' && message.attachments?.length" class="workspace-ai-attachments"><span v-for="attachment in message.attachments" :key="attachment.id">图片 · {{ attachment.name }}</span></div>
+          <div v-if="message.role === 'assistant' && message.content" class="workspace-ai-meta"><el-tag size="small" :type="role === 'admin' && message.mode === 'agent' ? 'success' : message.grounded ? 'success' : 'warning'">{{ role === 'admin' && message.mode === 'agent' ? 'AI 生成内容 · 平台数据' : message.grounded ? 'AI 生成内容 · 教材依据' : 'AI 生成内容 · 待绑定教材' }}</el-tag><span v-if="message.model">{{ message.model }}</span></div>
           <div v-if="message.role === 'assistant' && message.sources?.length" class="workspace-ai-sources"><span v-for="source in message.sources.slice(0, 3)" :key="`${source.source_title}-${source.position}`">{{ source.source_title }} · {{ source.position }}</span></div>
         </div>
       </div>
     </div>
 
     <div class="workspace-ai-composer">
-      <el-input v-model="question" type="textarea" :rows="2" resize="none" maxlength="2000" placeholder="你可以这样问：本章的核心观点是什么？" @keydown.ctrl.enter.prevent="send()" @keydown.meta.enter.prevent="send()" />
-      <div class="workspace-ai-composer-footer"><div class="workspace-ai-mode-switch" role="tablist" aria-label="AI 工作模式"><button type="button" :class="{ active: mode === 'agent' }" @click="mode = 'agent'"><el-icon><MagicStick /></el-icon>Agent</button><button type="button" :class="{ active: mode === 'chat' }" @click="mode = 'chat'"><el-icon><ChatDotRound /></el-icon>Chat</button></div><span class="workspace-ai-hint">{{ mode === 'agent' ? '任务规划 · 操作前确认' : '教材问答 · 只回答' }}</span><el-button type="primary" :loading="loading" :icon="Promotion" aria-label="发送" @click="send()">发送</el-button></div>
+      <el-input v-model="question" type="textarea" :rows="2" resize="none" maxlength="2000" :placeholder="composerPlaceholder" @input="resetChatTaskType" @keydown.ctrl.enter.prevent="send()" @keydown.meta.enter.prevent="send()" />
+      <AiMediaComposer v-if="mode === 'chat'" v-model="mediaAssets" :course-id="props.context?.course_id || props.courseId || null" :chapter-id="props.context?.chapter_id || props.chapterId || null" :disabled="loading" @transcribed="appendTranscription" @busy-changed="mediaBusy = $event" />
+      <div class="workspace-ai-composer-footer"><div class="workspace-ai-mode-switch" role="tablist" aria-label="AI 工作模式"><button type="button" role="tab" :aria-selected="mode === 'chat'" :class="{ active: mode === 'chat' }" @click="switchMode('chat')"><el-icon><ChatDotRound /></el-icon>Chat<i v-if="loadingByMode.chat"></i></button><button type="button" role="tab" :aria-selected="mode === 'agent'" :class="{ active: mode === 'agent' }" @click="switchMode('agent')"><el-icon><MagicStick /></el-icon>Agent<i v-if="loadingByMode.agent"></i></button></div><span class="workspace-ai-hint">{{ modeHint }}</span><el-button type="primary" :loading="loading" :disabled="mode === 'chat' && mediaBusy" :icon="Promotion" aria-label="发送" @click="send()">发送</el-button></div>
     </div>
-    <p class="workspace-ai-disclaimer">内容依据当前教材资料生成，仅供教学参考；发布、删除、导入和通知等操作需人工确认。</p>
+    <p class="workspace-ai-disclaimer">{{ disclaimer }}</p>
   </section>
 </template>
 
@@ -666,6 +880,8 @@ onMounted(() => { void loadTemplates() })
 .workspace-ai-bubble :deep(.teaching-document strong) { color: #2e54c4; font-weight: 750; }
 .workspace-ai-meta, .workspace-ai-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; color: #8693a9; font-size: 10px; }
 .workspace-ai-sources span { padding: 3px 6px; color: #5572a7; background: #f1f5fc; border-radius: 5px; }
+.workspace-ai-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
+.workspace-ai-attachments span { max-width: 220px; overflow: hidden; padding: 3px 7px; color: #315ed5; background: rgba(255,255,255,.9); border-radius: 6px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-ai-plan { margin-top: 10px; padding: 10px; background: #f6f8ff; border: 1px solid #dde5fb; border-radius: 10px; }
 .workspace-ai-plan > strong { display: block; color: #3853b4; font-size: 12px; }
 .workspace-ai-plan ol { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
@@ -702,9 +918,10 @@ onMounted(() => { void loadTemplates() })
 .workspace-ai-composer :deep(.el-textarea__inner:focus) { border-color: #637ce5; box-shadow: 0 0 0 2px rgba(99,124,229,.12); }
 .workspace-ai-composer-footer { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .workspace-ai-mode-switch { display: inline-flex; overflow: hidden; border: 1px solid #d8e1ef; border-radius: 8px; }
-.workspace-ai-mode-switch button { display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; color: #687890; background: #fff; border: 0; cursor: pointer; font-size: 11px; }
+.workspace-ai-mode-switch button { position: relative; display: inline-flex; align-items: center; gap: 4px; padding: 5px 9px; color: #687890; background: #fff; border: 0; cursor: pointer; font-size: 11px; }
 .workspace-ai-mode-switch button + button { border-left: 1px solid #d8e1ef; }
 .workspace-ai-mode-switch button.active { color: #2e5dce; background: #edf2ff; font-weight: 700; }
+.workspace-ai-mode-switch button i { width: 6px; height: 6px; background: #3975dc; border-radius: 50%; box-shadow: 0 0 0 3px rgba(57,117,220,.12); }
 .workspace-ai-hint { flex: 1; color: #8a98ad; font-size: 10px; }
 .workspace-ai-composer-footer :deep(.el-button) { min-width: 64px; border-radius: 8px; }
 .workspace-ai-disclaimer { margin: 0; padding: 0 18px 10px; color: #a3acbb; font-size: 10px; line-height: 1.5; text-align: center; }

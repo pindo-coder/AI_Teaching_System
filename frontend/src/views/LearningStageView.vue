@@ -69,10 +69,16 @@ async function loadTaskPoints() {
 function trackReading() {
   const element = readingContainer.value
   if (!element) return
-  const rect = element.getBoundingClientRect()
-  const visible = Math.min(window.innerHeight, Math.max(0, window.innerHeight - Math.max(0, rect.top)))
-  const total = Math.max(element.offsetHeight, window.innerHeight)
-  const percent = Math.min(100, Math.round(((Math.max(0, -rect.top) + visible) / total) * 100))
+  const hasInternalScroll = element.scrollHeight > element.clientHeight + 1
+  let percent: number
+  if (hasInternalScroll) {
+    percent = Math.min(100, Math.round(((element.scrollTop + element.clientHeight) / element.scrollHeight) * 100))
+  } else {
+    const rect = element.getBoundingClientRect()
+    const visible = Math.min(window.innerHeight, Math.max(0, window.innerHeight - Math.max(0, rect.top)))
+    const total = Math.max(element.offsetHeight, window.innerHeight)
+    percent = Math.min(100, Math.round(((Math.max(0, -rect.top) + visible) / total) * 100))
+  }
   if (percent >= lastReadingPercent + 10 || (percent >= 80 && lastReadingPercent < 80)) {
     lastReadingPercent = percent
     void recordEvent('reading_progress', { percent })
@@ -102,8 +108,8 @@ async function saveStudyNote() {
   noteSaving.value = true
   try {
     await studyApi.saveNote(chapterId.value, selfNote.value)
-    await recordEvent('note_saved', { content: selfNote.value })
     await studyApi.activateReview(chapterId.value)
+    try { await loadTaskPoints() } catch { /* 笔记事件由保存接口记录，刷新失败不重复上报。 */ }
     ElMessage.success('学习笔记已保存，并加入间隔复习计划')
   } finally { noteSaving.value = false }
 }
@@ -127,17 +133,17 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 
     <section v-if="stage === 'preview'" class="stage-workspace">
       <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template><div class="guide-grid"><div><strong>本专题</strong><p>{{ chapter?.title }}</p></div><div><strong>阅读方法</strong><p>先找章节主旨，再标记核心概念和重要论述。</p></div><div><strong>预习产出</strong><p>形成至少 3 个问题，带着问题进入课堂。</p></div></div></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材原文预读</span><span class="muted">滚动阅读会自动记录任务点</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document preview-text"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材原文预读</span><span class="muted">滚动阅读会自动记录任务点</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材原文预读滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
     </section>
 
     <section v-else-if="stage === 'review'" class="stage-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材重点回看</span><el-tag type="success">滚动自动记录</el-tag></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材重点回看</span><el-tag type="success">滚动自动记录</el-tag></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材重点回看滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
       <el-card shadow="never" class="workspace-card note-workspace"><template #header><div class="content-heading"><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div></template><p class="note-guide">建议按照“章节主旨—核心观点—概念关系—现实意义”四部分整理。保存后会加入间隔复习计划。</p><el-input v-model="selfNote" type="textarea" :rows="8" maxlength="10000" show-word-limit placeholder="请用自己的语言写下本专题笔记……" /><el-button class="note-save-button" type="primary" :loading="noteSaving" @click="saveStudyNote">保存笔记并加入复习</el-button></el-card>
     </section>
 
     <section v-else class="stage-workspace exam-workspace">
       <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template><div class="exam-task-grid"><div><strong>考点提炼</strong><p>识别章节主旨、核心概念和重要论述。</p></div><div><strong>答题训练</strong><p>按照“概念—观点—依据—意义”组织答案。</p></div><div><strong>薄弱点检查</strong><p>通过错题定位未掌握的知识点。</p></div></div></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>核心原文速览</span><span class="muted">滚动自动记录</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document exam-preview"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>核心原文速览</span><span class="muted">滚动自动记录</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="核心原文速览滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
     </section>
 
     <section class="stage-task-panel"><div><p class="eyebrow">自动任务点 · {{ taskSummary?.completed_count || 0 }}/{{ taskSummary?.total_count || 0 }}</p><h2>学习行为会自动形成进度</h2><p>{{ config.aiHint }}</p></div><div class="auto-task-list"><div v-for="task in taskSummary?.tasks || []" :key="task.id" class="auto-task-item" :class="`task-${task.status}`"><span class="task-dot">{{ task.status === 'completed' ? '✓' : task.status === 'in_progress' ? '◐' : '○' }}</span><div><strong>{{ task.title }}</strong><p>{{ task.evidence_summary || task.description }}</p></div><span class="task-weight">{{ task.weight }}%</span></div></div></section>

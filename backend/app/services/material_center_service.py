@@ -8,7 +8,7 @@ import ipaddress
 from pathlib import Path
 import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import httpx
 from fastapi import HTTPException
@@ -16,6 +16,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.time import utc_now
 from app.models.chapter import Chapter
 from app.models.citation import DocumentPage, KnowledgeChunk, TextbookVersion
 from app.models.course import Course
@@ -27,6 +28,10 @@ from app.models.teaching_class import ClassMembership, TeachingClassTeacher
 from app.models.user import User
 from app.schemas.knowledge import KnowledgeDocumentRead, MaterialSuggestion
 from app.services.knowledge_service import KnowledgeService
+
+
+_REDIRECT_STATUS_CODES = {301, 302, 303, 307, 308}
+_MAX_REDIRECTS = 5
 
 
 class _ArticleTextParser(HTMLParser):
@@ -136,39 +141,101 @@ class _ArticleTextParser(HTMLParser):
         return title, publisher, published_date
 
 
-def _assert_public_https(url: str) -> None:
+def _pinned_public_https_target(url: str) -> tuple[str, str, str]:
+    """Resolve once and connect to that exact public IP with original Host/SNI."""
+
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise HTTPException(status_code=400, detail="中央材料网址必须是公开可访问的 HTTPS 地址")
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)}
+        port = parsed.port or 443
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="中央材料网址格式无效") from exc
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, port)}
     except OSError as exc:
         raise HTTPException(status_code=400, detail="中央材料网址无法解析") from exc
+    if not addresses:
+        raise HTTPException(status_code=400, detail="中央材料网址无法解析")
     for address in addresses:
-        ip = ipaddress.ip_address(address)
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="中央材料网址解析结果无效") from exc
         if not ip.is_global:
             raise HTTPException(status_code=400, detail="中央材料网址不能指向本机或内网地址")
+    # Prefer IPv4 where both families exist. Crucially, the HTTP transport is
+    # given this validated address and never resolves the hostname again.
+    pinned_address = sorted(
+        addresses,
+        key=lambda value: (ipaddress.ip_address(value).version, value),
+    )[0]
+    pinned_host = f"[{pinned_address}]" if ":" in pinned_address else pinned_address
+    request_url = urlunparse(
+        parsed._replace(netloc=f"{pinned_host}:{port}", fragment="")
+    )
+    sni_hostname = parsed.hostname.encode("idna").decode("ascii")
+    authority_host = f"[{sni_hostname}]" if ":" in sni_hostname else sni_hostname
+    host_header = authority_host if port == 443 else f"{authority_host}:{port}"
+    return request_url, host_header, sni_hostname
+
+
+def _assert_public_https(url: str) -> None:
+    _pinned_public_https_target(url)
 
 
 def _default_fetch(url: str) -> tuple[str, str, str | None, str | None, date | None]:
-    _assert_public_https(url)
     limit = settings.max_upload_size_mb * 1024 * 1024
     headers = {"User-Agent": "AI-Teaching-Material-Archive/1.0"}
-    with httpx.Client(timeout=25, follow_redirects=True, headers=headers) as client:
-        with client.stream("GET", url) as response:
-            if response.status_code >= 400:
-                raise HTTPException(status_code=400, detail=f"原文网址访问失败（HTTP {response.status_code}）")
-            _assert_public_https(str(response.url))
-            chunks: list[bytes] = []
-            size = 0
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > limit:
-                    raise HTTPException(status_code=413, detail="网页正文超过系统允许的资料大小")
-                chunks.append(chunk)
-            charset = response.encoding or "utf-8"
-            raw = b"".join(chunks).decode(charset, errors="replace")
-            content_type = response.headers.get("content-type", "").lower()
+    current_url = url
+    redirect_count = 0
+    pinned_target: tuple[str, str, str] | None = None
+    with httpx.Client(
+        timeout=25,
+        follow_redirects=False,
+        headers=headers,
+        trust_env=False,
+        # Pooling by pinned IP could otherwise reuse a TLS connection across
+        # two different redirect hostnames that share one address.
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=0),
+    ) as client:
+        while True:
+            if pinned_target is None:
+                pinned_target = _pinned_public_https_target(current_url)
+            request_url, host_header, sni_hostname = pinned_target
+            with client.stream(
+                "GET",
+                request_url,
+                headers={"Host": host_header},
+                extensions={"sni_hostname": sni_hostname},
+            ) as response:
+                if response.status_code in _REDIRECT_STATUS_CODES:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise HTTPException(status_code=400, detail="原文网址重定向缺少目标地址")
+                    if redirect_count >= _MAX_REDIRECTS:
+                        raise HTTPException(status_code=400, detail="原文网址重定向次数过多")
+                    redirect_url = urljoin(current_url, location)
+                    # Validate and pin the next hop before issuing it. Reusing
+                    # this exact address closes DNS-rebinding between checks.
+                    pinned_target = _pinned_public_https_target(redirect_url)
+                    current_url = redirect_url
+                    redirect_count += 1
+                    continue
+                if response.status_code >= 400:
+                    raise HTTPException(status_code=400, detail=f"原文网址访问失败（HTTP {response.status_code}）")
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(status_code=413, detail="网页正文超过系统允许的资料大小")
+                    chunks.append(chunk)
+                charset = response.encoding or "utf-8"
+                raw = b"".join(chunks).decode(charset, errors="replace")
+                content_type = response.headers.get("content-type", "").lower()
+                final_url = current_url
+                break
     if "html" in content_type or "<html" in raw[:1000].lower():
         parser = _ArticleTextParser()
         parser.feed(raw)
@@ -179,7 +246,7 @@ def _default_fetch(url: str) -> tuple[str, str, str | None, str | None, date | N
         title, publisher, published_date = None, None, None
     if len(text) < 80:
         raise HTTPException(status_code=400, detail="未能从网页提取有效正文，请改为上传原始文件")
-    return text, str(response.url), title, publisher, published_date
+    return text, final_url, title, publisher, published_date
 
 
 class MaterialCenterService:
@@ -269,7 +336,7 @@ class MaterialCenterService:
         self.db.execute(delete(DocumentChapterScope).where(DocumentChapterScope.document_id == document.id))
         self.db.execute(delete(DocumentClassScope).where(DocumentClassScope.document_id == document.id))
         self.db.execute(delete(DocumentKnowledgeTag).where(DocumentKnowledgeTag.document_id == document.id))
-        now = datetime.utcnow() if confirmed else None
+        now = utc_now() if confirmed else None
         self.db.add_all([
             DocumentCourseScope(document_id=document.id, course_id=course_id, confirmed=confirmed,
                                 confirmed_by=user.id if confirmed else None, confirmed_time=now)
@@ -337,7 +404,7 @@ class MaterialCenterService:
         )
         if material_type == "local":
             document.verified_by = user.id
-            document.verified_time = datetime.utcnow()
+            document.verified_time = utc_now()
             self.db.commit(); self.db.refresh(document)
         return document
 
@@ -368,7 +435,7 @@ class MaterialCenterService:
             version_label=version_label, supersedes_document_id=supersedes_document_id,
             access_policy=access_policy, course_ids=course_ids, chapter_ids=chapter_ids,
             class_ids=[], knowledge_tags=knowledge_tags, source_url=final_url,
-            snapshot_time=datetime.utcnow(),
+            snapshot_time=utc_now(),
         )
         # URL 与发布机关仍需管理员在预览后确认，因此保持 pending。
         return document
@@ -403,7 +470,7 @@ class MaterialCenterService:
         document.review_status = "published"
         document.is_active = True
         document.verified_by = user.id
-        document.verified_time = datetime.utcnow()
+        document.verified_time = utc_now()
         if document.supersedes_document_id:
             previous = self.db.get(KnowledgeDocument, document.supersedes_document_id)
             if previous and previous.material_type == document.material_type:

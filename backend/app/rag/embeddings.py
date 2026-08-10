@@ -1,11 +1,13 @@
 import hashlib
 import math
 from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.embeddings import Embeddings
 from openai import OpenAI
 
 from app.core.config import settings
+from app.services.ai_operation_service import AiProviderConfigService
 
 
 class EmbeddingDimensionMismatchError(RuntimeError):
@@ -28,27 +30,78 @@ class EmbeddingProfile:
         return f"{self.provider}:{self.model}:{self.dimensions}:{self.fingerprint}"
 
 
+def _embedding_runtime_config():
+    """Resolve the active DB config while preserving the legacy env behaviour.
+
+    ``resolve_capability`` also exposes an environment fallback.  Rebuilding the
+    environment branch here is intentional: older deployments and tests may
+    replace this module's settings object, and the existing DashScope aliases
+    must continue to behave exactly as before.
+    """
+
+    config = AiProviderConfigService.resolve_capability("embedding")
+    if config.source == "database":
+        return config
+
+    provider = str(settings.embedding_provider or "").strip().lower()
+    api_key = settings.embedding_api_key
+    base_url = settings.embedding_base_url
+    model = settings.embedding_model
+    if provider == "dashscope":
+        api_key = settings.dashscope_api_key or api_key
+        base_url = base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        model = model if model != "text-embedding-3-small" else "text-embedding-v4"
+    return config.__class__(
+        config_id=None,
+        source="environment",
+        capability="embedding",
+        provider_name=provider,
+        enabled=True,
+        base_url=base_url,
+        api_key=api_key,
+        model_name=model,
+        dimensions=settings.embedding_dimensions,
+        temperature=0.0,
+        timeout_seconds=getattr(settings, "llm_timeout_seconds", 60),
+        streaming_enabled=False,
+    )
+
+
+def _effective_dimensions(*, provider: str, model: str, configured: int | None) -> int:
+    if provider == "mock":
+        return DeterministicEmbeddings.dimensions
+    if provider == "dashscope" and model in {
+        "text-embedding-v1",
+        "text-embedding-v2",
+    }:
+        return 1536
+    return int(configured or settings.embedding_dimensions)
+
+
 def configured_embedding_dimensions() -> int:
     """返回模型真正会产生的维数，而不是盲目信任通用配置。
 
     DashScope v1/v2 固定返回 1536 维；v3/v4 才支持 dimensions 参数。
     mock 始终为 256 维。新增模型默认使用显式配置，并由响应校验兜底。
     """
-    if settings.embedding_provider == "mock":
-        return DeterministicEmbeddings.dimensions
-    if settings.embedding_provider == "dashscope" and settings.embedding_model in {
-        "text-embedding-v1",
-        "text-embedding-v2",
-    }:
-        return 1536
-    return settings.embedding_dimensions
+    config = _embedding_runtime_config()
+    return _effective_dimensions(
+        provider=config.provider_name,
+        model=config.model_name,
+        configured=config.dimensions,
+    )
 
 
 def get_embedding_profile() -> EmbeddingProfile:
+    config = _embedding_runtime_config()
     return EmbeddingProfile(
-        provider=settings.embedding_provider,
-        model=settings.embedding_model,
-        dimensions=configured_embedding_dimensions(),
+        provider=config.provider_name,
+        model=config.model_name,
+        dimensions=_effective_dimensions(
+            provider=config.provider_name,
+            model=config.model_name,
+            configured=config.dimensions,
+        ),
     )
 
 
@@ -78,8 +131,19 @@ class DeterministicEmbeddings(Embeddings):
 class OpenAICompatibleEmbeddings(Embeddings):
     """直接调用 /embeddings，兼容 DashScope 等 OpenAI 风格服务。"""
 
-    def __init__(self, *, api_key: str, base_url: str, model: str, dimensions: int | None = None) -> None:
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        base_url: str,
+        model: str,
+        dimensions: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        client_options: dict[str, Any] = {"api_key": api_key, "base_url": base_url}
+        if timeout_seconds is not None:
+            client_options["timeout"] = timeout_seconds
+        self.client = OpenAI(**client_options)
         self.model = model
         self.dimensions = dimensions
 
@@ -95,7 +159,9 @@ class OpenAICompatibleEmbeddings(Embeddings):
             response = self.client.embeddings.create(**kwargs)
             ordered = sorted(response.data, key=lambda item: item.index)
             vectors = [item.embedding for item in ordered]
-            expected = configured_embedding_dimensions()
+            expected = self.dimensions
+            if expected is None:
+                raise RuntimeError("Embedding 维数未配置")
             invalid = next((len(vector) for vector in vectors if len(vector) != expected), None)
             if invalid is not None:
                 raise EmbeddingDimensionMismatchError(
@@ -110,22 +176,30 @@ class OpenAICompatibleEmbeddings(Embeddings):
 
 
 def get_embeddings() -> Embeddings:
-    if settings.embedding_provider == "mock":
+    config = _embedding_runtime_config()
+    provider = config.provider_name.strip().lower()
+    if not config.enabled:
+        raise RuntimeError("Embedding 能力已禁用")
+    if provider == "mock":
         return DeterministicEmbeddings()
-    if settings.embedding_provider in {"openai_compatible", "dashscope"}:
-        if not settings.embedding_api_key:
-            raise RuntimeError("EMBEDDING_API_KEY 或 DASHSCOPE_API_KEY 未配置")
-        base_url = settings.embedding_base_url
-        model = settings.embedding_model
-        if settings.embedding_provider == "dashscope":
-            base_url = base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
-            model = model if model != "text-embedding-3-small" else "text-embedding-v4"
-        if not base_url:
-            raise RuntimeError("EMBEDDING_BASE_URL 未配置")
-        return OpenAICompatibleEmbeddings(
-            api_key=settings.embedding_api_key,
-            base_url=base_url,
-            model=model,
-            dimensions=configured_embedding_dimensions(),
-        )
-    raise RuntimeError(f"不支持的 EMBEDDING_PROVIDER：{settings.embedding_provider}")
+    if not config.api_key:
+        raise RuntimeError("EMBEDDING_API_KEY 或 DASHSCOPE_API_KEY 未配置")
+    if not config.base_url:
+        raise RuntimeError("EMBEDDING_BASE_URL 未配置")
+    if not config.model_name:
+        raise RuntimeError("EMBEDDING_MODEL 未配置")
+    options: dict[str, Any] = {
+        "api_key": config.api_key,
+        "base_url": config.base_url,
+        "model": config.model_name,
+        "dimensions": _effective_dimensions(
+            provider=provider,
+            model=config.model_name,
+            configured=config.dimensions,
+        ),
+    }
+    if config.source == "database":
+        options["timeout_seconds"] = config.timeout_seconds
+    return OpenAICompatibleEmbeddings(
+        **options,
+    )

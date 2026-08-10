@@ -56,6 +56,13 @@ const sourceNames = computed(() => availableSources.value.length ? availableSour
 const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value))
 function openCitation(source: AiSource) { if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true } else if (source.source_url) window.open(source.source_url, '_blank', 'noopener,noreferrer') }
 function sourceTagType(source: AiSource) { return source.material_type === 'central' ? 'danger' : source.material_type === 'textbook' ? 'primary' : 'success' }
+function formatPublishedTime(value: string | null) {
+  if (!value) return '近期'
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return '发布时间待确认'
+  // API 时间携带 Z/offset；不指定 timeZone，让浏览器按用户本地时区展示。
+  return parsed.toLocaleString('zh-CN', { hour12: false })
+}
 
 async function loadNews(resetPage = false) {
   if (resetPage) currentPage.value = 1
@@ -337,7 +344,7 @@ function openSavedNote() {
           <div class="news-search-summary"><span>共找到 <strong>{{ totalNews }}</strong> 条时政内容</span><span v-if="hasFilters">当前条件仅筛选已采集的权威资讯</span></div>
         </section>
         <el-card v-loading="newsLoading" shadow="never" class="news-list">
-          <article v-for="item in news" :key="item.id" class="news-item"><div class="news-item-body"><h3>{{ item.title }}</h3><p>{{ item.summary || '打开原文查看详细内容。' }}</p><small><el-tag size="small" effect="plain">{{ item.source_name }}</el-tag> {{ item.published_time ? new Date(item.published_time).toLocaleString() : '近期' }}</small><div class="news-actions"><el-button size="small" type="primary" plain @click="openAi(item, 'summary')">AI总结</el-button><el-button size="small" type="success" plain @click="openAi(item, 'relation')">关联课本</el-button><el-button size="small" type="warning" plain @click="openStudyNote(item)">生成研学笔记</el-button></div></div><el-link :href="item.article_url" target="_blank" type="primary" :underline="false">查看原文 →</el-link></article>
+          <article v-for="item in news" :key="item.id" class="news-item"><div class="news-item-body"><h3>{{ item.title }}</h3><p>{{ item.summary || '打开原文查看详细内容。' }}</p><small><el-tag size="small" effect="plain">{{ item.source_name }}</el-tag> {{ formatPublishedTime(item.published_time) }}</small><div class="news-actions"><el-button size="small" type="primary" plain @click="openAi(item, 'summary')">AI总结</el-button><el-button size="small" type="success" plain @click="openAi(item, 'relation')">关联课本</el-button><el-button size="small" type="warning" plain @click="openStudyNote(item)">生成研学笔记</el-button></div></div><el-link :href="item.article_url" target="_blank" type="primary" :underline="false">查看原文 →</el-link></article>
           <el-empty v-if="!newsLoading && !news.length" description="暂未获取到时政信息，请稍后再试" />
         </el-card>
         <el-pagination v-if="totalNews > pageSize" class="news-pagination" background layout="prev, pager, next" :current-page="currentPage" :page-size="pageSize" :total="totalNews" @current-change="changePage" />
@@ -347,7 +354,7 @@ function openSavedNote() {
     <el-dialog v-model="dialogVisible" :title="aiMode === 'summary' ? 'AI 时政总结' : 'AI 课本关联'" width="720px">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要' }}</p></div>
       <section v-if="aiResult" class="ai-dialog-result ai-result">
-        <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? '依据教材资料生成' : '教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
+        <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? 'AI 生成内容 · 依据教材资料' : 'AI 生成内容 · 教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
         <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="aiLoading" class="stream-cursor" aria-label="正在生成"></span>
         <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对真实来源</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (source.source_type !== 'pdf' || !source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.source_type === 'pdf' && source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div>
       </section>

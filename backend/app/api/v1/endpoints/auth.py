@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user, require_roles
+from app.api.dependencies import get_session_user, require_roles
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.common import ApiResponse
@@ -33,7 +33,7 @@ def login(payload: UserLogin, db: Session = Depends(get_db)) -> ApiResponse[Toke
 
 
 @router.get("/me", response_model=ApiResponse[UserRead])
-def me(current_user: User = Depends(get_current_user)) -> ApiResponse[UserRead]:
+def me(current_user: User = Depends(get_session_user)) -> ApiResponse[UserRead]:
     return ApiResponse(data=UserRead.model_validate(current_user))
 
 

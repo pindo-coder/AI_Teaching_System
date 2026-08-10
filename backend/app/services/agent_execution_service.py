@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import Engine, select
 from sqlalchemy.orm import Session
 
+from app.core.time import utc_iso, utc_now
 from app.models.agent_execution import AgentExecution
 from app.models.user import User
 from app.schemas.ai import AiWorkspaceContextData
+from app.services.llm_compat import clean_model_text
 
 
 FINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -43,7 +44,7 @@ class AgentExecutionService:
             status="planning",
             retry_of_execution_id=retry_of_execution_id,
             retry_count=retry_count,
-            started_time=datetime.now(UTC),
+            started_time=utc_now(),
         )
         self.db.add(execution)
         self.db.commit()
@@ -66,7 +67,7 @@ class AgentExecutionService:
         return self.update(execution, tool_results=history)
 
     def complete(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
-        return self.update(execution, status="completed", result=result, finished_time=datetime.now(UTC))
+        return self.update(execution, status="completed", result=result, finished_time=utc_now())
 
     def wait_for_confirmation(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
         return self.update(
@@ -82,14 +83,14 @@ class AgentExecutionService:
         result["confirmation"] = {
             "resolution": resolution,
             "note": note or "",
-            "resolved_time": datetime.now(UTC).isoformat(),
+            "resolved_time": utc_iso(utc_now()),
         }
         if resolution == "cancelled":
             return self.update(
                 execution,
                 status="cancelled",
                 result=result,
-                finished_time=datetime.now(UTC),
+                finished_time=utc_now(),
             )
         return self.complete(execution, result)
 
@@ -99,7 +100,7 @@ class AgentExecutionService:
             status="failed",
             error_message=message[:4000],
             result=result or execution.result or {},
-            finished_time=datetime.now(UTC),
+            finished_time=utc_now(),
         )
 
     def get(self, execution_id: int) -> AgentExecution | None:
@@ -132,6 +133,9 @@ class AgentExecutionService:
 
 def execution_data(execution: AgentExecution) -> dict[str, Any]:
     """统一输出契约，前端无需理解数据库字段。"""
+    result = dict(execution.result or {})
+    if result.get("summary"):
+        result["summary"] = clean_model_text(result["summary"])
     return {
         "id": execution.id,
         "role": execution.role,
@@ -144,13 +148,15 @@ def execution_data(execution: AgentExecution) -> dict[str, Any]:
         "context": execution.context_snapshot or {},
         "plan": execution.plan or {},
         "tool_results": execution.tool_results or [],
-        "result": execution.result or {},
+        "result": result,
         "error_message": execution.error_message,
         "retry_count": execution.retry_count,
         "retry_of_execution_id": execution.retry_of_execution_id,
+        # TimestampMixin uses database func.now(); historical deployments did
+        # not record that session timezone, so do not invent a UTC basis here.
         "created_time": execution.created_time.isoformat() if execution.created_time else None,
         "updated_time": execution.updated_time.isoformat() if execution.updated_time else None,
-        "finished_time": execution.finished_time.isoformat() if execution.finished_time else None,
+        "finished_time": utc_iso(execution.finished_time) if execution.finished_time else None,
     }
 
 
@@ -162,7 +168,7 @@ def recover_agent_executions(bind: Engine) -> int:
         ).all()
         if not pending:
             return 0
-        now = datetime.now(UTC)
+        now = utc_now()
         for execution in pending:
             execution.status = "failed"
             execution.error_message = "服务重启导致任务中断，请在任务中心基于此任务重试"

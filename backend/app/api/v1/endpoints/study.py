@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.api.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
+from app.models.review_practice import ReviewPractice
 from app.schemas.common import ApiResponse
 from app.schemas.study import (
     NoteRelatedData, NoteSearchItem, ReviewAnswerResult, ReviewAnswerSubmit, ReviewQuestionRead,
@@ -128,4 +129,17 @@ def review_questions(chapter_id: int, user: User = Depends(get_current_user), db
 @router.post("/reviews/questions/{practice_id}/answer", response_model=ApiResponse[ReviewAnswerResult])
 def submit_review_answer(practice_id: int, payload: ReviewAnswerSubmit,
                          user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[ReviewAnswerResult]:
-    return ApiResponse(message="作答已批阅", data=StudyService(db).submit_review_answer(user.id, practice_id, payload.answer))
+    practice = db.get(ReviewPractice, practice_id)
+    result = StudyService(db).submit_review_answer(user.id, practice_id, payload.answer)
+    if result.get("completed") and practice is not None and practice.user_id == user.id:
+        TaskService(db).record(
+            user.id,
+            LearningEventCreate(
+                course_id=practice.course_id,
+                chapter_id=practice.chapter_id,
+                learning_stage="exam",
+                event_type="quiz_completed",
+                event_data={"count": 1, "source": "spaced_review"},
+            ),
+        )
+    return ApiResponse(message="作答已批阅", data=result)

@@ -7,6 +7,19 @@ from app.models.user import User
 from app.repositories.user_repository import UserRepository
 
 
+_BLOCKED_TEACHER_MESSAGES = {
+    "rejected": "教师账号审核未通过",
+    "disabled": "教师账号已被禁用",
+}
+
+
+def teacher_authentication_block_reason(user: User) -> str | None:
+    """Return the reason a teacher account must not receive or use a session."""
+    if user.role != "teacher":
+        return None
+    return _BLOCKED_TEACHER_MESSAGES.get(user.approval_status)
+
+
 class AuthService:
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -35,4 +48,7 @@ class AuthService:
         user = self.users.get_by_username(username.strip())
         if user is None or not verify_password(password, user.password_hash):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+        blocked_reason = teacher_authentication_block_reason(user)
+        if blocked_reason:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=blocked_reason)
         return create_access_token(str(user.id)), user

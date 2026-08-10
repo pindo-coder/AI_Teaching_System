@@ -1,0 +1,28 @@
+{
+	# Keep the existing host Nginx on port 80; Caddy owns only public TLS.
+	auto_https disable_redirects
+	# Most clients omit SNI when the URL host is an IP address.
+	default_sni {$APP_SITE_ADDRESS}
+}
+
+{$APP_SITE_ADDRESS} {
+	tls {
+		issuer acme {
+			dir https://acme-v02.api.letsencrypt.org/directory
+			profile shortlived
+			# Port 80 remains owned by Nginx, so validation uses TLS-ALPN on 443.
+			disable_http_challenge
+		}
+	}
+
+	encode zstd gzip
+
+	header {
+		-Server
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+
+	reverse_proxy {$APP_UPSTREAM}
+}

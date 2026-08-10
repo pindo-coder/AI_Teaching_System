@@ -167,7 +167,16 @@ function addCanvasSlide(data, index) {
       breakLine: false,
     });
   });
+  addComplianceLabel(slide);
   addNotes(slide, data);
+}
+
+function addComplianceLabel(slide, dark = false) {
+  slide.addText("AI 生成内容 · 请教师核验后使用", {
+    x: 8.1, y: 7.08, w: 3.55, h: 0.2,
+    fontSize: 8, color: dark ? "E8EDF6" : C.muted,
+    align: "right", margin: 0, breakLine: false,
+  });
 }
 
 function addFooter(slide, index, dark = false) {
@@ -181,6 +190,7 @@ function addFooter(slide, index, dark = false) {
     fontFace: "Aptos", fontSize: 9, color,
     align: "right", margin: 0,
   });
+  addComplianceLabel(slide, dark);
 }
 
 function addLightBase(slide, index) {
@@ -286,7 +296,7 @@ function addTitleSlide(data, index) {
     x: 9.22, y: 5.22, w: 3.45, h: 0.4,
     fontSize: 16, bold: true, color: C.white, align: "center", margin: 0,
   });
-  slide.addText("教学草稿 · 请教师核验后使用", {
+  slide.addText("AI 生成内容 · 教学草稿 · 请教师核验后使用", {
     x: 9.28, y: 5.78, w: 3.32, h: 0.3,
     fontSize: 11, color: "CBD7EA", align: "center", margin: 0,
   });

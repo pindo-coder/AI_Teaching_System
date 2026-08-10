@@ -6,7 +6,9 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      DATABASE_URL: sqlite:////app/data/app.db
+      # 生产部署使用容器可访问的外部 MySQL，不在 backend 容器内使用 127.0.0.1。
+      DATABASE_URL: ${DATABASE_URL:?请在 .env.production 中配置外部 MySQL DATABASE_URL}
+      DATABASE_SCHEMA_CHECK_ENABLED: ${DATABASE_SCHEMA_CHECK_ENABLED:-true}
       CORS_ORIGINS: '["http://localhost"]'
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?请在 .env.production 中配置 JWT_SECRET_KEY}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
@@ -15,21 +17,46 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
       LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      AI_MEDIA_DIRECTORY: /app/knowledge/ai_media
+      AI_MEDIA_MAX_IMAGES: ${AI_MEDIA_MAX_IMAGES:-2}
+      AI_MEDIA_MAX_IMAGE_MB: ${AI_MEDIA_MAX_IMAGE_MB:-5}
+      AI_MEDIA_MAX_AUDIO_MB: ${AI_MEDIA_MAX_AUDIO_MB:-10}
+      AI_MEDIA_MAX_AUDIO_SECONDS: ${AI_MEDIA_MAX_AUDIO_SECONDS:-60}
+      AI_MEDIA_RETENTION_HOURS: ${AI_MEDIA_RETENTION_HOURS:-24}
+      AI_MEDIA_USER_QUOTA_MB: ${AI_MEDIA_USER_QUOTA_MB:-50}
+      AI_MEDIA_FFPROBE_BINARY: /usr/bin/ffprobe
+      AI_VISION_ENABLED: ${AI_VISION_ENABLED:-true}
+      AI_VISION_API_KEY: ${AI_VISION_API_KEY:-}
+      AI_VISION_BASE_URL: ${AI_VISION_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      AI_VISION_MODEL: ${AI_VISION_MODEL:-qwen3-vl-plus}
+      AI_VISION_TIMEOUT_SECONDS: ${AI_VISION_TIMEOUT_SECONDS:-90}
+      AI_ASR_ENABLED: ${AI_ASR_ENABLED:-true}
+      AI_ASR_API_KEY: ${AI_ASR_API_KEY:-}
+      AI_ASR_BASE_URL: ${AI_ASR_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      AI_ASR_MODEL: ${AI_ASR_MODEL:-qwen3-asr-flash}
+      AI_ASR_TIMEOUT_SECONDS: ${AI_ASR_TIMEOUT_SECONDS:-120}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-v4}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
       CHROMA_PERSIST_DIRECTORY: /app/knowledge/chroma
       KNOWLEDGE_UPLOAD_DIRECTORY: /app/knowledge/uploads
+      GENERATED_ARTIFACT_DIRECTORY: /app/knowledge/generated_artifacts
+      PRESENTATION_NODE_BINARY: /usr/local/bin/node
+      PRESENTATION_NODE_MODULES: /app/presentation_runtime/node_modules
       LOG_LEVEL: INFO
     volumes:
       - app_data:/app/data
       - knowledge_uploads:/app/knowledge/uploads
+      - ai_media:/app/knowledge/ai_media
       - chroma_data:/app/knowledge/chroma
+      - generated_artifacts:/app/knowledge/generated_artifacts
     expose:
       - "8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready')"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -42,10 +69,32 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    expose:
+      - "80"
+
+  gateway:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    depends_on:
+      frontend:
+        condition: service_started
+    environment:
+      # 使用域名时 Caddy 自动申请并续期 HTTPS 证书；未配置域名时保留 IP/HTTP 部署能力。
+      APP_SITE_ADDRESS: "${APP_SITE_ADDRESS:-:80}"
     ports:
       - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ${CADDYFILE_PATH:-./deploy/Caddyfile}:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
 
 volumes:
   app_data:
   knowledge_uploads:
+  ai_media:
   chroma_data:
+  generated_artifacts:
+  caddy_data:
+  caddy_config:

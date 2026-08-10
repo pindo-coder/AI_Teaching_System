@@ -728,6 +728,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
           <div>
             <p class="eyebrow">{{ activeStage === 3 ? '03 · OUTLINE' : '04 · DELIVERABLES' }}</p>
             <h2>{{ activeStage === 3 ? '课纲草稿' : '生成教学成果' }}</h2>
+            <el-tag size="small" type="info">AI 生成内容 · 发布前须由教师核验</el-tag>
           </div>
         </template>
         <div v-if="outline" class="outline-document">

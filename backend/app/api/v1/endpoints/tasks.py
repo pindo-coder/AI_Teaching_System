@@ -5,7 +5,12 @@ from app.api.dependencies import get_current_user
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.common import ApiResponse
-from app.schemas.task import LearningEventCreate, TaskProgressSummary
+from app.schemas.task import (
+    LearningEventCreate,
+    LearningQuestionCreate,
+    LearningTelemetryCreate,
+    TaskProgressSummary,
+)
 from app.services.task_service import TaskService
 
 
@@ -18,5 +23,26 @@ def task_points(course_id: int, chapter_id: int, learning_stage: str, user: User
 
 
 @router.post("/events", response_model=ApiResponse[TaskProgressSummary])
-def record_event(payload: LearningEventCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[TaskProgressSummary]:
+def record_event(payload: LearningTelemetryCreate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[TaskProgressSummary]:
     return ApiResponse(message="学习行为已记录", data=TaskService(db).record(user.id, payload))
+
+
+@router.post("/questions", response_model=ApiResponse[TaskProgressSummary])
+def submit_learning_question(
+    payload: LearningQuestionCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TaskProgressSummary]:
+    """Persist the student's actual question before awarding task evidence."""
+
+    event = LearningEventCreate(
+        course_id=payload.course_id,
+        chapter_id=payload.chapter_id,
+        learning_stage=payload.learning_stage,
+        event_type="question_submitted",
+        event_data={"count": 1, "content": payload.content.strip()},
+    )
+    return ApiResponse(
+        message="学习问题已提交",
+        data=TaskService(db).record(user.id, event),
+    )

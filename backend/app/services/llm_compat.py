@@ -35,6 +35,12 @@ def clean_model_text(value: object) -> str:
     if not text:
         return ""
 
+    # 部分推理模型会把内部思考过程放在 think/reasoning 标签中。该内容既不应
+    # 展示给用户，也不能进入 Agent 执行记录。闭合标签和只有起始标签的异常
+    # 响应都要处理，避免本地模型协议不完整时泄漏推理文本。
+    text = re.sub(r"<(?:think|reasoning)>.*?</(?:think|reasoning)>\s*", "", text, flags=re.I | re.S)
+    text = re.sub(r"^\s*<(?:think|reasoning)>.*$", "", text, flags=re.I | re.S)
+
     # 兼容服务把换行作为字面量 ``\\n`` 返回的情况；仅在答案明显以
     # 会话角色开头时转换，避免误伤普通正文中的转义内容。
     probe = text.lstrip().lower()
