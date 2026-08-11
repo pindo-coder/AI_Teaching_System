@@ -59,7 +59,7 @@ export interface AuthoritySource {
   name: string
   domain: string
   source_level: 'A' | 'B' | 'C' | 'D'
-  adapter_type: 'html_list' | 'rss' | 'sitemap'
+  adapter_type: 'html_list' | 'rss' | 'sitemap' | 'single_article'
   entry_url: string
   fetch_interval_minutes: number
   request_interval_seconds: number
@@ -181,6 +181,7 @@ export interface PolicyChange {
   old_excerpt: string
   new_excerpt: string
   similarity_score: number
+  evidence_confidence: number
   importance: 'high' | 'medium' | 'low'
   alert_recommended: boolean
   review_status: 'pending' | 'confirmed' | 'dismissed' | 'observed'

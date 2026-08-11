@@ -193,9 +193,12 @@ async function analyze() {
 async function reviewChange(change: PolicyChange, action: 'confirm' | 'dismiss' | 'observe') {
   try {
     const response = await knowledgeApi.reviewPolicyChange(change.id, { action })
-    const syncStatus = response.data.data.kb_sync_status
+    const reviewedChange = response.data.data
+    const syncStatus = reviewedChange.kb_sync_status
     ElMessage.success(action === 'confirm'
-      ? (syncStatus === 'synced' ? '已确认、重建索引并提醒相关教师' : '已确认，候选材料发布后将自动同步')
+      ? (syncStatus === 'synced'
+          ? (reviewedChange.alert_recommended ? '已确认、重建索引并提醒相关教师' : '已确认并同步；该证据不会作为重要提醒')
+          : '已确认，候选材料发布后将自动同步')
       : action === 'observe' ? '已加入观察' : '已标记为误判')
     await loadPolicyChanges(selectedCandidate.value?.id || null)
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '政策变化审核失败')) }
@@ -311,6 +314,7 @@ function jobChipStatus(job: DiscoveryJob) {
 }
 function importanceLabel(level: string) { return ({ high: '重要', medium: '重点', observe: '观察' } as Record<string, string>)[level] || '待评估' }
 function changeSuggestion(change: PolicyChange) {
+  if (!change.alert_recommended && change.importance === 'low') return '建议人工核对'
   if (change.change_type.includes('新增') || change.similarity_score < 0.35) return '建议补充知识点'
   if (change.old_document_id || change.old_chapter_id) return '建议修订既有表述'
   return '建议加入教学案例'
@@ -448,18 +452,18 @@ watch(() => route.hash, () => { void focusCandidatePool() })
           <section class="association-panel">
             <div class="panel-heading"><div><p class="eyebrow">SCOPE & EVIDENCE</p><h4>教材关联与政策变化</h4></div><div class="analysis-actions"><StatusChip :label="candidateAnalysisState.label" :status="candidateAnalysisState.status" /><el-button size="small" :loading="running" @click="analyze">{{ candidateAnalysisState.retry ? '重试分析' : '重新分析' }}</el-button></div></div>
             <div class="association-summary">
-              <span>建议置信度 {{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</span>
+              <span>章节匹配置信度 {{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</span>
               <span>{{ selectedCandidate.suggested_chapter_ids?.length || 0 }} 个专题</span>
               <span>{{ policyChanges.length }} 条原文差异</span>
             </div>
             <p class="association-reason">{{ selectedCandidate.association_reason || '尚未完成自动关联，请点击重新分析。' }}</p>
             <div v-if="policyChanges.length" class="change-list">
               <article v-for="change in policyChanges" :key="change.id" class="change-item">
-                <div class="change-title"><div><strong>{{ change.change_type }}</strong><small>{{ changeSuggestion(change) }}</small></div><StatusChip :label="change.importance === 'high' ? '建议提醒' : change.importance === 'medium' ? '重点关注' : '观察'" :status="change.importance === 'high' ? 'danger' : 'info'" /></div>
-                <p class="change-source">旧依据：{{ change.old_source_title || '教材原文' }} · 相似度 {{ Math.round(change.similarity_score * 100) }}%</p>
-                <div class="evidence-grid"><div><small>既有原文</small><blockquote>{{ change.old_excerpt }}</blockquote></div><div><small>新材料原文</small><blockquote>{{ change.new_excerpt }}</blockquote></div></div>
+                <div class="change-title"><div><strong>{{ change.change_type }}</strong><small>{{ changeSuggestion(change) }}</small></div><StatusChip :label="change.alert_recommended ? '建议提醒' : change.importance === 'high' || change.importance === 'medium' ? '重点关注' : '观察'" :status="change.alert_recommended ? 'danger' : 'info'" /></div>
+                <p class="change-source">旧依据：{{ change.old_source_title || '教材原文' }} · 证据置信度 {{ Math.round(change.evidence_confidence * 100) }}% · 字面相似度 {{ Math.round(change.similarity_score * 100) }}%</p>
+                <div class="evidence-grid"><div><small>既有原文</small><blockquote>{{ change.old_excerpt || '该专题既有材料中未找到可比表述' }}</blockquote></div><div><small>新材料原文</small><blockquote>{{ change.new_excerpt }}</blockquote></div></div>
                 <p class="change-explanation">{{ change.ai_explanation }}</p>
-                <div v-if="change.review_status === 'pending'" class="change-actions"><el-button size="small" type="success" @click="reviewChange(change, 'confirm')">确认并提醒教师</el-button><el-button size="small" @click="reviewChange(change, 'observe')">加入观察</el-button><el-button size="small" text type="danger" @click="reviewChange(change, 'dismiss')">误判</el-button></div>
+                <div v-if="change.review_status === 'pending'" class="change-actions"><el-button size="small" type="success" @click="reviewChange(change, 'confirm')">{{ change.alert_recommended ? '确认并提醒教师' : '确认变化' }}</el-button><el-button size="small" @click="reviewChange(change, 'observe')">加入观察</el-button><el-button size="small" text type="danger" @click="reviewChange(change, 'dismiss')">误判</el-button></div>
                 <div v-else class="reviewed-label">
                   <span>{{ change.review_status === 'confirmed' ? '已确认' : change.review_status === 'observed' ? '观察中' : '已忽略' }}</span>
                   <span v-if="change.review_status === 'confirmed'" class="sync-state">知识库：{{ change.kb_sync_status === 'synced' ? '已同步' : change.kb_sync_status === 'waiting_publish' ? '待发布材料' : change.kb_sync_status === 'failed' ? '同步失败' : '处理中' }}</span>
@@ -495,7 +499,7 @@ watch(() => route.hash, () => { void focusCandidatePool() })
       <el-form label-position="top">
         <div class="source-form-grid"><el-form-item label="来源名称"><el-input v-model="sourceForm.name" /></el-form-item><el-form-item label="白名单域名"><el-input v-model="sourceForm.domain" :disabled="Boolean(editingSourceId)" placeholder="例如 gov.cn" /></el-form-item></div>
         <el-form-item label="栏目入口（必须为 HTTPS 且属于白名单域名）"><el-input v-model="sourceForm.entry_url" /></el-form-item>
-        <div class="source-form-grid"><el-form-item label="来源级别"><el-select v-model="sourceForm.source_level"><el-option v-for="level in ['A','B','C','D']" :key="level" :label="sourceLevelLabel(level)" :value="level" /></el-select></el-form-item><el-form-item label="适配器"><el-select v-model="sourceForm.adapter_type"><el-option label="HTML 列表页" value="html_list" /><el-option label="RSS" value="rss" /><el-option label="Sitemap" value="sitemap" /></el-select></el-form-item></div>
+        <div class="source-form-grid"><el-form-item label="来源级别"><el-select v-model="sourceForm.source_level"><el-option v-for="level in ['A','B','C','D']" :key="level" :label="sourceLevelLabel(level)" :value="level" /></el-select></el-form-item><el-form-item label="适配器"><el-select v-model="sourceForm.adapter_type"><el-option label="HTML 列表页" value="html_list" /><el-option label="单篇权威原文" value="single_article" /><el-option label="RSS" value="rss" /><el-option label="Sitemap" value="sitemap" /></el-select></el-form-item></div>
         <div class="source-form-grid"><el-form-item label="检查周期（分钟）"><el-input-number v-model="sourceForm.fetch_interval_minutes" :min="5" :max="10080" /></el-form-item><el-form-item label="请求间隔（秒）"><el-input-number v-model="sourceForm.request_interval_seconds" :min="1" :max="60" /></el-form-item></div>
         <el-space wrap><el-checkbox v-model="sourceForm.allow_full_text">允许抓取全文</el-checkbox><el-checkbox v-model="sourceForm.allow_alert">允许生成提醒</el-checkbox><el-checkbox v-model="sourceForm.is_enabled">立即启用</el-checkbox></el-space>
       </el-form>

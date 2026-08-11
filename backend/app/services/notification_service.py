@@ -47,7 +47,12 @@ class NotificationService:
             return []
         course_ids = list(dict.fromkeys(change.affected_course_ids or candidate.course_ids or []))
         chapter_ids = list(dict.fromkeys(change.affected_chapter_ids or candidate.chapter_ids or []))
-        level = "urgent" if change.importance == "high" and change.alert_recommended else (
+        qualified_alert = (
+            change.alert_recommended
+            and candidate.association_confidence >= float(settings.authority_matching_alert_score)
+            and change.evidence_confidence >= float(settings.authority_matching_alert_score)
+        )
+        level = "urgent" if change.importance == "high" and qualified_alert else (
             "important" if change.importance == "high" else ("normal" if change.importance == "medium" else "observe")
         )
         title = f"权威资料更新：{candidate.title[:80]}"
@@ -93,6 +98,11 @@ class NotificationService:
         action_url = f"/material-discovery?candidate={candidate.id}"
         created: list[TeachingNotification] = []
         admin_ids = self.db.scalars(select(User.id).where(User.role == "admin")).all()
+        has_alert_evidence = self.db.scalar(select(PolicyChange.id).where(
+            PolicyChange.candidate_id == candidate.id,
+            PolicyChange.alert_recommended.is_(True),
+            PolicyChange.evidence_confidence >= float(settings.authority_matching_alert_score),
+        ).limit(1)) is not None
         for user_id in admin_ids:
             exists = self.db.scalar(select(TeachingNotification).where(
                 TeachingNotification.recipient_user_id == user_id,
@@ -104,7 +114,14 @@ class NotificationService:
             item = TeachingNotification(
                 recipient_user_id=user_id,
                 notification_type="material_review",
-                level="important" if candidate.source_level == "A" else "normal",
+                level=(
+                    "important"
+                    if candidate.source_level == "A"
+                    and candidate.association_confidence >= float(settings.authority_matching_alert_score)
+                    and evidence_count > 0
+                    and has_alert_evidence
+                    else "normal"
+                ),
                 title=f"待审核权威材料：{candidate.title[:80]}",
                 content=f"系统已完成正文抓取和教材关联，并生成 {evidence_count} 条原文差异证据。发布前请核对来源、范围和新旧表述。",
                 course_ids=list(candidate.suggested_course_ids or []),
@@ -143,7 +160,9 @@ class NotificationService:
         resolved = 0
         now = utc_now()
         threshold = float(settings.authority_discovery_min_association_score)
+        retention = float(settings.authority_matching_candidate_retention_score)
         relevance_threshold = float(settings.authority_discovery_min_relevance_score)
+        relevance_retention = float(settings.authority_matching_candidate_relevance_score)
         for item in items:
             prefix = "/material-discovery?candidate="
             candidate_id = int(item.action_url.removeprefix(prefix)) if item.action_url and item.action_url.removeprefix(prefix).isdigit() else None
@@ -154,14 +173,23 @@ class NotificationService:
             if candidate is not None and candidate.status == "pending_review" and (
                 candidate.association_confidence < threshold or low_relevance
             ):
-                candidate.status = "filtered"
-                if low_relevance:
+                retainable_relevance = candidate.relevance_score == 0 or candidate.relevance_score >= relevance_retention
+                if (
+                    candidate.association_confidence >= retention
+                    and candidate.suggested_chapter_ids
+                    and retainable_relevance
+                ):
+                    candidate.status = "observed"
                     candidate.analysis_reason = (
-                        f"主题相关度 {candidate.relevance_score:.0%} 低于审核阈值 {relevance_threshold:.0%}，已自动过滤。"
+                        f"主题相关度 {candidate.relevance_score:.0%}、教材关联度 {candidate.association_confidence:.0%}；"
+                        "至少一项低于提醒审核阈值，已转入观察区且不会触发重要提醒。"
                     )
                 else:
+                    candidate.status = "filtered"
                     candidate.analysis_reason = (
-                        f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {threshold:.0%}，已自动过滤。"
+                        f"主题相关度 {candidate.relevance_score:.0%} 低于候选保留阈值，已自动过滤。"
+                        if low_relevance and not retainable_relevance
+                        else f"教材关联度 {candidate.association_confidence:.0%} 低于候选保留阈值，已自动过滤。"
                     )
             if candidate is None or candidate.status != "pending_review":
                 item.is_read = True

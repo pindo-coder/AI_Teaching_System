@@ -11,6 +11,7 @@ import math
 from pathlib import Path
 import re
 from threading import BoundedSemaphore, Event, Lock, Thread
+from typing import NamedTuple
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 import socket
 import time
@@ -33,7 +34,7 @@ from app.models.chapter import Chapter
 from app.models.course import Course
 from app.models.citation import DocumentPage, KnowledgeChunk
 from app.models.knowledge_document import KnowledgeDocument
-from app.models.material_scope import DocumentCourseScope
+from app.models.material_scope import DocumentChapterScope, DocumentCourseScope
 from app.models.user import User
 from app.models.teaching_notification import TeachingNotification
 from app.schemas.authority_discovery import (
@@ -46,10 +47,26 @@ from app.services.knowledge_service import KnowledgeService
 from app.services.notification_service import NotificationService
 from app.services.llm_compat import clean_model_text
 from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
+from app.services.material_matching_service import (
+    calibrated_sigmoid,
+    lexical_relevance,
+    normalize_rrf_scores,
+    open_source_matcher,
+    reciprocal_rank_fusion,
+)
 from app.rag.retriever import retrieve
 
 
 logger = get_logger(__name__)
+
+
+class _ReferenceSource(NamedTuple):
+    document_id: int | None
+    chapter_id: int | None
+    title: str
+    url: str | None
+    text: str
+    scope_level: str
 
 
 def _published_date_desc_nulls_last():
@@ -142,11 +159,26 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
+def _keyword_match_strength(keyword: str, text: str) -> float:
+    keyword_compact = re.sub(r"\s+", "", (keyword or "").lower())
+    text_compact = re.sub(r"\s+", "", (text or "").lower())
+    if not keyword_compact or not text_compact:
+        return 0.0
+    if keyword_compact in text_compact:
+        return 1.0
+    if len(keyword_compact) < 4:
+        return 0.0
+    keyword_grams = {keyword_compact[index:index + 2] for index in range(len(keyword_compact) - 1)}
+    text_grams = {text_compact[index:index + 2] for index in range(len(text_compact) - 1)}
+    coverage = len(keyword_grams & text_grams) / max(1, len(keyword_grams))
+    return coverage if coverage >= 0.55 else 0.0
+
+
 def _topic_match(title: str, url: str, keywords: list[str]) -> bool:
     if not keywords:
         return True
     haystack = f"{title} {url}".lower()
-    return any(keyword.lower() in haystack for keyword in keywords if keyword.strip())
+    return any(_keyword_match_strength(keyword, haystack) >= 0.55 for keyword in keywords if keyword.strip())
 
 
 def _estimate_content_quality(content: str) -> float:
@@ -176,11 +208,20 @@ def _score(title: str, content: str, keywords: list[str], source_level: str) -> 
         return 0.0, "本次为全量来源巡检，未设置单一主题词；相关性将依据教材关联度和教学重要度单独计算。"
     title_text = title.lower()
     content_text = content[:30000].lower()
-    title_hits = [keyword.strip() for keyword in keywords if keyword.strip() and keyword.lower() in title_text]
-    body_hits = [keyword.strip() for keyword in keywords if keyword.strip() and keyword.lower() in content_text]
+    title_strengths = {
+        keyword.strip(): _keyword_match_strength(keyword, title_text)
+        for keyword in keywords if keyword.strip()
+    }
+    body_strengths = {
+        keyword.strip(): _keyword_match_strength(keyword, content_text)
+        for keyword in keywords if keyword.strip()
+    }
+    title_hits = [keyword for keyword, strength in title_strengths.items() if strength > 0]
+    body_hits = [keyword for keyword, strength in body_strengths.items() if strength > 0]
     distinct_hits = list(dict.fromkeys([*title_hits, *body_hits]))
-    title_score = min(0.65, len(set(title_hits)) * 0.65)
-    body_score = min(0.35, len(set(body_hits)) * 0.12)
+    title_score = min(0.65, sum(title_strengths.values()) * 0.65)
+    # 正文明确命中主题时允许进入候选，后续仍需教材章节关联与证据门控。
+    body_score = min(0.60, sum(body_strengths.values()) * 0.58)
     relevance = min(1.0, title_score + body_score)
     reason = f"主题相关度：标题命中{len(set(title_hits))}项，正文命中{len(set(body_hits))}项（{'、'.join(distinct_hits) if distinct_hits else '无'}）。来源等级 {source_level} 单独用于权威性排序。"
     return round(relevance, 4), reason
@@ -198,6 +239,15 @@ def _importance_score(*, source_level: str, relevance: float, association: float
     # 正文证据不足时不允许仅凭标题给出“重要”结论。
     if evidence_weight < 0.35:
         score = round(score * 0.75, 4)
+    review_worthy = association >= float(settings.authority_discovery_min_association_score) and (
+        relevance == 0 or relevance >= float(settings.authority_discovery_min_relevance_score)
+    )
+    alert_worthy = review_worthy and association >= float(settings.authority_matching_alert_score)
+    # 教学重要度不得绕过主题/章节匹配门槛，否则高权威来源会产生假紧急提示。
+    if not review_worthy:
+        score = min(score, 0.59)
+    elif not alert_worthy:
+        score = min(score, 0.74)
     level = "high" if score >= 0.75 else "medium" if score >= 0.60 else "observe"
     reason = f"来源权威性{source_weight:.0%}；政策文件特征{policy_weight:.0%}；正文证据{evidence_weight:.0%}；教材关联{association:.0%}。"
     return score, level, reason
@@ -261,6 +311,10 @@ def _fetch_source_bytes(
 
 
 def _read_listing(source: AuthoritySourceRegistry) -> list[tuple[str, str]]:
+    if source.adapter_type == "single_article":
+        # 已知权威原文也要经过同一套 HTTPS/域名校验、正文提取、
+        # 去重、教材匹配与审核流程；这里只跳过“从列表页找链接”。
+        return [(source.entry_url, source.name)]
     body, final_url, response_headers, encoding = _fetch_source_bytes(
         source, source.entry_url, limit=5 * 1024 * 1024,
     )
@@ -466,7 +520,9 @@ class AuthorityDiscoveryService:
 
     def _normalize_pending_candidates(self) -> int:
         threshold = float(settings.authority_discovery_min_association_score)
+        retention = float(settings.authority_matching_candidate_retention_score)
         relevance_threshold = float(settings.authority_discovery_min_relevance_score)
+        relevance_retention = float(settings.authority_matching_candidate_relevance_score)
         low_association = list(self.db.scalars(select(MaterialCandidate).where(
             MaterialCandidate.status == "pending_review",
             or_(
@@ -480,14 +536,24 @@ class AuthorityDiscoveryService:
         if low_association:
             notifications = NotificationService(self.db)
             for candidate in low_association:
-                candidate.status = "filtered"
-                if 0 < candidate.relevance_score < relevance_threshold:
+                weak_relevance = 0 < candidate.relevance_score < relevance_threshold
+                retainable_relevance = candidate.relevance_score == 0 or candidate.relevance_score >= relevance_retention
+                if (
+                    candidate.association_confidence >= retention
+                    and candidate.suggested_chapter_ids
+                    and retainable_relevance
+                ):
+                    candidate.status = "observed"
                     candidate.analysis_reason = (
-                        f"主题相关度 {candidate.relevance_score:.0%} 低于审核阈值 {relevance_threshold:.0%}，已自动过滤。"
+                        f"主题相关度 {candidate.relevance_score:.0%}、教材关联度 {candidate.association_confidence:.0%}；"
+                        "至少一项低于提醒审核阈值，但已达到网页候选保留阈值，转入观察区且不会触发重要提醒。"
                     )
                 else:
+                    candidate.status = "filtered"
                     candidate.analysis_reason = (
-                        f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {threshold:.0%}，已自动过滤。"
+                        f"主题相关度 {candidate.relevance_score:.0%} 低于候选保留阈值，已自动过滤。"
+                        if weak_relevance and not retainable_relevance
+                        else f"教材关联度 {candidate.association_confidence:.0%} 低于候选保留阈值，已自动过滤。"
                     )
                 notifications.resolve_candidate_review_notifications(candidate.id, commit=False)
             self.db.commit()
@@ -512,7 +578,7 @@ class AuthorityDiscoveryService:
         }
         high_priority = int(self.db.scalar(select(func.count(MaterialCandidate.id)).where(
             MaterialCandidate.status == "pending_review",
-            or_(MaterialCandidate.importance_level == "high", MaterialCandidate.source_level == "A"),
+            MaterialCandidate.importance_level == "high",
         )) or 0)
         return {
             "pending_review": counts["pending_review"],
@@ -752,6 +818,27 @@ class AuthorityDiscoveryService:
         chunks = re.split(r"\n+|(?<=[。！？；])\s*", value or "")
         return [" ".join(chunk.split()).strip()[:1200] for chunk in chunks if len(cls._compact(chunk)) >= 12]
 
+    @classmethod
+    def _association_query(cls, title: str, content: str) -> str:
+        """压缩长篇权威材料，避免通用套话淹没标题与政策命题。"""
+        title = " ".join((title or "").split()).strip()
+        title_grams = cls._grams(title)
+        policy_words = (
+            "提出", "要求", "强调", "坚持", "完善", "健全", "推进", "实施",
+            "规划", "决定", "意见", "办法", "条例", "法治", "教育", "建设",
+        )
+        ranked: list[tuple[float, int, str]] = []
+        for index, paragraph in enumerate(cls._paragraphs(content)):
+            grams = cls._grams(paragraph)
+            title_overlap = len(title_grams & grams) / max(1, len(title_grams))
+            policy_hits = sum(1 for word in policy_words if word in paragraph)
+            score = title_overlap * 2.0 + min(3, policy_hits) * 0.35 + (0.25 if index < 3 else 0)
+            ranked.append((score, -index, paragraph))
+        ranked.sort(reverse=True)
+        selected = [paragraph for _, _, paragraph in ranked[:10]]
+        # 标题重复一次是明确的检索意图权重，不让抓取正文长度决定主题。
+        return "\n".join([title, title, *selected])[:7000]
+
     def _candidate_text(self, candidate: MaterialCandidate) -> str:
         snapshot = self.db.scalar(select(MaterialSnapshot).where(
             MaterialSnapshot.candidate_id == candidate.id,
@@ -818,8 +905,9 @@ class AuthorityDiscoveryService:
 
     def associate_candidate(self, candidate_id: int) -> MaterialCandidate:
         candidate = self.require_candidate(candidate_id)
-        source = f"{candidate.title}\n{self._candidate_text(candidate)}"
-        source_compact, source_grams = self._compact(source), self._grams(source)
+        candidate_text = self._candidate_text(candidate)
+        source = self._association_query(candidate.title, candidate_text)
+        source_compact = self._compact(source)
         rows = list(self.db.execute(select(Chapter, Course).join(Course, Course.id == Chapter.course_id)).all())
         chunk_texts: dict[int, list[str]] = defaultdict(list)
         for chapter_id, content in self.db.execute(
@@ -833,11 +921,32 @@ class AuthorityDiscoveryService:
         ).all():
             if chapter_id and content and len(chunk_texts[chapter_id]) < 24:
                 chunk_texts[chapter_id].append(content)
-        targets = [
-            f"{course.name}\n{chapter.title}\n{chapter.content or ''}\n{' '.join(chunk_texts.get(chapter.id, []))}"
-            for chapter, course in rows
-        ]
-        bm25_scores = self._bm25(source[:24000], targets)
+        targets = []
+        evidence_texts: dict[int, str] = {}
+        lexical_scores: dict[int, float] = {}
+        for chapter, course in rows:
+            chunks = chunk_texts.get(chapter.id, [])
+            target = f"{course.name}\n{chapter.title}\n{chapter.content or ''}\n{' '.join(chunks)}"
+            targets.append(target)
+            evidence_candidates = [chapter.content or "", *chunks]
+            evidence_candidates = sorted(
+                (item for item in evidence_candidates if item),
+                key=lambda item: lexical_relevance(source, item),
+                reverse=True,
+            )
+            evidence_texts[chapter.id] = (
+                f"{course.name}\n{chapter.title}\n" + "\n".join(evidence_candidates[:3])
+            )[:3600]
+            lexical = max(
+                [lexical_relevance(source, f"{course.name}\n{chapter.title}"), *[
+                    lexical_relevance(source, item) for item in evidence_candidates[:6]
+                ]],
+                default=0.0,
+            )
+            if self._compact(chapter.title) and self._compact(chapter.title) in source_compact:
+                lexical = max(lexical, 0.85)
+            lexical_scores[chapter.id] = lexical
+        bm25_scores = self._bm25(source, targets)
         vector_boosts: dict[int, float] = defaultdict(float)
         # 向量服务不可用时自动退回 BM25/原文规则，不让后台发现任务整体失败。
         for course_id in dict.fromkeys(course.id for _, course in rows):
@@ -848,107 +957,333 @@ class AuthorityDiscoveryService:
                         vector_boosts[chapter_id] = max(vector_boosts[chapter_id], float(result.score))
             except Exception:
                 continue
+        by_id = {chapter.id: (course, chapter, index) for index, (chapter, course) in enumerate(rows)}
+        bm25_ranking = [
+            chapter.id for chapter, _ in sorted(
+                rows,
+                key=lambda item: bm25_scores[by_id[item[0].id][2]],
+                reverse=True,
+            )
+            if bm25_scores[by_id[chapter.id][2]] > 0
+        ]
+        vector_ranking = [item[0] for item in sorted(vector_boosts.items(), key=lambda item: item[1], reverse=True)]
+        lexical_ranking = [
+            item[0] for item in sorted(lexical_scores.items(), key=lambda item: item[1], reverse=True)
+            if item[1] > 0
+        ]
+        channel_weights = {"bm25": 1.0, "vector": 1.0, "lexical": 0.8}
+        rrf_raw = reciprocal_rank_fusion(
+            {"bm25": bm25_ranking, "vector": vector_ranking, "lexical": lexical_ranking},
+            weights=channel_weights,
+        )
+        rrf_scores = normalize_rrf_scores(rrf_raw, channel_weights=channel_weights.values())
+        retrieval_ids = sorted(rrf_raw, key=lambda item: rrf_raw[item], reverse=True)[:20]
+        retrieval_rows: list[tuple[float, Course, Chapter]] = []
+        deterministic_scores: dict[int, float] = {}
+        for chapter_id in retrieval_ids:
+            course, chapter, index = by_id[chapter_id]
+            deterministic = (
+                lexical_scores[chapter_id] * 0.40
+                + bm25_scores[index] * 0.25
+                + vector_boosts[chapter_id] * 0.20
+                + rrf_scores.get(chapter_id, 0.0) * 0.15
+            )
+            deterministic_scores[chapter_id] = max(0.0, min(1.0, deterministic))
+            retrieval_rows.append((deterministic_scores[chapter_id], course, chapter))
+
+        reranker_scores = open_source_matcher.rerank([
+            (source[:4200], evidence_texts[item[2].id]) for item in retrieval_rows
+        ])
+        reranker_used = bool(retrieval_rows) and reranker_scores is not None
         scored: list[tuple[float, Course, Chapter]] = []
-        for index, (chapter, course) in enumerate(rows):
-            target = targets[index]
-            target_grams = self._grams(target[:18000])
-            overlap = len(source_grams & target_grams) / max(1, min(len(source_grams), len(target_grams)))
-            title_hit = 0.22 if self._compact(chapter.title) in source_compact else 0
-            course_hit = 0.08 if self._compact(course.name) in source_compact else 0
-            score = bm25_scores[index] * 0.44 + overlap * 0.22 + vector_boosts[chapter.id] * 0.24 + title_hit + course_hit
-            scored.append((min(1.0, score), course, chapter))
+        for index, (deterministic, course, chapter) in enumerate(retrieval_rows):
+            if reranker_used:
+                reranker = reranker_scores[index]
+                raw_match = (
+                    reranker * 0.70
+                    + lexical_scores[chapter.id] * 0.15
+                    + bm25_scores[by_id[chapter.id][2]] * 0.10
+                    + rrf_scores.get(chapter.id, 0.0) * 0.05
+                )
+                if reranker < float(settings.authority_matching_reranker_threshold):
+                    continue
+            else:
+                raw_match = deterministic
+                # 低门槛只决定是否保留候选；审核与告警由后续独立高阈值控制。
+                if raw_match < float(settings.authority_matching_min_raw_score):
+                    continue
+            confidence = calibrated_sigmoid(raw_match, midpoint=0.50, steepness=7.0)
+            scored.append((confidence, course, chapter))
         scored.sort(key=lambda item: item[0], reverse=True)
-        selected = [item for item in scored if item[0] >= 0.12][:8] or scored[:3]
-        semantic = self._semantic_association_review(source, selected)
+        preliminary = scored[:8]
+        semantic = self._semantic_association_review(source, preliminary)
         semantic_reason = ""
         if semantic is not None:
-            semantic_ids, semantic_confidence, semantic_reason = semantic
-            if semantic_ids:
-                by_id = {item[2].id: item for item in selected}
-                selected = [by_id[item] for item in semantic_ids if item in by_id]
-                candidate.association_confidence = round(semantic_confidence, 4)
+            _, _, semantic_reason = semantic
+        # 生成式模型只辅助解释，不再删除已通过可复现匹配门槛的网页候选。
+        selected = preliminary
+        selected = selected[:int(settings.authority_matching_max_chapters)]
         candidate.suggested_course_ids = list(dict.fromkeys(item[1].id for item in selected))
         candidate.suggested_chapter_ids = list(dict.fromkeys(item[2].id for item in selected))
         candidate.suggested_knowledge_tags = re.findall(r"[\u4e00-\u9fff]{2,12}", candidate.title)[:8]
-        if semantic is None or not semantic[0]:
-            candidate.association_confidence = round(min(1.0, (selected[0][0] if selected else 0) * 1.25), 4)
+        candidate.association_confidence = round(selected[0][0] if selected else 0.0, 4)
         importance, importance_level, importance_reason = _importance_score(
             source_level=candidate.source_level,
             relevance=candidate.relevance_score,
             association=candidate.association_confidence,
             freshness=candidate.freshness_score,
             title=candidate.title,
-            content=source,
+            content=candidate_text,
             novelty=candidate.novelty_score,
         )
         candidate.importance_score = importance
         candidate.importance_level = importance_level
         candidate.importance_reason = importance_reason
-        labels = [f"{course.name}·{chapter.title}（{score:.0%}）" for score, course, chapter in selected[:5]]
-        method = "混合召回并经大模型受约束复核" if semantic is not None and semantic[0] else "教材全文 BM25、向量召回、标题命中与正文重叠的混合评分"
-        candidate.association_reason = f"基于{method}，建议范围（仅供管理员确认）：" + ("；".join(labels) if labels else "暂无可匹配专题") + (f"。语义复核说明：{semantic_reason}" if semantic_reason else "")
+        labels = [f"{course.name}·{chapter.title}（章节置信度 {score:.0%}）" for score, course, chapter in selected]
+        method_parts = ["BM25/向量/词项召回的 RRF 融合"]
+        if reranker_used:
+            method_parts.append("BGE Cross-Encoder 精排")
+        else:
+            method_parts.append("确定性相关性降级")
+        if semantic is not None:
+            method_parts.append("大模型受约束辅助说明")
+        candidate.association_reason = (
+            f"基于{'、'.join(method_parts)}，建议范围（仅供管理员确认）："
+            + ("；".join(labels) if labels else "未发现达到阈值的教材专题")
+            + (f"。语义复核说明：{semantic_reason}" if semantic_reason else "")
+        )
         self.db.commit(); self.db.refresh(candidate)
         return candidate
 
-    def _reference_sources(self, candidate: MaterialCandidate) -> list[tuple[int | None, int | None, str, str | None, str]]:
+    def _reference_sources(self, candidate: MaterialCandidate) -> list[_ReferenceSource]:
         course_ids, chapter_ids = list(candidate.suggested_course_ids or []), list(candidate.suggested_chapter_ids or [])
-        output: list[tuple[int | None, int | None, str, str | None, str]] = []
+        output: list[_ReferenceSource] = []
         for chapter in self.db.scalars(select(Chapter).where(Chapter.id.in_(chapter_ids))).all() if chapter_ids else []:
-            if chapter.content:
+            textbook_chunks = list(self.db.scalars(select(KnowledgeChunk.content).join(
+                KnowledgeDocument, KnowledgeDocument.id == KnowledgeChunk.document_id,
+            ).where(
+                KnowledgeDocument.material_type == "textbook",
+                KnowledgeDocument.is_active.is_(True),
+                KnowledgeChunk.chapter_id == chapter.id,
+            ).order_by(KnowledgeChunk.chunk_index).limit(80)).all())
+            textbook_text = "\n".join([chapter.content or "", *textbook_chunks]).strip()
+            if textbook_text:
                 course = self.db.get(Course, chapter.course_id)
-                output.append((None, chapter.id, f"{course.name if course else '教材'}·{chapter.title}", None, chapter.content))
-        if course_ids:
+                output.append(_ReferenceSource(
+                    None, chapter.id, f"{course.name if course else '教材'}·{chapter.title}",
+                    None, textbook_text, "chapter",
+                ))
+        exact_document_ids: set[int] = set()
+        if chapter_ids:
             docs = self.db.scalars(select(KnowledgeDocument).outerjoin(
+                DocumentChapterScope, DocumentChapterScope.document_id == KnowledgeDocument.id,
+            ).where(
+                KnowledgeDocument.material_type == "central", KnowledgeDocument.review_status == "published",
+                KnowledgeDocument.is_active.is_(True),
+                or_(
+                    KnowledgeDocument.chapter_id.in_(chapter_ids),
+                    and_(
+                        DocumentChapterScope.chapter_id.in_(chapter_ids),
+                        DocumentChapterScope.confirmed.is_(True),
+                    ),
+                ),
+            ).distinct().order_by(*_published_date_desc_nulls_last()).limit(20)).all()
+            for document in docs:
+                text = self._document_text(document)
+                if text:
+                    exact_document_ids.add(document.id)
+                    scoped_chapter_id = document.chapter_id or self.db.scalar(select(
+                        DocumentChapterScope.chapter_id
+                    ).where(
+                        DocumentChapterScope.document_id == document.id,
+                        DocumentChapterScope.chapter_id.in_(chapter_ids),
+                        DocumentChapterScope.confirmed.is_(True),
+                    ).order_by(DocumentChapterScope.id))
+                    output.append(_ReferenceSource(
+                        document.id, scoped_chapter_id, document.source_title,
+                        document.source_url, text, "chapter",
+                    ))
+        if course_ids:
+            # 兼容旧版只有课程作用域的中央材料，但必须由 Cross-Encoder 在文档级复核；
+            # 模型不可用时直接舍弃课程级候选，避免跨章节误配。
+            course_docs = self.db.scalars(select(KnowledgeDocument).outerjoin(
                 DocumentCourseScope, DocumentCourseScope.document_id == KnowledgeDocument.id,
             ).where(
                 KnowledgeDocument.material_type == "central", KnowledgeDocument.review_status == "published",
                 KnowledgeDocument.is_active.is_(True),
                 or_(
                     KnowledgeDocument.course_id.in_(course_ids),
-                    (DocumentCourseScope.course_id.in_(course_ids) & DocumentCourseScope.confirmed.is_(True)),
+                    and_(
+                        DocumentCourseScope.course_id.in_(course_ids),
+                        DocumentCourseScope.confirmed.is_(True),
+                    ),
                 ),
             ).distinct().order_by(*_published_date_desc_nulls_last()).limit(20)).all()
-            for document in docs:
+            course_candidates: list[tuple[KnowledgeDocument, str]] = []
+            for document in course_docs:
+                if document.id in exact_document_ids:
+                    continue
                 text = self._document_text(document)
                 if text:
-                    output.append((document.id, document.chapter_id, document.source_title, document.source_url, text))
+                    course_candidates.append((document, text))
+            query = self._association_query(candidate.title, self._candidate_text(candidate))
+            course_scores = open_source_matcher.rerank([
+                (query[:4200], f"{document.source_title}\n{text[:3600]}")
+                for document, text in course_candidates
+            ])
+            if course_scores is not None:
+                for (document, text), score in zip(course_candidates, course_scores, strict=True):
+                    if score >= float(settings.authority_matching_reranker_threshold):
+                        output.append(_ReferenceSource(
+                            document.id, document.chapter_id, document.source_title,
+                            document.source_url, text, "course",
+                        ))
         return output
 
     def detect_policy_changes(self, candidate_id: int) -> list[PolicyChange]:
         candidate = self.require_candidate(candidate_id)
-        new_parts = self._paragraphs(self._candidate_text(candidate))
+        candidate_text = self._candidate_text(candidate)
+        new_parts = self._paragraphs(candidate_text)
+        policy_words = ("决定", "意见", "通知", "报告", "部署", "规划", "实施", "会议", "讲话", "条例", "要求", "坚持", "推进")
+        title_grams = self._grams(candidate.title)
+        new_parts = sorted(
+            new_parts,
+            key=lambda part: (
+                sum(1 for word in policy_words if word in part) * 2
+                + len(self._grams(part) & title_grams) / max(1, len(title_grams))
+                + min(1.0, len(self._compact(part)) / 240)
+            ),
+            reverse=True,
+        )[:40]
         self.db.execute(delete(PolicyChange).where(PolicyChange.candidate_id == candidate.id, PolicyChange.review_status == "pending"))
-        ranked: list[tuple[float, tuple, str, str, float]] = []
-        for reference in self._reference_sources(candidate):
-            old_parts = self._paragraphs(reference[4])
-            for new_part in new_parts:
-                if not old_parts:
+        references = self._reference_sources(candidate)
+        old_records: list[tuple[_ReferenceSource, str]] = []
+        for reference in references:
+            old_records.extend((reference, part) for part in self._paragraphs(reference.text))
+
+        pair_records: list[tuple[int, str, _ReferenceSource, str, float]] = []
+        for new_index, new_part in enumerate(new_parts):
+            lexical_ranked = sorted(
+                (
+                    (lexical_relevance(new_part, old_part), reference, old_part)
+                    for reference, old_part in old_records
+                ),
+                key=lambda item: item[0],
+                reverse=True,
+            )
+            selected_pairs = lexical_ranked[:12]
+            # 确保每个章节级来源至少有一个机会进入 Cross-Encoder，避免同义改写被纯词项漏掉。
+            selected_keys = {(reference.document_id, reference.chapter_id, old_part) for _, reference, old_part in selected_pairs}
+            for reference in references:
+                if reference.scope_level != "chapter":
                     continue
-                best = max(old_parts, key=lambda old: SequenceMatcher(None, self._compact(new_part), self._compact(old)).ratio())
-                ratio = SequenceMatcher(None, self._compact(new_part), self._compact(best)).ratio()
-                if ratio < 0.92:
-                    ranked.append((len(self._compact(new_part)) * (1 - ratio), reference, best, new_part, ratio))
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        changes: list[PolicyChange] = []
-        seen: set[tuple[int | None, int | None, str]] = set()
-        for _, reference, old_excerpt, new_excerpt, ratio in ranked:
-            old_document_id, old_chapter_id, old_title, old_url, _ = reference
-            key = (old_document_id, old_chapter_id, self._compact(new_excerpt)[:160])
-            if key in seen:
+                local = [item for item in lexical_ranked if item[1] == reference]
+                if local:
+                    key = (local[0][1].document_id, local[0][1].chapter_id, local[0][2])
+                    if key not in selected_keys:
+                        selected_pairs.append(local[0]); selected_keys.add(key)
+            pair_records.extend(
+                (new_index, new_part, reference, old_part, lexical)
+                for lexical, reference, old_part in selected_pairs
+                if lexical > 0
+            )
+
+        reranker_scores = open_source_matcher.rerank([
+            (new_part, old_part) for _, new_part, _, old_part, _ in pair_records
+        ])
+        eligible: list[tuple[float, int, str, _ReferenceSource, str, float, float]] = []
+        for index, (new_index, new_part, reference, old_part, lexical) in enumerate(pair_records):
+            if reranker_scores is not None:
+                topic_score = reranker_scores[index]
+                if topic_score < float(settings.authority_matching_reranker_threshold):
+                    continue
+            else:
+                # 无模型时采用高精度字符二元组门槛，课程级材料已在来源阶段被排除。
+                if lexical < 0.16:
+                    continue
+                topic_score = min(1.0, lexical / 0.42)
+            ratio = SequenceMatcher(None, self._compact(new_part), self._compact(old_part)).ratio()
+            if ratio >= 0.92:
                 continue
-            seen.add(key)
-            policy_words = ("决定", "意见", "通知", "报告", "部署", "规划", "实施", "会议", "讲话")
-            high = candidate.source_level == "A" and (any(word in candidate.title for word in policy_words) or candidate.relevance_score >= 0.55)
-            change_type = "权威解释更新" if "解读" in candidate.title else ("重要会议精神" if any(word in candidate.title for word in ("会议", "讲话", "精神", "部署")) else ("新增重要表述" if ratio < 0.35 else "原有要求进一步强化"))
+            scope_score = 1.0 if reference.scope_level == "chapter" else 0.65
+            evidence_confidence = max(0.0, min(1.0,
+                topic_score * 0.72 + min(1.0, lexical / 0.42) * 0.18 + scope_score * 0.10
+            ))
+            policy_signal = min(1.0, sum(1 for word in policy_words if word in new_part) * 0.25 + 0.35)
+            change_magnitude = max(0.08, min(1.0, 1 - ratio))
+            evidence_rank = evidence_confidence * (0.65 + change_magnitude * 0.35) * (0.75 + policy_signal * 0.25)
+            eligible.append((evidence_rank, new_index, new_part, reference, old_part, ratio, evidence_confidence))
+
+        nli_predictions = open_source_matcher.nli([
+            (old_part, new_part) for _, _, new_part, _, old_part, _, _ in eligible
+        ])
+        best_by_new_part: dict[int, tuple[float, str, _ReferenceSource, str, float, float, str | None]] = {}
+        for index, (rank, new_index, new_part, reference, old_part, ratio, confidence) in enumerate(eligible):
+            nli_label: str | None = None
+            if nli_predictions is not None:
+                prediction = nli_predictions[index]
+                nli_label = prediction.label
+                if (
+                    prediction.probabilities.get("neutral", 0.0)
+                    >= float(settings.authority_matching_nli_neutral_threshold)
+                ):
+                    continue
+            current = best_by_new_part.get(new_index)
+            if current is None or rank > current[0]:
+                best_by_new_part[new_index] = (
+                    rank, new_part, reference, old_part, ratio, confidence, nli_label,
+                )
+
+        ranked = sorted(best_by_new_part.values(), key=lambda item: item[0], reverse=True)
+        changes: list[PolicyChange] = []
+        for _, new_excerpt, reference, old_excerpt, ratio, evidence_confidence, nli_label in ranked:
+            review_worthy = (
+                candidate.association_confidence >= float(settings.authority_discovery_min_association_score)
+                and (
+                    candidate.relevance_score == 0
+                    or candidate.relevance_score >= float(settings.authority_discovery_min_relevance_score)
+                )
+            )
+            high = (
+                candidate.source_level == "A"
+                and candidate.association_confidence >= float(settings.authority_matching_alert_score)
+                and evidence_confidence >= float(settings.authority_matching_alert_score)
+                and review_worthy
+                and (any(word in candidate.title for word in policy_words) or candidate.relevance_score >= 0.55)
+            )
+            stronger_words = ("必须", "全面", "深入", "加快", "进一步", "严格", "首要任务")
+            stronger = sum(word in new_excerpt for word in stronger_words) > sum(word in old_excerpt for word in stronger_words)
+            if "解读" in candidate.title:
+                change_type = "权威解释更新"
+            elif any(word in candidate.title for word in ("会议", "讲话", "精神", "部署")):
+                change_type = "会议精神更新"
+            elif nli_label == "contradiction":
+                change_type = "原有表述调整"
+            elif stronger and ratio >= 0.25:
+                change_type = "原有要求进一步强化"
+            elif ratio < 0.35:
+                change_type = "新增表述"
+            else:
+                change_type = "原有表述调整"
+            display_old_excerpt = "" if change_type == "新增表述" and ratio < 0.18 else old_excerpt
+            explanation_method = "BGE Cross-Encoder" if reranker_scores is not None else "确定性词项门控"
+            if nli_label:
+                explanation_method += f"、中文 NLI（{nli_label}）"
             change = PolicyChange(
-                candidate_id=candidate.id, old_document_id=old_document_id, old_chapter_id=old_chapter_id,
-                change_type=change_type, old_source_title=old_title, old_source_url=old_url,
+                candidate_id=candidate.id, old_document_id=reference.document_id, old_chapter_id=reference.chapter_id,
+                change_type=change_type, old_source_title=reference.title, old_source_url=reference.url,
                 new_source_title=candidate.title, new_source_url=candidate.source_url,
-                old_excerpt=old_excerpt[:4000], new_excerpt=new_excerpt[:4000], similarity_score=round(ratio, 4),
-                importance="high" if high or len(new_excerpt) > 180 else ("medium" if ratio < 0.5 else "low"),
-                alert_recommended=high or len(new_excerpt) > 180, review_status="pending",
+                old_excerpt=display_old_excerpt[:4000], new_excerpt=new_excerpt[:4000],
+                similarity_score=round(ratio, 4), evidence_confidence=round(evidence_confidence, 4),
+                importance="high" if high else (
+                    "medium" if review_worthy and evidence_confidence >= 0.55 else "low"
+                ),
+                alert_recommended=high, review_status="pending",
                 affected_course_ids=list(candidate.suggested_course_ids or []), affected_chapter_ids=list(candidate.suggested_chapter_ids or []),
-                ai_explanation=f"已将新材料与“{old_title}”的原文句段进行确定性比对；请以左右两侧原文为准，系统没有依据之外的推断。",
+                ai_explanation=(
+                    f"先按章节范围检索，再经{explanation_method}确认新旧句段属于同一政策主题；"
+                    "字面相似度只用于描述改动幅度，不参与主题相关性放行。请以原文为准。"
+                ),
             )
             self.db.add(change); changes.append(change)
             if len(changes) >= 3:
@@ -1253,7 +1588,7 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                         job.filtered_count += 1
                         continue
                     relevance, reason = _score(title, content, job.keywords, source.source_level)
-                    if job.keywords and relevance < float(settings.authority_discovery_min_relevance_score):
+                    if job.keywords and relevance < float(settings.authority_matching_candidate_relevance_score):
                         job.filtered_count += 1
                         continue
                     freshness = 1.0 if published_date and published_date >= date.today() - timedelta(days=30) else 0.4
@@ -1282,11 +1617,36 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
                         discovery_service = AuthorityDiscoveryService(db)
                         discovery_service.associate_candidate(candidate.id)
                         candidate = db.get(MaterialCandidate, candidate.id)
-                        if candidate.association_confidence < float(settings.authority_discovery_min_association_score):
-                            candidate.status = "filtered"
-                            candidate.analysis_reason = f"教材关联度 {candidate.association_confidence:.0%} 低于审核阈值 {settings.authority_discovery_min_association_score:.0%}，已自动过滤。"
-                            job.filtered_count += 1
+                        weak_association = candidate.association_confidence < float(settings.authority_discovery_min_association_score)
+                        weak_relevance = bool(
+                            candidate.relevance_score > 0
+                            and candidate.relevance_score < float(settings.authority_discovery_min_relevance_score)
+                        )
+                        if weak_association or weak_relevance:
+                            if (
+                                candidate.association_confidence >= float(settings.authority_matching_candidate_retention_score)
+                                and candidate.suggested_chapter_ids
+                                and (
+                                    candidate.relevance_score == 0
+                                    or candidate.relevance_score >= float(settings.authority_matching_candidate_relevance_score)
+                                )
+                            ):
+                                changes = discovery_service.detect_policy_changes(candidate.id)
+                                candidate.status = "observed"
+                                candidate.analysis_reason = (
+                                    f"{candidate.association_reason or reason} 主题或教材关联度低于提醒审核阈值，"
+                                    f"已保留到观察区并生成 {len(changes)} 条候选证据，不触发重要提醒。"
+                                )[:4000]
+                            else:
+                                candidate.status = "filtered"
+                                candidate.analysis_reason = (
+                                    f"主题相关度 {candidate.relevance_score:.0%} 低于候选保留阈值，已自动过滤。"
+                                    if weak_relevance and candidate.relevance_score < float(settings.authority_matching_candidate_relevance_score)
+                                    else f"教材关联度 {candidate.association_confidence:.0%} 低于候选保留阈值，已自动过滤。"
+                                )
+                                job.filtered_count += 1
                             db.commit()
+                            daily_fetch_count += 1
                             continue
                         discovery_service.detect_policy_changes(candidate.id)
                         candidate.status = "pending_review"
@@ -1316,9 +1676,15 @@ def _process_discovery_job(job_id: int, bind: Engine) -> None:
         if job.status == "failed":
             job.progress_stage = "执行失败"
         elif job.failed_count:
-            job.progress_stage = "部分成功，等待人工审核"
+            job.progress_stage = (
+                "部分成功，等待人工审核"
+                if job.pending_review_count else "部分成功，无待审核候选"
+            )
         elif not daily_limit_reached:
-            job.progress_stage = "等待人工审核"
+            job.progress_stage = (
+                "等待人工审核"
+                if job.pending_review_count else "处理完成，无待审核候选"
+            )
         if daily_limit_reached:
             job.error_message = f"已达到每日抓取上限 {daily_limit}，剩余来源将在下一次任务处理"
         job.finished_time = _now()

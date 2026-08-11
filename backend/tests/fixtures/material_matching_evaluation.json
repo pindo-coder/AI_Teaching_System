@@ -1,0 +1,24 @@
+[
+  {
+    "case_id": "law-regression",
+    "expected_chapter_ids": [9],
+    "predicted_chapter_ids": [9],
+    "evidence": [
+      {"is_correct": true, "is_cross_chapter": false}
+    ]
+  },
+  {
+    "case_id": "military-regression",
+    "expected_chapter_ids": [12],
+    "predicted_chapter_ids": [12],
+    "evidence": [
+      {"is_correct": true, "is_cross_chapter": false}
+    ]
+  },
+  {
+    "case_id": "unrelated-regression",
+    "expected_chapter_ids": [],
+    "predicted_chapter_ids": [],
+    "evidence": []
+  }
+]

@@ -5,19 +5,19 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.dialects import mysql
 
-from app.models.authority_discovery import MaterialCandidate, MaterialSnapshot, PolicyChange
+from app.models.authority_discovery import AuthoritySourceRegistry, MaterialCandidate, MaterialSnapshot, PolicyChange
 from app.models.chapter import Chapter
 from app.models.course import Course
 from app.models.citation import KnowledgeChunk
 from app.models.knowledge_document import KnowledgeDocument
-from app.models.material_scope import DocumentCourseScope
+from app.models.material_scope import DocumentChapterScope, DocumentCourseScope
 from app.models.user import User
 from app.models.teaching_notification import TeachingNotification
 from app.core.security import create_access_token
 from app.schemas.authority_discovery import CandidateBatchAction, DiscoveryJobCreate
 from app.services import authority_discovery_service as discovery
 from app.services.authority_discovery_service import AuthorityDiscoveryService, _process_discovery_job
-from app.services.authority_discovery_service import _estimate_content_quality, _score
+from app.services.authority_discovery_service import _estimate_content_quality, _score, _topic_match
 from app.services.notification_service import NotificationService
 from app.services.material_center_service import _ArticleTextParser
 
@@ -199,6 +199,13 @@ def test_relevance_score_is_not_derived_from_source_level() -> None:
     assert _score(title, "", [], "B")[0] == 0
 
 
+def test_topic_matching_retains_body_hits_and_close_chinese_variants() -> None:
+    keyword = "法治宣传教育规划"
+    assert _topic_match("最新发布", "全面推进法治宣传教育五年规划实施", [keyword]) is True
+    body_score = _score("最新发布", "全面贯彻法治宣传教育规划，健全工作体系。", [keyword], "A")[0]
+    assert body_score >= 0.55
+
+
 def test_directory_like_content_gets_low_quality_score() -> None:
     listing = "\n".join(f"最新发布标题 {index} 来源栏目" for index in range(20))
     article = "。".join("这是具有完整语义的政策正文段落，包含具体工作部署和实施要求" for _ in range(8))
@@ -234,7 +241,7 @@ def test_outdated_discovery_schema_does_not_block_application_startup() -> None:
     discovery.start_discovery_scheduler(engine)
 
 
-def test_scoped_central_material_participates_in_policy_comparison(db) -> None:
+def test_chapter_scoped_central_material_participates_in_policy_comparison(db) -> None:
     course = Course(name="思想理论教材", description="")
     db.add(course); db.flush()
     chapter = Chapter(course_id=course.id, title="中国式现代化", content="中国式现代化坚持以人民为中心。")
@@ -247,6 +254,7 @@ def test_scoped_central_material_participates_in_policy_comparison(db) -> None:
     )
     db.add(document); db.flush()
     db.add(DocumentCourseScope(document_id=document.id, course_id=course.id, confirmed=True))
+    db.add(DocumentChapterScope(document_id=document.id, chapter_id=chapter.id, confirmed=True))
     db.add(KnowledgeChunk(
         document_id=document.id, chapter_id=None, chunk_index=0,
         content="中国式现代化坚持以人民为中心，坚持共同富裕。",
@@ -270,6 +278,7 @@ def test_scoped_central_material_participates_in_policy_comparison(db) -> None:
 
     references = AuthorityDiscoveryService(db)._reference_sources(candidate)
     assert any(item[0] == document.id for item in references)
+    assert next(item for item in references if item[0] == document.id).scope_level == "chapter"
 
 
 def test_reference_document_ordering_is_mysql_compatible() -> None:
@@ -320,6 +329,25 @@ def test_source_failure_is_visible_on_job(db, monkeypatch) -> None:
     assert failed.progress_stage == "执行失败"
     assert "中国政府网" in failed.error_message
     assert "TLS 连接失败" in failed.error_message
+
+
+def test_single_article_source_skips_listing_fetch(db, monkeypatch) -> None:
+    source = AuthoritySourceRegistry(
+        name="单篇权威原文",
+        domain="example.gov.cn",
+        source_level="C",
+        adapter_type="single_article",
+        entry_url="https://example.gov.cn/policy/one.html",
+    )
+    monkeypatch.setattr(
+        discovery,
+        "_fetch_source_bytes",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("不应读取列表页")),
+    )
+
+    assert discovery._read_listing(source) == [
+        ("https://example.gov.cn/policy/one.html", "单篇权威原文"),
+    ]
 
 
 def test_delete_finished_job_keeps_candidate(db) -> None:
@@ -378,14 +406,14 @@ def test_delete_unpublished_candidate_removes_evidence_but_published_is_protecte
     assert protected.value.status_code == 409
 
 
-def test_low_association_candidate_is_filtered_and_review_notification_is_resolved(db) -> None:
+def test_below_retention_topic_candidate_is_filtered_and_review_notification_is_resolved(db) -> None:
     admin = User(username="filter-notification-admin", password_hash="hash", role="admin")
     db.add(admin); db.flush()
     source = AuthorityDiscoveryService(db).list_sources()[0]
     candidate = MaterialCandidate(
         source_registry_id=source.id, title="历史低关联材料", source_url="https://www.gov.cn/legacy-low",
         canonical_url="https://www.gov.cn/legacy-low", source_level="A", status="pending_review",
-        recommended_material_type="central", association_confidence=0.6, relevance_score=0.35,
+        recommended_material_type="central", association_confidence=0.6, relevance_score=0.20,
     )
     db.add(candidate); db.flush()
     notification = TeachingNotification(
@@ -403,6 +431,43 @@ def test_low_association_candidate_is_filtered_and_review_notification_is_resolv
     assert notification.is_read is True
 
 
+def test_weak_chapter_match_is_retained_for_observation_without_important_alert(db) -> None:
+    admin = User(username="weak-match-admin", password_hash="hash", role="admin")
+    db.add(admin); db.flush()
+    source = AuthorityDiscoveryService(db).list_sources()[0]
+    candidate = MaterialCandidate(
+        source_registry_id=source.id, title="网页弱关联候选", source_url="https://www.gov.cn/weak-match",
+        canonical_url="https://www.gov.cn/weak-match", source_level="A", status="pending_review",
+        recommended_material_type="central", association_confidence=0.30, relevance_score=0.80,
+        suggested_course_ids=[1], suggested_chapter_ids=[9],
+    )
+    db.add(candidate); db.commit()
+    created = NotificationService(db).create_candidate_review_notifications(candidate, evidence_count=1)
+
+    assert created and created[0].level == "normal"
+    assert candidate not in AuthorityDiscoveryService(db).list_candidates(status="pending_review")
+    db.refresh(candidate); db.refresh(created[0])
+    assert candidate.status == "observed"
+    assert "观察区" in candidate.analysis_reason
+    assert created[0].is_read is True
+
+
+def test_weak_topic_match_with_strong_chapter_evidence_is_retained_for_observation(db) -> None:
+    source = AuthorityDiscoveryService(db).list_sources()[0]
+    candidate = MaterialCandidate(
+        source_registry_id=source.id, title="网页近义主题候选", source_url="https://www.gov.cn/weak-topic",
+        canonical_url="https://www.gov.cn/weak-topic", source_level="A", status="pending_review",
+        recommended_material_type="central", association_confidence=0.80, relevance_score=0.40,
+        suggested_course_ids=[1], suggested_chapter_ids=[9],
+    )
+    db.add(candidate); db.commit()
+
+    assert candidate not in AuthorityDiscoveryService(db).list_candidates(status="pending_review")
+    db.refresh(candidate)
+    assert candidate.status == "observed"
+    assert "观察区" in candidate.analysis_reason
+
+
 def test_batch_candidate_actions_reduce_manual_decision_count(db) -> None:
     admin = User(username="batch-candidate-admin", password_hash="hash", role="admin")
     db.add(admin); db.flush()
@@ -416,7 +481,9 @@ def test_batch_candidate_actions_reduce_manual_decision_count(db) -> None:
     ) for index in range(3)]
     db.add_all(candidates); db.commit()
 
-    assert service.candidate_decision_summary()["pending_review"] == 3
+    initial_summary = service.candidate_decision_summary()
+    assert initial_summary["pending_review"] == 3
+    assert initial_summary["high_priority"] == 0
     updated = service.batch_candidates(admin, CandidateBatchAction(
         candidate_ids=[candidates[0].id, candidates[1].id], action="observe",
     ))
@@ -501,7 +568,7 @@ def test_candidate_summary_and_batch_api_use_static_routes(client, db) -> None:
         source_url=f"https://www.gov.cn/api-batch-{index}",
         canonical_url=f"https://www.gov.cn/api-batch-{index}",
         source_level="A", status="pending_review", recommended_material_type="central",
-        association_confidence=0.8, relevance_score=0.8,
+        association_confidence=0.8, relevance_score=0.8, importance_level="high",
     ) for index in range(2)]
     db.add_all(candidates); db.commit()
     headers = {"Authorization": f"Bearer {create_access_token(str(admin.id))}"}

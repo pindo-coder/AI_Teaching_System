@@ -157,6 +157,8 @@ class PolicyChange(TimestampMixin, Base):
     old_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
     new_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
     similarity_score: Mapped[float] = mapped_column(default=0, nullable=False)
+    # 与章节关联置信度分开：该值只衡量这组新旧句段是否属于同一政策命题。
+    evidence_confidence: Mapped[float] = mapped_column(default=0, nullable=False)
     importance: Mapped[str] = mapped_column(String(20), default="medium", nullable=False, index=True)
     alert_recommended: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     review_status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)

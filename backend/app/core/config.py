@@ -107,6 +107,23 @@ class Settings(BaseSettings):
     authority_discovery_min_association_score: float = Field(default=0.45, ge=0, le=1)
     authority_discovery_min_extraction_quality: float = Field(default=0.60, ge=0, le=1)
     authority_discovery_importance_threshold: float = Field(default=0.60, ge=0, le=1)
+    # 教材匹配采用“多路召回 -> RRF -> 可选 Cross-Encoder”的分层结构。
+    # 开源模型默认关闭，避免小型部署在启动时下载大模型；启用失败会确定性降级。
+    authority_matching_rrf_rank_constant: int = Field(default=60, ge=1, le=500)
+    authority_matching_max_chapters: int = Field(default=3, ge=1, le=8)
+    # 召回、人工审核和告警使用不同阈值，避免为了降低误报而牺牲网页发现召回率。
+    authority_matching_min_raw_score: float = Field(default=0.32, ge=0, le=1)
+    authority_matching_candidate_retention_score: float = Field(default=0.20, ge=0, le=1)
+    authority_matching_candidate_relevance_score: float = Field(default=0.35, ge=0, le=1)
+    authority_matching_alert_score: float = Field(default=0.72, ge=0, le=1)
+    authority_matching_reranker_enabled: bool = False
+    authority_matching_reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    authority_matching_reranker_threshold: float = Field(default=0.45, ge=0, le=1)
+    authority_matching_reranker_device: str = "cpu"
+    authority_matching_nli_enabled: bool = False
+    authority_matching_nli_model: str = "IDEA-CCNL/Erlangshen-Roberta-110M-NLI"
+    authority_matching_nli_neutral_threshold: float = Field(default=0.55, ge=0, le=1)
+    authority_matching_nli_device: str = "cpu"
     # 规划型 Agent 的安全开关与循环上限；生产环境可在不中断旧 Chat 的情况下关闭。
     agent_planner_enabled: bool = True
     agent_planner_use_llm: bool = True

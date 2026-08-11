@@ -8,7 +8,7 @@ class AuthoritySourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     domain: str = Field(min_length=3, max_length=255)
     source_level: Literal["A", "B", "C", "D"] = "A"
-    adapter_type: Literal["html_list", "rss", "sitemap"] = "html_list"
+    adapter_type: Literal["html_list", "rss", "sitemap", "single_article"] = "html_list"
     entry_url: str = Field(min_length=8, max_length=1000)
     fetch_interval_minutes: int = Field(default=1440, ge=5, le=10080)
     request_interval_seconds: int = Field(default=3, ge=1, le=60)
@@ -20,7 +20,7 @@ class AuthoritySourceCreate(BaseModel):
 class AuthoritySourceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     source_level: Literal["A", "B", "C", "D"] | None = None
-    adapter_type: Literal["html_list", "rss", "sitemap"] | None = None
+    adapter_type: Literal["html_list", "rss", "sitemap", "single_article"] | None = None
     entry_url: str | None = Field(default=None, min_length=8, max_length=1000)
     fetch_interval_minutes: int | None = Field(default=None, ge=5, le=10080)
     request_interval_seconds: int | None = Field(default=None, ge=1, le=60)
@@ -203,6 +203,7 @@ class PolicyChangeRead(BaseModel):
     old_excerpt: str
     new_excerpt: str
     similarity_score: float
+    evidence_confidence: float
     importance: str
     alert_recommended: bool
     review_status: str
