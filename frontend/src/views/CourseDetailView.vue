@@ -194,7 +194,10 @@ async function handleManagementCommand(command: 'history' | 'upload' | 'calibrat
   else if (command === 'chapter') dialogVisible.value = true
   else if (command === 'delete') await deleteCourse()
 }
-onMounted(loadCourse)
+onMounted(async () => {
+  await loadCourse()
+  if (route.query.panel === 'versions' && canManageCitations.value) await openVersionManager()
+})
 </script>
 
 <template>
