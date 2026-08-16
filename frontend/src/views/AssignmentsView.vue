@@ -16,6 +16,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { Chapter, Course, LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
 import { teachingClassApi, type ClassGroup, type TeachingClass } from '@/api/teachingClasses'
+import { beijingDateTimeLocalValue, beijingLocalToUtcIso, beijingTimestamp, formatBeijingTime } from '@/utils/time'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -70,22 +71,18 @@ const recipientCounts = computed(() => ({
 }))
 
 function taskPath(task: StudentAssignment) { return `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
-function formatTime(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
-function localDateTimeValue(value: Date) {
-  const pad = (part: number) => String(part).padStart(2, '0')
-  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}T${pad(value.getHours())}:${pad(value.getMinutes())}`
-}
+function formatTime(value: string) { return formatBeijingTime(value, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function statusLabel(status: StudentAssignment['status']) { return status === 'completed' ? '已完成' : status === 'overdue' ? '已逾期' : status === 'in_progress' ? '进行中' : '未开始' }
 function statusTagType(status: AssignmentRecipientDetail['status']) {
   return status === 'completed' ? 'success' : status === 'overdue' ? 'danger' : status === 'in_progress' ? 'warning' : 'primary'
 }
 function formatActivityTime(value: string | null) {
-  return value ? new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '暂无学习记录'
+  return value ? formatTime(value) : '暂无学习记录'
 }
 function deadlineClass(task: StudentAssignment) {
   if (task.status === 'completed') return 'completed'
   if (task.status === 'overdue') return 'overdue'
-  return new Date(task.due_time).getTime() - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
+  return beijingTimestamp(task.due_time) - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
 }
 async function load() {
   loading.value = true
@@ -120,18 +117,18 @@ function openCreate() {
   if (selected && !form.course_id) form.course_id = selected.primary_course_id
   if (!form.due_time) {
     const tomorrow = new Date(Date.now() + 24 * 3600 * 1000)
-    form.due_time = localDateTimeValue(tomorrow)
+    form.due_time = beijingDateTimeLocalValue(tomorrow)
   }
 }
 async function publish() {
   if (!form.teaching_class_id || !form.course_id || !form.chapter_id || !form.title.trim() || !form.due_time) return ElMessage.warning('请完整填写教学班、教材、章节、任务名称和截止时间')
   if (form.target_scope === 'selected_students' && !form.student_ids.length) return ElMessage.warning('请选择至少一名学生')
   if (form.target_scope === 'selected_groups' && !form.group_ids.length) return ElMessage.warning('请选择至少一个学习小组')
-  const dueTime = new Date(form.due_time)
-  if (Number.isNaN(dueTime.getTime())) return ElMessage.warning('请选择有效的截止时间')
+  const dueTime = beijingLocalToUtcIso(form.due_time)
+  if (!dueTime) return ElMessage.warning('请选择有效的截止时间')
   publishing.value = true
   try {
-    await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: dueTime.toISOString() })
+    await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: dueTime })
     dialogVisible.value = false
     form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []
     await load()

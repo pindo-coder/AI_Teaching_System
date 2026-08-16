@@ -10,6 +10,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { agentApi, type AgentRun } from '@/api/agents'
 import { notificationApi, type TeachingNotification } from '@/api/notifications'
 import { knowledgeApi } from '@/api/knowledge'
+import { formatBeijingDateTime } from '@/utils/time'
 
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
@@ -240,7 +241,7 @@ watch(() => auth.user?.id, () => {
           </span>
           <span class="notification-item-content">{{ item.content }}</span>
           <a v-if="item.source_url" class="notification-source" :href="item.source_url" target="_blank" rel="noreferrer" @click.stop="markNotificationRead(item)">查看权威原文 ↗</a>
-          <small>{{ new Date(item.created_time).toLocaleString() }}</small>
+          <small>{{ formatBeijingDateTime(item.created_time) }}</small>
         </button>
         <div v-if="!notifications.length && !notificationLoading" class="utility-drawer-content">
           <span class="utility-mark"><el-icon><Bell /></el-icon></span>
@@ -256,7 +257,7 @@ watch(() => auth.user?.id, () => {
           <button v-for="run in agentRuns" :key="run.id" type="button" class="agent-task-item" @click="openAgentRun">
             <span>
               <strong>课程备课 #{{ run.id }}</strong>
-              <small>{{ new Date(run.updated_time).toLocaleString() }}</small>
+              <small>{{ formatBeijingDateTime(run.updated_time) }}</small>
             </span>
             <StatusChip
               :label="agentStatus(run)"

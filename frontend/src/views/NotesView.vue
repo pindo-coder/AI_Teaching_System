@@ -12,6 +12,7 @@ import { notePlainText, sanitizeNoteHtml } from '@/utils/noteContent'
 import { courseApi } from '@/api/courses'
 import type { Chapter, Course } from '@/types'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
+import { formatBeijingDate } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
@@ -396,7 +397,7 @@ onBeforeUnmount(() => {
           <p class="toolbox-hint">支持语义搜索，例如输入“全过程人民民主”。</p>
           <div v-if="semanticResults.length" class="toolbox-search-results"><strong>语义相关</strong><button v-for="item in semanticResults" :key="item.id" @click="selectNote(notes.find((note) => note.id === item.id) || notes[0])"><span>{{ item.chapter_title }}</span><small>{{ item.excerpt }}</small></button></div>
           <div v-if="noteOutline.length" class="note-outline"><strong>当前笔记目录</strong><button v-for="item in noteOutline" :key="`${item.level}-${item.index}`" :class="item.level" @click="scrollToOutline(item.index)"><span>{{ item.index + 1 }}</span>{{ item.title }}</button></div>
-          <div class="notes-index-list"><button v-for="note in filteredNotes" :key="note.id" :class="{ active: selectedId === note.id }" @click="selectNote(note)"><span>{{ note.course_name }}</span><strong>{{ note.chapter_title }}</strong><small>{{ new Date(note.updated_time).toLocaleDateString('zh-CN') }}</small></button><el-empty v-if="!filteredNotes.length" :image-size="50" description="暂无匹配笔记" /></div>
+          <div class="notes-index-list"><button v-for="note in filteredNotes" :key="note.id" :class="{ active: selectedId === note.id }" @click="selectNote(note)"><span>{{ note.course_name }}</span><strong>{{ note.chapter_title }}</strong><small>{{ formatBeijingDate(note.updated_time) }}</small></button><el-empty v-if="!filteredNotes.length" :image-size="50" description="暂无匹配笔记" /></div>
         </section>
 
         <section v-else-if="activeTool === 'writing'" class="toolbox-section ai-writing-panel">

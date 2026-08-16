@@ -24,6 +24,7 @@ import UiEmptyState from '@/components/ui/UiEmptyState.vue'
 import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 import type { SemanticStatus } from '@/types/workspace'
 import { getErrorMessage } from '@/utils/error'
+import { formatBeijingDateTime } from '@/utils/time'
 
 interface UnifiedConfigForm {
   provider_name: AiUnifiedProviderName
@@ -207,9 +208,7 @@ function featureLabel(value: string) { return featureLabels[value] || value }
 function statusLabel(value: string) { return ({ running: '运行中', success: '成功', failed: '失败' } as Record<string, string>)[value] || value }
 function statusType(value: string): SemanticStatus { return value === 'success' ? 'success' : value === 'failed' ? 'danger' : 'info' }
 function formatDateTime(value: string | null | undefined) {
-  return value
-    ? new Date(`${value}${/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? '' : 'Z'}`).toLocaleString('zh-CN', { hour12: false })
-    : '—'
+  return value ? formatBeijingDateTime(value) : '—'
 }
 function formatTokenCount(value: number | null | undefined) {
   return value == null ? '—' : new Intl.NumberFormat('zh-CN').format(value)

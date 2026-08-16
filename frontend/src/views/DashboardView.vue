@@ -9,6 +9,7 @@ import UiHero from '@/components/ui/UiHero.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { DashboardData, LearningStage } from '@/types'
 import type { AiPetAction, AiPetContext } from '@/types/aiPet'
+import { beijingTimestamp, formatBeijingTime } from '@/utils/time'
 
 const auth = useAuthStore()
 const router = useRouter()
@@ -66,9 +67,9 @@ function stageProgress(stage: LearningStage) {
 function handlePetAction(action: AiPetAction) { router.push(action.path) }
 function deadlineClass(task: StudentAssignment) {
   if (task.status === 'overdue') return 'overdue'
-  return new Date(task.due_time).getTime() - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
+  return beijingTimestamp(task.due_time) - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
 }
-function dueLabel(value: string) { return new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
+function dueLabel(value: string) { return formatBeijingTime(value, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 
 onMounted(async () => {
   try {

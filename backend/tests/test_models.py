@@ -22,6 +22,8 @@ def test_all_mvp_tables_are_registered() -> None:
         "news_items",
         "classroom_activities",
         "classroom_responses",
+        "discussion_threads",
+        "discussion_replies",
         "study_notes",
         "review_schedules",
         "review_practices",

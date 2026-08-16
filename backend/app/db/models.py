@@ -6,7 +6,7 @@ from app.models.knowledge_document import KnowledgeDocument
 from app.models.learning_progress import LearningProgress
 from app.models.user import User
 from app.models.news_item import NewsItem
-from app.models.classroom import ClassroomActivity, ClassroomResponse
+from app.models.classroom import ClassroomActivity, ClassroomResponse, DiscussionReply, DiscussionThread
 from app.models.study_note import StudyNote
 from app.models.review_schedule import ReviewSchedule
 from app.models.learning_task import LearningTaskPoint, UserTaskProgress, LearningEvent
@@ -38,4 +38,4 @@ from app.models.teaching_notification import TeachingNotification
 from app.models.ai_operation import AiCallLog, AiProviderConfig
 from app.models.ai_media_asset import AiMediaAsset
 
-__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback", "DocumentCourseScope", "DocumentChapterScope", "DocumentClassScope", "DocumentKnowledgeTag", "MaterialImportBatch", "MaterialImportItem", "AgentRun", "AgentStep", "AgentExecution", "PresentationTemplate", "LessonPublication", "AuthoritySourceRegistry", "DiscoveryJob", "MaterialCandidate", "MaterialSnapshot", "PolicyChange", "TeachingNotification", "AiCallLog", "AiProviderConfig", "AiMediaAsset"]
+__all__ = ["User", "Course", "Chapter", "LearningProgress", "KnowledgeDocument", "NewsItem", "ClassroomActivity", "ClassroomResponse", "DiscussionThread", "DiscussionReply", "StudyNote", "ReviewSchedule", "ReviewPractice", "LearningTaskPoint", "UserTaskProgress", "LearningEvent", "StudyChatMessage", "NewsStudyNote", "TeacherAssignment", "AssignmentRecipient", "CourseSubject", "AcademicTerm", "TeachingClass", "TeachingClassTeacher", "TeachingClassMaterial", "ClassRosterEntry", "ClassMembership", "StudentCourseSeat", "ClassGroup", "ClassGroupMember", "ClassJoinRequest", "ClassTransferLog", "TextbookVersion", "DocumentPage", "PageNumberRange", "DocumentOutlineNode", "KnowledgeChunk", "IndexVersion", "CitationFeedback", "DocumentCourseScope", "DocumentChapterScope", "DocumentClassScope", "DocumentKnowledgeTag", "MaterialImportBatch", "MaterialImportItem", "AgentRun", "AgentStep", "AgentExecution", "PresentationTemplate", "LessonPublication", "AuthoritySourceRegistry", "DiscoveryJob", "MaterialCandidate", "MaterialSnapshot", "PolicyChange", "TeachingNotification", "AiCallLog", "AiProviderConfig", "AiMediaAsset"]

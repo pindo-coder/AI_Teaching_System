@@ -12,6 +12,7 @@ import { renderTeachingDocument } from '@/utils/richText'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { formatBeijingDateTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
@@ -58,10 +59,8 @@ function openCitation(source: AiSource) { if (source.source_type === 'pdf' && so
 function sourceTagType(source: AiSource) { return source.material_type === 'central' ? 'danger' : source.material_type === 'textbook' ? 'primary' : 'success' }
 function formatPublishedTime(value: string | null) {
   if (!value) return '近期'
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return '发布时间待确认'
-  // API 时间携带 Z/offset；不指定 timeZone，让浏览器按用户本地时区展示。
-  return parsed.toLocaleString('zh-CN', { hour12: false })
+  const formatted = formatBeijingDateTime(value)
+  return formatted === '--' ? '发布时间待确认' : formatted
 }
 
 async function loadNews(resetPage = false) {

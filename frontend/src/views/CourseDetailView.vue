@@ -11,6 +11,7 @@ import { textbookPreview } from '@/utils/textbookText'
 import KnowledgeGraph from '@/components/KnowledgeGraph.vue'
 import UiHero from '@/components/ui/UiHero.vue'
 import { getErrorMessage } from '@/utils/error'
+import { beijingToday, formatBeijingDateTime } from '@/utils/time'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,7 +33,7 @@ const documents = ref<KnowledgeDocument[]>([])
 const form = reactive({ title: '', content: '', sort_order: 0 })
 const replacementForm = reactive({
   source_title: '',
-  version_label: `OCR 修订版 ${new Date().toISOString().slice(0, 10)}`,
+  version_label: `OCR 修订版 ${beijingToday()}`,
   access_policy: 'full_preview' as KnowledgeDocument['access_policy'],
 })
 const canManageCitations = computed(() => ['teacher', 'admin'].includes(auth.user?.role || ''))
@@ -80,7 +81,7 @@ function versionCanActivate(version: TextbookVersion) {
   )
 }
 function formatVersionTime(value: string) {
-  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+  return formatBeijingDateTime(value)
 }
 async function activateVersion(version: TextbookVersion) {
   if (version.is_current || !versionCanActivate(version)) return

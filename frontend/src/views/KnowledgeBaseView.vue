@@ -14,6 +14,7 @@ import type { CourseDetail } from '@/types'
 import { getErrorMessage } from '@/utils/error'
 import { useAuthStore } from '@/stores/auth'
 import { useRouter } from 'vue-router'
+import { formatBeijingDateTime } from '@/utils/time'
 
 type MaterialTab = 'central' | 'textbook' | 'local' | 'unclassified'
 
@@ -289,7 +290,7 @@ function taskStatusType(value: string) {
 }
 
 function formatTaskTime(value: string) {
-  return new Date(value).toLocaleString('zh-CN', { hour12: false })
+  return formatBeijingDateTime(value)
 }
 
 function scheduleTaskPoll() {

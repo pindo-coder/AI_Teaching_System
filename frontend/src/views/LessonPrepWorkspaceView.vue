@@ -19,6 +19,7 @@ import UiCard from '@/components/ui/UiCard.vue'
 import UiEmptyState from '@/components/ui/UiEmptyState.vue'
 import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 import type { Course, CourseDetail } from '@/types'
+import { formatBeijingDateTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
@@ -912,7 +913,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                 <el-option
                   v-for="item in pptVersions"
                   :key="item.version_id"
-                  :label="`${item.reason} · ${new Date(item.created_time).toLocaleString()}`"
+                  :label="`${item.reason} · ${formatBeijingDateTime(item.created_time)}`"
                   :value="item.version_id"
                 />
               </el-select>

@@ -10,6 +10,7 @@ import UiCard from '@/components/ui/UiCard.vue'
 import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
 import { getErrorMessage } from '@/utils/error'
+import { formatBeijingDateTime } from '@/utils/time'
 
 const loading = ref(true)
 const route = useRoute()
@@ -320,9 +321,7 @@ function changeSuggestion(change: PolicyChange) {
   return '建议加入教学案例'
 }
 function formatDateTime(value: string | null | undefined) {
-  if (!value) return '—'
-  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`
-  return new Date(normalized).toLocaleString('zh-CN', { hour12: false })
+  return value ? formatBeijingDateTime(value) : '—'
 }
 
 async function focusCandidatePool() {
@@ -384,7 +383,7 @@ watch(() => route.hash, () => { void focusCandidatePool() })
         <div class="source-list">
           <div v-for="source in sources" :key="source.id" class="source-item">
             <el-checkbox v-model="selectedSources" :value="source.id" :disabled="!source.is_enabled" />
-            <span><strong>{{ source.name }}</strong><small>{{ sourceLevelLabel(source.source_level) }} · {{ source.domain }}</small><small>最近抓取：{{ source.last_success_time ? new Date(source.last_success_time).toLocaleString() : '尚未抓取' }}</small></span>
+            <span><strong>{{ source.name }}</strong><small>{{ sourceLevelLabel(source.source_level) }} · {{ source.domain }}</small><small>最近抓取：{{ source.last_success_time ? formatBeijingDateTime(source.last_success_time) : '尚未抓取' }}</small></span>
             <StatusChip :label="source.is_enabled ? '启用' : '停用'" :status="source.is_enabled ? 'success' : 'neutral'" />
             <el-dropdown trigger="click"><el-button text :icon="Setting" /><template #dropdown><el-dropdown-menu><el-dropdown-item @click="editSource(source)">编辑设置</el-dropdown-item><el-dropdown-item @click="toggleSource(source)">{{ source.is_enabled ? '停用来源' : '启用来源' }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
           </div>
