@@ -36,6 +36,82 @@ def test_learning_events_update_task_progress(client: TestClient, db: Session) -
     assert read.json()["data"]["progress"] == 55
 
 
+def test_learning_footprint_exposes_learning_outputs_without_task_points(client: TestClient, db: Session) -> None:
+    user = User(username="footprint_student", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="足迹课程", description="测试")
+    db.add_all([user, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="足迹专题", content="教材正文", sort_order=1)
+    db.add(chapter); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    initial = client.get("/api/v1/learning/footprint", headers=headers, params={
+        "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "review",
+    })
+    assert initial.status_code == 200
+    assert initial.json()["data"]["status"] == "not_started"
+    assert "tasks" not in initial.json()["data"]
+
+    opened = client.post("/api/v1/learning/events", headers=headers, json={
+        "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "review",
+        "event_type": "chapter_opened", "event_data": {},
+    })
+    assert opened.status_code == 200
+    active = client.get("/api/v1/learning/footprint", headers=headers, params={
+        "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "review",
+    })
+    assert active.json()["data"]["status"] == "in_progress"
+    assert active.json()["data"]["activities"][0]["label"] == "打开专题"
+
+
+def test_learning_activity_does_not_create_task_points(client: TestClient, db: Session) -> None:
+    user = User(username="activity_student", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="足迹课程二", description="测试")
+    db.add_all([user, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="足迹专题二", content="教材正文", sort_order=1)
+    db.add(chapter); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+    response = client.post("/api/v1/learning/activity", headers=headers, json={
+        "course_id": course.id, "chapter_id": chapter.id, "learning_stage": "preview",
+        "event_type": "chapter_opened", "event_data": {},
+    })
+    assert response.status_code == 200
+    from app.models.learning_task import LearningTaskPoint
+    assert db.query(LearningTaskPoint).count() == 0
+
+
+def test_learning_footprint_deduplicates_reading_and_waits_for_all_practice_answers(db: Session) -> None:
+    from datetime import datetime
+    from app.models.learning_task import LearningEvent
+    from app.models.review_practice import ReviewPractice
+    from app.services.learning_footprint_service import LearningFootprintService
+
+    user = User(username="footprint_practice_student", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="足迹练习课程", description="测试")
+    db.add_all([user, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="足迹练习专题", content="教材正文", sort_order=1)
+    db.add(chapter); db.flush()
+    db.add_all([
+        LearningEvent(user_id=user.id, course_id=course.id, chapter_id=chapter.id, learning_stage="exam", event_type="reading_progress", event_data={"percent": percent}, created_time=datetime(2026, 8, 20, 10, percent // 10))
+        for percent in (10, 20, 80)
+    ])
+    practices = [ReviewPractice(user_id=user.id, course_id=course.id, chapter_id=chapter.id, question=f"问题 {index}", choices=[], answer_index=-1, explanation="依据") for index in range(2)]
+    db.add_all(practices); db.commit()
+
+    summary = LearningFootprintService(db).summary(user.id, course.id, chapter.id, "exam")
+    assert [item.label for item in summary.activities] == ["阅读教材"]
+    assert "已完成练习" not in summary.outputs
+    practices[0].answered_at = datetime(2026, 8, 20, 11, 0)
+    db.commit()
+    summary = LearningFootprintService(db).summary(user.id, course.id, chapter.id, "exam")
+    assert "已完成练习" not in summary.outputs
+    practices[1].answered_at = datetime(2026, 8, 20, 11, 1)
+    db.commit()
+    summary = LearningFootprintService(db).summary(user.id, course.id, chapter.id, "exam")
+    assert "已完成练习" in summary.outputs
+    preview_summary = LearningFootprintService(db).summary(user.id, course.id, chapter.id, "preview")
+    assert "已完成练习" not in preview_summary.outputs
+
+
 def test_sensitive_learning_evidence_cannot_be_forged_through_telemetry_endpoint(
     client: TestClient, db: Session
 ) -> None:

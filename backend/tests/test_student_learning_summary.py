@@ -37,7 +37,10 @@ def test_partial_task_progress_is_weighted_and_ai_needs_follow_up_evidence(db: S
         event_type="reading_progress", event_data={"percent": 40},
     ))
     assert reading.progress == 18
-    assert LearningService(db).dashboard(student).overall_progress == 18
+    dashboard = LearningService(db).dashboard(student)
+    assert dashboard.overall_progress == 18
+    assert dashboard.learning_status == "in_progress"
+    assert dashboard.stage_footprints[0].activities[0].learning_stage == "preview"
 
     ai_only = service.record(student.id, LearningEventCreate(
         course_id=course.id, chapter_id=chapter.id, learning_stage="preview",

@@ -67,10 +67,35 @@ export interface TaskProgressSummary {
   tasks: TaskPoint[]
 }
 
+export interface LearningFootprintActivity {
+  event_type: string
+  label: string
+  created_time: string
+  learning_stage: LearningStage | null
+}
+
+export interface LearningFootprint {
+  course_id: number
+  chapter_id: number
+  learning_stage: LearningStage
+  status: 'not_started' | 'in_progress' | 'has_output'
+  status_label: string
+  last_activity_time: string | null
+  activities: LearningFootprintActivity[]
+  outputs: string[]
+  next_action: string
+}
+
 export interface DashboardData {
   user: User
   current_course: Course | null
   current_chapter: Chapter | null
   recent_progress: LearningProgress[]
   overall_progress: number
+  learning_status: 'not_started' | 'in_progress' | 'has_output'
+  learning_status_label: string
+  stage_footprints: LearningFootprint[]
+  recent_activities: LearningFootprintActivity[]
+  outputs: string[]
+  next_action: string
 }

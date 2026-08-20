@@ -11,6 +11,7 @@ AiTaskType = Literal[
     "preview_questions",
     "review_outline",
     "mock_questions",
+    "review_feedback",
     "note_polish",
     "note_expand",
     "note_outline",

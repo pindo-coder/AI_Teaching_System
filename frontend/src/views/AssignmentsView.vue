@@ -204,7 +204,7 @@ onBeforeUnmount(stopDetailRefresh)
 
 <template>
   <div v-loading="loading" class="assignment-page">
-    <header class="page-header"><div><p class="eyebrow">{{ auth.isTeacher ? '教学任务管理' : '我的学习任务' }}</p><h1>{{ auth.isTeacher ? '布置并跟踪学习任务' : '按时完成教师布置的任务' }}</h1><p>{{ auth.isTeacher ? '任务与教材章节任务点关联，学生完成学习行为后自动更新进度。' : '任务进度由阅读、AI学习、笔记和练习等实际行为自动统计。' }}</p></div><el-button v-if="auth.isTeacher" type="primary" size="large" :icon="Plus" @click="openCreate">发布任务</el-button></header>
+    <header class="page-header"><div><p class="eyebrow">{{ auth.isTeacher ? '教学任务管理' : '我的学习任务' }}</p><h1>{{ auth.isTeacher ? '布置并跟踪学习任务' : '按时完成教师布置的任务' }}</h1><p>{{ auth.isTeacher ? '任务与教材章节关联，学生完成指定学习产出后自动更新进度。' : '任务进度由阅读、AI学习、笔记和练习等实际行为自动统计。' }}</p></div><el-button v-if="auth.isTeacher" type="primary" size="large" :icon="Plus" @click="openCreate">发布任务</el-button></header>
 
     <template v-if="!auth.isTeacher">
       <section class="student-assignment-list">

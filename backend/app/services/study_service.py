@@ -1,5 +1,8 @@
 from datetime import datetime, timedelta
 from html import unescape
+from html import escape
+import hashlib
+import json
 import logging
 import re
 
@@ -16,9 +19,12 @@ from app.models.review_practice import ReviewPractice
 from app.rag.retriever import retrieve
 from app.rag.vector_store import delete_study_note_vectors, get_study_note_vector_store, upsert_study_note_vector
 from app.schemas.study import StudyChatHistorySave
+from app.schemas.ai import AiAssistRequest
+from app.services.ai_service import AiService
 
 
 REVIEW_INTERVALS = [1, 2, 4, 7, 15, 30]
+REVIEW_REFERENCE_CACHE_VERSION = "chapter-only-v1"
 logger = logging.getLogger(__name__)
 
 
@@ -242,8 +248,8 @@ class StudyService:
         ).order_by(ReviewPractice.id)).all()
         if existing:
             return list(existing)
-        base = (self.plain_note_content(note.content) if note and note.content.strip() else chapter.content or "").strip()
-        excerpt = base[:650] or f"围绕《{chapter.title}》的教材核心内容进行复习。"
+        chapter_text = (chapter.content or "").strip()
+        excerpt = chapter_text[:1200] or f"围绕《{chapter.title}》的教材核心内容进行复习。"
         questions = [
             (f"请概括“{chapter.title}”的核心主旨，并说明其要解决的主要问题。", excerpt),
             (f"结合本专题教材，说明其中一个核心概念或主要观点的内涵及其逻辑作用。", excerpt),
@@ -273,18 +279,68 @@ class StudyService:
         self.db.commit()
         return records
 
+    def latest_review_result(self, user_id: int, chapter_id: int) -> list[dict[str, object]]:
+        """Return the latest completed three-question round unless a round is still pending."""
+        chapter = self.require_chapter(chapter_id)
+        pending = self.db.scalar(select(ReviewPractice.id).where(
+            ReviewPractice.user_id == user_id,
+            ReviewPractice.chapter_id == chapter_id,
+            ReviewPractice.answered_at.is_(None),
+        ).limit(1))
+        if pending is not None:
+            return []
+        practices = list(self.db.scalars(select(ReviewPractice).where(
+            ReviewPractice.user_id == user_id,
+            ReviewPractice.chapter_id == chapter_id,
+            ReviewPractice.answered_at.is_not(None),
+        ).order_by(ReviewPractice.answered_at.desc(), ReviewPractice.id.desc()).limit(3)).all())
+        if len(practices) < 3:
+            return []
+        practices.reverse()
+        return [{
+            "practice_id": item.id,
+            "question": item.question,
+            "source_position": item.source_position,
+            "student_answer": item.student_answer,
+            "is_correct": bool(item.is_correct),
+            "feedback": "回答已覆盖教材中的关键表述，可继续结合概念之间的逻辑关系完善。" if item.is_correct else "回答与教材依据的对应还不够充分，请对照参考答案检查核心概念和论证逻辑。",
+            "ai_reference_answer": item.ai_reference_answer.strip() or item.explanation.strip(),
+            "reference_knowledge_points": item.reference_knowledge_points or ["章节主旨", "核心概念与主要观点", "观点之间的逻辑关系"],
+            "reference_generated": bool(
+                item.ai_reference_answer.strip()
+                and item.reference_cache_key == self._review_reference_cache_key(chapter, item)
+            ),
+        } for item in practices]
+
     def submit_review_answer(self, user_id: int, practice_id: int, answer: str) -> dict[str, object]:
         practice = self.db.scalar(select(ReviewPractice).where(ReviewPractice.id == practice_id, ReviewPractice.user_id == user_id))
         if practice is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="复习题不存在")
         if practice.answered_at is not None:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="该题已提交")
+            completed = self.db.scalar(select(ReviewPractice.id).where(
+                ReviewPractice.user_id == user_id,
+                ReviewPractice.chapter_id == practice.chapter_id,
+                ReviewPractice.answered_at.is_(None),
+            )) is None
+            fallback_answer, fallback_points = self._fallback_review_reference(practice)
+            return {
+                "id": practice.id,
+                "is_correct": bool(practice.is_correct),
+                "feedback": "该题已提交，已恢复本次练习进度。",
+                "reference_answer": practice.explanation,
+                "ai_reference_answer": fallback_answer,
+                "reference_knowledge_points": fallback_points,
+                "source_position": practice.source_position,
+                "completed": completed,
+                "next_interval_days": None,
+            }
         answer_words = self._keywords(answer)
         reference_words = self._keywords(practice.explanation)
         overlap = len(answer_words & reference_words)
         is_correct = len(answer.strip()) >= 40 and overlap >= 1
         practice.selected_index = 0
         practice.is_correct = is_correct
+        practice.student_answer = answer.strip()
         practice.answered_at = datetime.now()
         self.db.commit()
         outstanding = self.db.scalar(select(ReviewPractice.id).where(
@@ -296,9 +352,168 @@ class StudyService:
         if completed:
             next_interval = self.complete_review(user_id, practice.chapter_id).interval_days
         feedback = "回答已覆盖教材中的关键表述，可继续结合概念之间的逻辑关系完善。" if is_correct else "回答与教材依据的对应还不够充分。请围绕下方参考依据补充核心概念、主要观点和论证逻辑。"
+        ai_reference_answer, reference_knowledge_points = self._fallback_review_reference(practice)
         return {"id": practice.id, "is_correct": is_correct, "feedback": feedback,
-                "reference_answer": practice.explanation, "source_position": practice.source_position,
+                "reference_answer": practice.explanation,
+                "ai_reference_answer": ai_reference_answer,
+                "reference_knowledge_points": reference_knowledge_points,
+                "source_position": practice.source_position,
                 "completed": completed, "next_interval_days": next_interval}
+
+    @staticmethod
+    def _fallback_review_reference(practice: ReviewPractice) -> tuple[str, list[str]]:
+        evidence = practice.explanation.strip()[:700] or "当前章节教材正文"
+        question = practice.question.strip()
+        if any(term in question for term in ("主旨", "主要问题", "战略安排")):
+            guidance = "应先概括本章核心主旨，再说明这一战略安排所回应的发展目标、基本路径和内在逻辑。"
+            fallback_points = ["章节核心主旨", "战略目标与发展路径", "重大原则之间的逻辑关系"]
+        elif any(term in question for term in ("概念", "观点", "内涵", "关系")):
+            guidance = "应明确题目涉及的核心概念，解释其基本内涵，再分析概念或观点之间的逻辑联系。"
+            fallback_points = ["核心概念的规范内涵", "主要观点", "概念与观点之间的逻辑关系"]
+        elif any(term in question for term in ("现实意义", "实践", "如何理解", "为什么")):
+            guidance = "应从理论依据、实践要求和现实意义三个层次展开，并把结论落实到当前章节的规范表述。"
+            fallback_points = ["理论依据", "实践要求", "现实意义"]
+        else:
+            guidance = "应围绕题干给出明确结论，并使用本章核心概念、主要观点和教材依据进行分层论证。"
+            fallback_points = ["题干中的核心命题", "教材主要观点", "结论与依据的逻辑关系"]
+        fallback_answer = f"针对题目“{question}”，{guidance}\n\n教材依据：{evidence}"
+        return fallback_answer, fallback_points
+
+    @staticmethod
+    def _review_reference_cache_key(chapter: Chapter, practice: ReviewPractice) -> str:
+        payload = json.dumps({
+            "version": REVIEW_REFERENCE_CACHE_VERSION,
+            "chapter_id": chapter.id,
+            "chapter_content": chapter.content or "",
+            "question": practice.question,
+        }, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def review_references(self, user_id: int, chapter_id: int, practice_ids: list[int], *, force: bool = False) -> list[dict[str, object]]:
+        """Generate all answer references in one grounded AI request after a practice round."""
+        chapter = self.require_chapter(chapter_id)
+        practices = list(self.db.scalars(select(ReviewPractice).where(
+            ReviewPractice.user_id == user_id,
+            ReviewPractice.chapter_id == chapter_id,
+            ReviewPractice.id.in_(set(practice_ids)),
+            ReviewPractice.answered_at.is_not(None),
+        ).order_by(ReviewPractice.id)).all())
+        if len(practices) != len(set(practice_ids)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="尚未提交本轮练习")
+
+        if not force and all(
+            item.ai_reference_answer.strip()
+            and item.reference_knowledge_points
+            and item.reference_cache_key == self._review_reference_cache_key(chapter, item)
+            for item in practices
+        ):
+            return [{
+                "practice_id": item.id,
+                "ai_reference_answer": item.ai_reference_answer,
+                "reference_knowledge_points": item.reference_knowledge_points,
+            } for item in practices]
+
+        fallback = [
+            {
+                "practice_id": item.id,
+                "ai_reference_answer": self._fallback_review_reference(item)[0],
+                "reference_knowledge_points": self._fallback_review_reference(item)[1],
+            }
+            for item in practices
+        ]
+        question_payload = [{"practice_id": item.id, "question": item.question} for item in practices]
+        try:
+            generated = AiService(self.db).assist(AiAssistRequest(
+                course_id=practices[0].course_id,
+                chapter_id=chapter_id,
+                learning_stage="exam",
+                task_type="review_feedback",
+                question=(
+                    f"请为以下练习题逐题生成不同的参考答案和参考知识点：\n{json.dumps(question_payload, ensure_ascii=False)}\n"
+                    "每个答案必须直接回应对应题干，不得复制其他题目的答案。"
+                    "只输出 JSON 数组，每项格式为："
+                    '{"practice_id":题目ID,"ai_reference_answer":"参考答案","reference_knowledge_points":["知识点"]}'
+                ),
+            )).answer.strip()
+        except Exception:
+            return fallback
+        try:
+            raw = generated.strip()
+            start, end = raw.find("["), raw.rfind("]")
+            if start < 0 or end <= start:
+                raise ValueError("AI response did not contain a JSON array")
+            payload = raw[start:end + 1]
+            parsed = json.loads(payload)
+            by_id = {int(item["practice_id"]): item for item in parsed if isinstance(item, dict)}
+            output = []
+            seen_answers: set[str] = set()
+            for item, default in zip(practices, fallback, strict=True):
+                generated_item = by_id.get(item.id, {})
+                answer_text = str(generated_item.get("ai_reference_answer", "")).strip()
+                normalized_answer = re.sub(r"\s+", "", answer_text)
+                if not normalized_answer or normalized_answer in seen_answers:
+                    answer_text = str(default["ai_reference_answer"])
+                    normalized_answer = re.sub(r"\s+", "", answer_text)
+                seen_answers.add(normalized_answer)
+                points = generated_item.get("reference_knowledge_points", [])
+                reference = {
+                    "practice_id": item.id,
+                    "ai_reference_answer": answer_text or default["ai_reference_answer"],
+                    "reference_knowledge_points": [str(point).strip() for point in points if str(point).strip()][:8]
+                    or default["reference_knowledge_points"],
+                }
+                item.ai_reference_answer = str(reference["ai_reference_answer"])
+                item.reference_knowledge_points = list(reference["reference_knowledge_points"])
+                item.reference_cache_key = self._review_reference_cache_key(chapter, item)
+                output.append(reference)
+            self.db.commit()
+            return output
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return fallback
+
+    def save_review_to_notes(self, user_id: int, chapter_id: int, practice_ids: list[int]) -> StudyNote:
+        chapter = self.require_chapter(chapter_id)
+        practices = list(self.db.scalars(select(ReviewPractice).where(
+            ReviewPractice.user_id == user_id,
+            ReviewPractice.chapter_id == chapter_id,
+            ReviewPractice.id.in_(set(practice_ids)),
+            ReviewPractice.answered_at.is_not(None),
+        ).order_by(ReviewPractice.id)).all())
+        if len(practices) != len(set(practice_ids)):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="本轮答题记录不完整或不属于当前用户")
+
+        round_key = f"{min(practice_ids)}-{max(practice_ids)}"
+        marker = f"练习记录编号：{round_key}"
+        end_marker = f"练习记录结束：{round_key}"
+        existing = self.get_note(user_id, chapter_id)
+        existing_content = existing.content if existing else ""
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        parts = [f"<hr><h2>本章练习记录 · {escape(timestamp)}</h2><p><em>{marker}</em></p>"]
+        for index, practice in enumerate(practices, 1):
+            answer_text = practice.ai_reference_answer.strip() or practice.explanation.strip() or "暂无参考答案"
+            points = practice.reference_knowledge_points or ["章节主旨", "核心概念与主要观点", "观点之间的逻辑关系"]
+            parts.extend([
+                f"<h3>第 {index} 题：{escape(practice.question)}</h3>",
+                f"<p><strong>我的作答：</strong>{escape(practice.student_answer or '未保存作答内容')}</p>",
+                f"<p><strong>AI 参考答案：</strong>{escape(answer_text)}</p>",
+                "<p><strong>参考知识点：</strong></p><ul>",
+                *(f"<li>{escape(str(point))}</li>" for point in points),
+                "</ul>",
+            ])
+        parts.append(f"<p><em>{end_marker}</em></p>")
+        review_section = "".join(parts)
+        if marker in existing_content and end_marker in existing_content:
+            pattern = re.compile(
+                rf"<hr><h2>本章练习记录[^<]*</h2><p><em>{re.escape(marker)}</em></p>.*?<p><em>{re.escape(end_marker)}</em></p>",
+                flags=re.DOTALL,
+            )
+            combined = pattern.sub(review_section, existing_content, count=1)
+        else:
+            combined = f"{existing_content}{review_section}"
+        if len(combined) > 30_000:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节笔记内容已接近上限，请先整理后再保存答题记录")
+        return self.save_note(user_id, chapter.id, combined)
 
     def activate_review(self, user_id: int, chapter_id: int) -> ReviewSchedule:
         chapter = self.require_chapter(chapter_id)

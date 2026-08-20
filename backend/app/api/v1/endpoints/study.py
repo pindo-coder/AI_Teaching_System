@@ -11,7 +11,7 @@ from app.models.user import User
 from app.models.review_practice import ReviewPractice
 from app.schemas.common import ApiResponse
 from app.schemas.study import (
-    NoteRelatedData, NoteSearchItem, ReviewAnswerResult, ReviewAnswerSubmit, ReviewQuestionRead,
+    NoteRelatedData, NoteSearchItem, ReviewAnswerResult, ReviewAnswerSubmit, ReviewQuestionRead, ReviewReferenceItem, ReviewReferencesRequest, ReviewSaveToNotesRequest, ReviewResultItem,
     ReviewRead, StudyChatHistorySave, StudyChatMessageRead, StudyNoteListItem, StudyNoteRead, StudyNoteUpdate,
 )
 from app.services.study_service import StudyService
@@ -124,6 +124,22 @@ def complete_review(chapter_id: int, user: User = Depends(get_current_user), db:
 def review_questions(chapter_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[ReviewQuestionRead]]:
     records = StudyService(db).create_review_questions(user.id, chapter_id)
     return ApiResponse(message="已生成本章复习题", data=records)
+
+
+@router.get("/reviews/{chapter_id}/latest-result", response_model=ApiResponse[list[ReviewResultItem]])
+def latest_review_result(chapter_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[ReviewResultItem]]:
+    return ApiResponse(data=StudyService(db).latest_review_result(user.id, chapter_id))
+
+
+@router.post("/reviews/{chapter_id}/references", response_model=ApiResponse[list[ReviewReferenceItem]])
+def review_references(chapter_id: int, payload: ReviewReferencesRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[ReviewReferenceItem]]:
+    return ApiResponse(message="参考答案已生成", data=StudyService(db).review_references(user.id, chapter_id, payload.practice_ids, force=payload.force))
+
+
+@router.post("/reviews/{chapter_id}/save-to-notes", response_model=ApiResponse[StudyNoteRead])
+def save_review_to_notes(chapter_id: int, payload: ReviewSaveToNotesRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[StudyNoteRead]:
+    note = StudyService(db).save_review_to_notes(user.id, chapter_id, payload.practice_ids)
+    return ApiResponse(message="答题记录已保存到笔记空间", data=note)
 
 
 @router.post("/reviews/questions/{practice_id}/answer", response_model=ApiResponse[ReviewAnswerResult])

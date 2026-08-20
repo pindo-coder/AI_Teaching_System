@@ -46,7 +46,7 @@ def test_note_and_review_plan(client: TestClient, db: Session) -> None:
     assert client.get("/api/v1/study/notes", headers=headers).json()["data"] == []
 
 
-def test_review_question_loop(client: TestClient, db: Session) -> None:
+def test_review_question_loop(client: TestClient, db: Session, monkeypatch) -> None:
     user = User(username="review_student", password_hash=hash_password("secure-pass-123"), role="student")
     course = Course(name="习概", description="测试")
     db.add_all([user, course]); db.flush()
@@ -63,7 +63,59 @@ def test_review_question_loop(client: TestClient, db: Session) -> None:
         answer = client.post(f"/api/v1/study/reviews/questions/{item['id']}/answer", headers=headers,
                              json={"answer": "本题围绕核心概念、主要观点和现实意义进行分析，并说明它们之间的逻辑关系。"})
         assert answer.status_code == 200
+        answer_data = answer.json()["data"]
+        assert answer_data["ai_reference_answer"]
+        assert answer_data["reference_knowledge_points"]
+        duplicate = client.post(f"/api/v1/study/reviews/questions/{item['id']}/answer", headers=headers,
+                                json={"answer": "重复提交用于恢复前端切题状态。"})
+        assert duplicate.status_code == 200
+        assert "恢复本次练习进度" in duplicate.json()["data"]["feedback"]
     assert answer.json()["data"]["completed"] is True
+    references = client.post(
+        f"/api/v1/study/reviews/{chapter.id}/references",
+        headers=headers,
+        json={"practice_ids": [item["id"] for item in questions]},
+    )
+    assert references.status_code == 200
+    reference_data = references.json()["data"]
+    assert {item["practice_id"] for item in reference_data} == {item["id"] for item in questions}
+    assert all(item["ai_reference_answer"] for item in reference_data)
+    assert all(item["reference_knowledge_points"] for item in reference_data)
+    assert len({item["ai_reference_answer"] for item in reference_data}) == len(questions)
+    from app.services.ai_service import AiService
+    monkeypatch.setattr(AiService, "assist", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("cached references must not call AI")))
+    cached_references = client.post(
+        f"/api/v1/study/reviews/{chapter.id}/references",
+        headers=headers,
+        json={"practice_ids": [item["id"] for item in questions]},
+    )
+    assert cached_references.status_code == 200
+    assert cached_references.json()["data"] == reference_data
+    latest_result = client.get(f"/api/v1/study/reviews/{chapter.id}/latest-result", headers=headers)
+    assert latest_result.status_code == 200
+    latest_data = latest_result.json()["data"]
+    assert [item["practice_id"] for item in latest_data] == [item["id"] for item in questions]
+    assert all(item["student_answer"] for item in latest_data)
+    assert all(item["reference_generated"] for item in latest_data)
+    assert all(item["ai_reference_answer"] for item in latest_data)
+    saved_to_notes = client.post(
+        f"/api/v1/study/reviews/{chapter.id}/save-to-notes",
+        headers=headers,
+        json={"practice_ids": [item["id"] for item in questions]},
+    )
+    assert saved_to_notes.status_code == 200
+    note_content = saved_to_notes.json()["data"]["content"]
+    assert "本章练习记录" in note_content
+    assert "我的作答" in note_content
+    assert "AI 参考答案" in note_content
+    assert "参考知识点" in note_content
+    duplicate_save = client.post(
+        f"/api/v1/study/reviews/{chapter.id}/save-to-notes",
+        headers=headers,
+        json={"practice_ids": [item["id"] for item in questions]},
+    )
+    assert duplicate_save.status_code == 200
+    assert duplicate_save.json()["data"]["content"] == note_content
     task_summary = client.get(
         "/api/v1/learning/task-points",
         headers=headers,

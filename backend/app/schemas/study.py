@@ -99,5 +99,34 @@ class ReviewAnswerResult(BaseModel):
     feedback: str
     reference_answer: str
     source_position: str
+    ai_reference_answer: str = ""
+    reference_knowledge_points: list[str] = Field(default_factory=list)
     completed: bool
     next_interval_days: int | None = None
+
+
+class ReviewReferenceItem(BaseModel):
+    practice_id: int
+    ai_reference_answer: str
+    reference_knowledge_points: list[str] = Field(default_factory=list)
+
+
+class ReviewReferencesRequest(BaseModel):
+    practice_ids: list[int] = Field(min_length=1, max_length=10)
+    force: bool = False
+
+
+class ReviewSaveToNotesRequest(BaseModel):
+    practice_ids: list[int] = Field(min_length=1, max_length=10)
+
+
+class ReviewResultItem(BaseModel):
+    practice_id: int
+    question: str
+    source_position: str
+    student_answer: str
+    is_correct: bool
+    feedback: str
+    ai_reference_answer: str
+    reference_knowledge_points: list[str] = Field(default_factory=list)
+    reference_generated: bool = False

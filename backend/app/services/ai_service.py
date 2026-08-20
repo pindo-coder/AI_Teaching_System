@@ -1,6 +1,8 @@
 from collections.abc import Iterator
 from typing import Protocol
+import json
 import logging
+import re
 
 from fastapi import HTTPException, status
 from langchain_core.output_parsers import StrOutputParser
@@ -172,6 +174,13 @@ class MockGenerator:
                 f"核心内容：\n{excerpt}\n\n"
                 "学习提示：建议结合章节原文，按照“概念—观点—逻辑—现实意义”的顺序复习。"
             )
+        if task == "练习答题反馈":
+            practice_ids = [int(value) for value in re.findall(r'"practice_id"\s*:\s*(\d+)', variables["question"])]
+            return json.dumps([{
+                "practice_id": practice_id,
+                "ai_reference_answer": f"本题应围绕《{title}》的章节主旨作答，结合教材中的核心概念、主要观点和论证逻辑进行说明。",
+                "reference_knowledge_points": [f"{title}的章节主旨", "教材中的核心概念与主要观点", "观点之间的逻辑关系", "理论联系实际的分析依据"],
+            } for practice_id in practice_ids], ensure_ascii=False)
         return (
             f"【{stage}·{task}】\n\n"
             f"本次学习围绕“{title}”展开。根据当前章节资料，可重点关注以下内容：\n\n"
@@ -372,14 +381,16 @@ class AiService:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="章节不存在")
         if chapter.course_id != course.id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节与课程不匹配")
-        layer_document_ids = self.documents.eligible_layer_ids(
-            course_id=course.id, chapter_id=chapter.id, user=self.user
-        )
+        # Practice feedback must stay within the current chapter. General
+        # layered retrieval may surface unrelated current-affairs material.
+        chapter_only = payload.task_type == "review_feedback"
+        layer_document_ids = ({"central": [], "textbook": [], "local": []} if chapter_only else
+            self.documents.eligible_layer_ids(course_id=course.id, chapter_id=chapter.id, user=self.user))
         # 导入教材自动生成的专题正文是当前章节的首要依据，不能在章节检索
         # 不到时回退到整本教材的 Top-K，否则容易把导论内容带入其他章节。
         chapter_content = (chapter.content or "").strip()
         retrieved_chunks = []
-        if any(layer_document_ids.values()):
+        if not chapter_only and any(layer_document_ids.values()):
             retrieved_chunks = retrieve_layered(
                 f"{chapter.title} {retrieval_question or payload.question}", layer_document_ids=layer_document_ids,
                 chapter_id=chapter.id, top_k=6,

@@ -24,9 +24,19 @@ const allPendingAssignments = computed(() => assignments.value.filter((item) => 
 const pendingAssignments = computed(() => allPendingAssignments.value.slice(0, 3))
 const activeTeacherAssignments = computed(() => teacherAssignments.value.filter((item) => item.status === 'published'))
 const latestProgress = computed(() => dashboard.value?.recent_progress[0] || null)
+const latestFootprint = computed(() => dashboard.value?.stage_footprints
+  .filter((item) => item.last_activity_time)
+  .sort((a, b) => new Date(b.last_activity_time || 0).getTime() - new Date(a.last_activity_time || 0).getTime())[0] || null)
+const currentLearningStage = computed(() => latestFootprint.value?.learning_stage || latestProgress.value?.learning_stage || null)
+const learningStatusLabel = computed(() => dashboard.value?.learning_status_label || '未开始')
+const recentActivitySummary = computed(() => dashboard.value?.recent_activities.slice(0, 3).map((item) => {
+  const stageLabel = item.learning_stage ? stageLabels[item.learning_stage] : ''
+  return stageLabel ? `${stageLabel} · ${item.label}` : item.label
+}).join(' / ') || '完成真实学习活动后自动形成')
 const continuePath = computed(() => {
-  const progress = latestProgress.value
-  return progress ? `/courses/${progress.course_id}/chapters/${progress.chapter_id}/${progress.learning_stage}` : '/courses'
+  const courseId = dashboard.value?.current_course?.id
+  const chapterId = dashboard.value?.current_chapter?.id
+  return courseId && chapterId ? `/courses/${courseId}/chapters/${chapterId}/${currentLearningStage.value || 'preview'}` : '/courses'
 })
 const petContext = computed<AiPetContext>(() => {
   const nextTask = allPendingAssignments.value[0]
@@ -35,8 +45,8 @@ const petContext = computed<AiPetContext>(() => {
     role,
     username: auth.user?.username || '',
     chapterTitle: dashboard.value?.current_chapter?.title || null,
-    learningStage: latestProgress.value?.learning_stage || null,
-    progress: dashboard.value?.overall_progress || 0,
+    learningStage: currentLearningStage.value,
+    learningStatus: learningStatusLabel.value,
     pendingCount: auth.isTeacher ? activeTeacherAssignments.value.length : allPendingAssignments.value.length,
     overdueCount: auth.isTeacher ? 0 : allPendingAssignments.value.filter((item) => item.status === 'overdue').length,
     continuePath: continuePath.value,
@@ -57,12 +67,15 @@ const quickLinks = computed(() => auth.isTeacher ? [
 
 function taskPath(task: StudentAssignment) { return `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
 function stagePath(stage: LearningStage) {
-  const progress = latestProgress.value
-  return progress ? `/courses/${progress.course_id}/chapters/${progress.chapter_id}/${stage}` : '/courses'
+  const courseId = dashboard.value?.current_course?.id
+  const chapterId = dashboard.value?.current_chapter?.id
+  return courseId && chapterId ? `/courses/${courseId}/chapters/${chapterId}/${stage}` : '/courses'
 }
-function stageProgress(stage: LearningStage) {
-  const progress = dashboard.value?.recent_progress.find((item) => item.course_id === latestProgress.value?.course_id && item.chapter_id === latestProgress.value?.chapter_id && item.learning_stage === stage)
-  return progress?.progress || 0
+function stageFootprint(stage: LearningStage) {
+  return dashboard.value?.stage_footprints.find((item) => item.learning_stage === stage)
+}
+function stageStatusClass(stage: LearningStage) {
+  return stageFootprint(stage)?.status.replace('_', '-') || 'not-started'
 }
 function handlePetAction(action: AiPetAction) { router.push(action.path) }
 function deadlineClass(task: StudentAssignment) {
@@ -95,7 +108,7 @@ onMounted(async () => {
         <div class="dashboard-live-context">
           <span><small>{{ auth.isTeacher ? '当前教学内容' : '当前学习专题' }}</small><strong>{{ dashboard?.current_chapter?.title || '尚未选择专题' }}</strong></span>
           <span><small>{{ auth.isTeacher ? '进行中任务' : '待完成任务' }}</small><strong>{{ auth.isTeacher ? activeTeacherAssignments.length : allPendingAssignments.length }} 项</strong></span>
-          <span><small>综合进度</small><strong>{{ dashboard?.overall_progress || 0 }}%</strong></span>
+          <span><small>{{ auth.isTeacher ? '教学工作台' : '学习状态' }}</small><strong>{{ auth.isTeacher ? '任务与专题协同' : learningStatusLabel }}</strong></span>
         </div>
       </div>
       <template #visual><AiLearningPet :context="petContext" :loading="loading" @action="handlePetAction" /></template>
@@ -114,23 +127,23 @@ onMounted(async () => {
     </section>
 
     <section class="dashboard-context-strip">
-      <article class="dashboard-current-topic"><div><span class="dashboard-card-kicker">{{ auth.isTeacher ? '当前教学上下文' : '当前学习上下文' }}</span><h2>{{ dashboard?.current_course?.name || '《习近平新时代中国特色社会主义思想概论》' }}</h2><p>{{ dashboard?.current_chapter?.title || (auth.isTeacher ? '通过教材专题组织教学任务' : '尚未选择学习专题') }}</p></div><div class="dashboard-progress-ring" :style="{ '--dashboard-progress': `${dashboard?.overall_progress || 0}%` }"><span>{{ dashboard?.overall_progress || 0 }}%</span></div></article>
+      <article class="dashboard-current-topic"><div><span class="dashboard-card-kicker">{{ auth.isTeacher ? '当前教学上下文' : '当前学习上下文' }}</span><h2>{{ dashboard?.current_course?.name || '《习近平新时代中国特色社会主义思想概论》' }}</h2><p>{{ dashboard?.current_chapter?.title || (auth.isTeacher ? '通过教材专题组织教学任务' : '尚未选择学习专题') }}</p></div><div v-if="!auth.isTeacher" class="dashboard-footprint-status" :class="dashboard?.learning_status || 'not_started'"><span></span><strong>{{ learningStatusLabel }}</strong><small>{{ dashboard?.outputs.length ? `${dashboard.outputs.length} 项学习产出` : '由真实学习活动形成' }}</small></div><div v-else class="dashboard-footprint-status teaching"><span></span><strong>教学组织中</strong><small>任务与专题协同</small></div></article>
       <article class="dashboard-data-card"><span>{{ auth.isTeacher ? '进行中任务' : '待处理任务' }}</span><strong>{{ auth.isTeacher ? activeTeacherAssignments.length : allPendingAssignments.length }}</strong><small>{{ auth.isTeacher ? '进入任务管理查看完成情况' : '按截止时间优先完成' }}</small></article>
-      <article class="dashboard-data-card"><span>{{ auth.isTeacher ? '教学记录' : '近期学习记录' }}</span><strong>{{ dashboard?.recent_progress.length || 0 }}</strong><small>由真实学习行为自动形成</small></article>
+      <article class="dashboard-data-card"><span>{{ auth.isTeacher ? '教学记录' : '近期学习活动' }}</span><strong>{{ dashboard?.recent_activities.length || 0 }}</strong><small>{{ auth.isTeacher ? '由真实教学行为自动形成' : recentActivitySummary }}</small></article>
     </section>
 
     <section class="dashboard-learning-command">
       <article class="dashboard-learning-path">
         <div class="dashboard-panel-heading"><div><span class="dashboard-card-kicker">专题学习路径</span><h2>{{ auth.isTeacher ? '组织当前章节教学' : '沿着当前章节继续学习' }}</h2></div><el-button text type="primary" @click="router.push('/courses')">切换专题 →</el-button></div>
         <div class="dashboard-stage-rail">
-          <button v-for="(stage, index) in learningStages" :key="stage" type="button" class="dashboard-stage-step" :class="{ active: latestProgress?.learning_stage === stage, completed: stageProgress(stage) >= 100 }" @click="router.push(stagePath(stage))">
-            <span>0{{ index + 1 }}</span><strong>{{ stageLabels[stage] }}</strong><small>{{ stageDescriptions[stage] }}</small><em>{{ stageProgress(stage) }}%</em>
+          <button v-for="(stage, index) in learningStages" :key="stage" type="button" class="dashboard-stage-step" :class="[stageStatusClass(stage), { active: currentLearningStage === stage }]" @click="router.push(stagePath(stage))">
+            <span>0{{ index + 1 }}</span><strong>{{ stageLabels[stage] }}</strong><small>{{ stageFootprint(stage)?.outputs[0] || stageDescriptions[stage] }}</small><em>{{ auth.isTeacher ? '进入组织' : stageFootprint(stage)?.status_label || '未开始' }}</em>
           </button>
         </div>
       </article>
       <article class="dashboard-ai-insight">
         <span class="dashboard-ai-mark">AI</span>
-        <div><span class="dashboard-card-kicker">智能学习建议</span><h2>{{ auth.isTeacher ? '让教学任务与章节目标对齐' : '让下一步学习更明确' }}</h2><p>{{ auth.isTeacher ? '从当前专题发布阅读、AI 辅助或笔记任务，系统将自动汇总学生完成情况。' : allPendingAssignments.length ? '建议先完成教师布置的任务，再回到笔记空间整理本章认识。' : '当前没有待完成任务，可以继续专题学习或整理个人笔记。' }}</p></div>
+        <div><span class="dashboard-card-kicker">智能学习建议</span><h2>{{ auth.isTeacher ? '让教学任务与章节目标对齐' : '让下一步学习更明确' }}</h2><p>{{ auth.isTeacher ? '从当前专题发布阅读、AI 辅助或笔记任务，系统将自动汇总学生完成情况。' : allPendingAssignments.length ? '建议先完成教师布置的任务，再回到笔记空间整理本章认识。' : dashboard?.next_action || '先选择一个教材专题开始学习。' }}</p></div>
         <el-button type="primary" @click="router.push(auth.isTeacher ? '/assignments' : allPendingAssignments.length ? '/assignments' : continuePath)">{{ auth.isTeacher ? '管理教学任务' : allPendingAssignments.length ? '查看待办任务' : '继续学习' }}</el-button>
       </article>
     </section>
@@ -381,24 +394,48 @@ onMounted(async () => {
   letter-spacing: 0.08em;
 }
 
-.dashboard-progress-ring {
+.dashboard-footprint-status {
   display: grid;
-  width: 72px;
-  height: 72px;
-  place-items: center;
-  background: conic-gradient(var(--blue-600) var(--dashboard-progress), var(--blue-100) 0);
+  grid-template-columns: 10px auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  min-width: 150px;
+  padding: var(--space-3) var(--space-4);
+  background: var(--blue-50);
+  border: 1px solid var(--blue-100);
+  border-radius: var(--radius-input);
+}
+
+.dashboard-footprint-status > span {
+  width: 9px;
+  height: 9px;
+  background: var(--ink-400);
   border-radius: 50%;
 }
 
-.dashboard-progress-ring span {
-  display: grid;
-  width: 56px;
-  height: 56px;
-  place-items: center;
+.dashboard-footprint-status strong {
   color: var(--blue-800);
-  background: var(--bg-card);
-  border-radius: 50%;
-  font-weight: var(--fw-bold);
+  font-size: var(--fs-aux);
+}
+
+.dashboard-footprint-status small {
+  grid-column: 2;
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.dashboard-footprint-status.in_progress > span,
+.dashboard-footprint-status.teaching > span {
+  background: var(--blue-600);
+}
+
+.dashboard-footprint-status.has_output {
+  background: var(--color-success-bg);
+  border-color: var(--color-success);
+}
+
+.dashboard-footprint-status.has_output > span {
+  background: var(--color-success);
 }
 
 .dashboard-data-card {
@@ -472,8 +509,12 @@ onMounted(async () => {
   transform: none;
 }
 
-.dashboard-stage-step.completed {
+.dashboard-stage-step.has-output {
   border-left: 3px solid var(--color-success);
+}
+
+.dashboard-stage-step.in-progress {
+  border-left: 3px solid var(--blue-600);
 }
 
 .dashboard-stage-step > span,
@@ -492,6 +533,10 @@ onMounted(async () => {
   color: var(--blue-600);
   font-style: normal;
   font-weight: var(--fw-bold);
+}
+
+.dashboard-stage-step.has-output em {
+  color: var(--color-success);
 }
 
 .dashboard-ai-insight {

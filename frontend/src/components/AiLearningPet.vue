@@ -57,7 +57,7 @@ const suggestions = computed(() => {
     ]
   }
   return context.chapterTitle ? [
-    `继续学习“${context.chapterTitle}”，当前综合进度为 ${context.progress}%。`,
+    `继续学习“${context.chapterTitle}”，当前状态为“${context.learningStatus}”。`,
     '目前没有待完成任务，可以进入笔记空间整理本章认识。',
     '也可以查看最新时政要点，把现实问题关联回教材知识。',
   ] : [

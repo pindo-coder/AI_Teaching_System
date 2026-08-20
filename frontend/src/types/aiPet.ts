@@ -18,7 +18,7 @@ export interface AiPetContext {
   username: string
   chapterTitle: string | null
   learningStage: LearningStage | null
-  progress: number
+  learningStatus: string
   pendingCount: number
   overdueCount: number
   continuePath: string

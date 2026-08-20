@@ -55,7 +55,9 @@ export interface NoteRelatedData {
 }
 
 export interface ReviewQuestion { id: number; question: string; source_position: string }
-export interface ReviewAnswerResult { id: number; is_correct: boolean; feedback: string; reference_answer: string; source_position: string; completed: boolean; next_interval_days: number | null }
+export interface ReviewAnswerResult { id: number; is_correct: boolean; feedback: string; reference_answer: string; source_position: string; ai_reference_answer: string; reference_knowledge_points: string[]; completed: boolean; next_interval_days: number | null }
+export interface ReviewReferenceItem { practice_id: number; ai_reference_answer: string; reference_knowledge_points: string[] }
+export interface ReviewResultItem { practice_id: number; question: string; source_position: string; student_answer: string; is_correct: boolean; feedback: string; ai_reference_answer: string; reference_knowledge_points: string[]; reference_generated: boolean }
 
 export const studyApi = {
   notes: () => http.get<ApiResponse<StudyNote[]>>('/study/notes'),
@@ -72,6 +74,16 @@ export const studyApi = {
   semanticSearch: (q: string, courseId?: number) => http.get<ApiResponse<NoteSearchItem[]>>('/study/notes/semantic-search', { params: { q, course_id: courseId } }),
   related: (chapterId: number) => http.get<ApiResponse<NoteRelatedData>>(`/study/notes/${chapterId}/related`),
   exportNote: (chapterId: number, format: 'markdown' | 'docx') => http.get(`/study/notes/${chapterId}/export`, { params: { format }, responseType: 'blob' }),
-  reviewQuestions: (chapterId: number) => http.post<ApiResponse<ReviewQuestion[]>>(`/study/reviews/${chapterId}/questions`),
+  reviewQuestions: (chapterId: number) => http.post<ApiResponse<ReviewQuestion[]>>(`/study/reviews/${chapterId}/questions`, undefined, { timeout: 60_000 }),
+  latestReviewResult: (chapterId: number) => http.get<ApiResponse<ReviewResultItem[]>>(`/study/reviews/${chapterId}/latest-result`),
   submitReviewAnswer: (practiceId: number, answer: string) => http.post<ApiResponse<ReviewAnswerResult>>(`/study/reviews/questions/${practiceId}/answer`, { answer }),
+  reviewReferences: (chapterId: number, practiceIds: number[], force = false) => http.post<ApiResponse<ReviewReferenceItem[]>>(
+    `/study/reviews/${chapterId}/references`,
+    { practice_ids: practiceIds, force },
+    { timeout: 60_000 },
+  ),
+  saveReviewToNotes: (chapterId: number, practiceIds: number[]) => http.post<ApiResponse<StudyNote>>(
+    `/study/reviews/${chapterId}/save-to-notes`,
+    { practice_ids: practiceIds },
+  ),
 }

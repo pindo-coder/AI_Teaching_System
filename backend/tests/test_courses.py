@@ -77,3 +77,7 @@ def test_admin_course_chapter_and_student_learning_flow(client: TestClient, db: 
     assert dashboard.status_code == 200
     assert dashboard.json()["data"]["current_course"]["id"] == course_id
     assert dashboard.json()["data"]["overall_progress"] == 60
+    assert dashboard.json()["data"]["learning_status"] == "not_started"
+    assert [item["status"] for item in dashboard.json()["data"]["stage_footprints"]] == [
+        "not_started", "not_started", "not_started",
+    ]

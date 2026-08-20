@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -11,10 +11,40 @@ from app.schemas.task import (
     LearningTelemetryCreate,
     TaskProgressSummary,
 )
+from app.schemas.learning import LearningFootprint
 from app.services.task_service import TaskService
+from app.services.learning_footprint_service import LearningFootprintService
 
 
 router = APIRouter(prefix="/learning", tags=["learning-tasks"])
+
+
+@router.get("/footprint", response_model=ApiResponse[LearningFootprint])
+def learning_footprint(
+    course_id: int,
+    chapter_id: int,
+    learning_stage: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[LearningFootprint]:
+    try:
+        footprint = LearningFootprintService(db).summary(user.id, course_id, chapter_id, learning_stage)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ApiResponse(data=footprint)
+
+
+@router.post("/activity", response_model=ApiResponse[LearningFootprint])
+def record_learning_activity(
+    payload: LearningTelemetryCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[LearningFootprint]:
+    try:
+        footprint = LearningFootprintService(db).record(user.id, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    return ApiResponse(message="学习足迹已更新", data=footprint)
 
 
 @router.get("/task-points", response_model=ApiResponse[TaskProgressSummary])
