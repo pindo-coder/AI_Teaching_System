@@ -272,8 +272,19 @@ export interface DocumentPage {
   pdf_page: number
   printed_page_label: string | null
   text: string
+  raw_text: string | null
+  text_blocks: DocumentTextBlock[]
   width: number | null
   height: number | null
+}
+
+export interface DocumentTextBlock {
+  id: string
+  text: string
+  bbox: [number, number, number, number]
+  excluded: boolean
+  exclusion_reason: 'page_number' | 'repeated_header' | 'repeated_footer' | 'manual' | null
+  manual_override: 'include' | 'exclude' | null
 }
 
 export interface OutlineNode {
@@ -324,6 +335,11 @@ export const knowledgeApi = {
     }),
   detail: (id: number) => http.get<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}`),
   pages: (id: number, page?: number) => http.get<ApiResponse<DocumentPage[]>>(`/knowledge/documents/${id}/pages`, { params: page ? { page } : undefined }),
+  overrideTextBlock: (id: number, page: number, blockId: string, excluded: boolean) =>
+    http.put<ApiResponse<DocumentPage>>(
+      `/knowledge/documents/${id}/pages/${page}/text-blocks/${encodeURIComponent(blockId)}`,
+      { excluded },
+    ),
   outline: (id: number) => http.get<ApiResponse<OutlineNode[]>>(`/knowledge/documents/${id}/outline`),
   calibrationMeta: (id: number) => http.get<ApiResponse<{ version_label: string; access_policy: KnowledgeDocument['access_policy']; page_number_ranges: PageNumberRangeInput[] }>>(`/knowledge/documents/${id}/calibration-meta`),
   fileBlob: (id: number, page?: number) => http.get<Blob>(`/knowledge/documents/${id}/file`, { params: page ? { page } : undefined, responseType: 'blob', timeout: 60_000 }),
@@ -338,6 +354,10 @@ export const knowledgeApi = {
     http.delete<ApiResponse<{ id: number }>>(`/knowledge/documents/${id}`),
   reindex: (id: number) =>
     http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}/reindex`, undefined, {
+      timeout: 120_000,
+    }),
+  refreshOcr: (id: number) =>
+    http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/documents/${id}/refresh-ocr`, undefined, {
       timeout: 120_000,
     }),
   autoCalibrate: (id: number) =>

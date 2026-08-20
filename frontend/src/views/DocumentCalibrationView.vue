@@ -2,8 +2,8 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft, CirclePlus, Delete, Select } from '@element-plus/icons-vue'
-import { knowledgeApi, type KnowledgeDocument, type DocumentPage, type OutlineNode, type PageNumberRangeInput } from '@/api/knowledge'
+import { ArrowLeft, CirclePlus, Delete, RefreshLeft, Remove, Select } from '@element-plus/icons-vue'
+import { knowledgeApi, type KnowledgeDocument, type DocumentPage, type DocumentTextBlock, type OutlineNode, type PageNumberRangeInput } from '@/api/knowledge'
 import { courseApi } from '@/api/courses'
 import type { Chapter } from '@/types'
 import { getErrorMessage } from '@/utils/error'
@@ -22,6 +22,7 @@ const loading = ref(true)
 const saving = ref(false)
 const publishing = ref(false)
 const autoSplitting = ref(false)
+const refreshingOcr = ref(false)
 const deleting = ref(false)
 const document = ref<KnowledgeDocument | null>(null)
 const chapters = ref<Chapter[]>([])
@@ -35,6 +36,12 @@ let pdfRequestId = 0
 const versionLabel = ref('当前版')
 const accessPolicy = ref<'citation_only' | 'full_preview' | 'download'>('full_preview')
 const pageRanges = ref<PageNumberRangeInput[]>([])
+const textView = ref<'clean' | 'raw'>('clean')
+const blockUpdatingId = ref('')
+const textViewOptions = [
+  { label: '清洗正文', value: 'clean' },
+  { label: 'OCR 原文', value: 'raw' },
+]
 
 const selectedNode = computed(() => nodes.value.find((item) => item.client_id === selectedClientId.value) || null)
 const selectedPageData = computed(() => pages.value.find((item) => item.pdf_page === selectedPage.value) || null)
@@ -125,6 +132,25 @@ function useSelectionAsAnchor(kind: 'start' | 'end') {
   ElMessage.success(kind === 'start' ? '已设置正文起点' : '已设置正文终点')
 }
 
+function exclusionLabel(reason: DocumentTextBlock['exclusion_reason']) {
+  return reason === 'page_number' ? '页码' : reason === 'repeated_header' ? '重复页眉'
+    : reason === 'repeated_footer' ? '重复页脚' : reason === 'manual' ? '手动排除' : ''
+}
+
+async function overrideTextBlock(block: DocumentTextBlock) {
+  const page = selectedPageData.value
+  if (!page) return
+  blockUpdatingId.value = block.id
+  try {
+    const updated = (await knowledgeApi.overrideTextBlock(documentId, page.pdf_page, block.id, !block.excluded)).data.data
+    const index = pages.value.findIndex((item) => item.pdf_page === updated.pdf_page)
+    if (index >= 0) pages.value[index] = updated
+    ElMessage.success(block.excluded ? '文本块已恢复到正文' : '文本块已从正文排除')
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '文本块校正失败'))
+  } finally { blockUpdatingId.value = '' }
+}
+
 function addPageRange() {
   pageRanges.value.push({ pdf_page_start: 1, pdf_page_end: maxPage.value, numbering_style: 'arabic', printed_start: '1' })
 }
@@ -168,6 +194,23 @@ async function autoSplit() {
   } finally { autoSplitting.value = false }
 }
 
+async function refreshOcr() {
+  const confirmed = await ElMessageBox.confirm(
+    '系统将从原始 PDF 重新提取坐标化文字，保留章节结构和印刷页码。是否继续？',
+    '重新提取 OCR 文字',
+    { type: 'warning', confirmButtonText: '重新提取', cancelButtonText: '取消' },
+  ).catch(() => false)
+  if (!confirmed) return
+  refreshingOcr.value = true
+  try {
+    await knowledgeApi.refreshOcr(documentId)
+    ElMessage.success('文字已重新提取，请复核后保存校准')
+    await load()
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, 'OCR 文字重新提取失败'))
+  } finally { refreshingOcr.value = false }
+}
+
 async function deleteDocument() {
   const confirmed = await ElMessageBox.confirm(
     `确定删除“${document.value?.source_title || '这份教材资料'}”吗？文件、校准结构和向量索引将一并删除。`,
@@ -196,7 +239,7 @@ watch(selectedPage, (page, previous) => { if (!loading.value && page !== previou
     <header class="calibration-header">
       <el-button text :icon="ArrowLeft" @click="router.back()">返回资料中心</el-button>
       <div><p class="eyebrow">Textbook Calibration</p><h1>{{ document?.source_title || '教材校准工作台' }}</h1><p>确认章节边界、印刷页码和正文锚点，AI 引用将精确到原始页与知识点。</p></div>
-      <div class="calibration-header__actions"><el-tag :type="document?.calibration_status === 'published' ? 'success' : 'warning'">{{ document?.calibration_status }}</el-tag><el-button :loading="autoSplitting" @click="autoSplit">重新自动拆分</el-button><el-button type="primary" :loading="saving" :icon="Select" @click="save">保存并重建索引</el-button><el-button v-if="auth.user?.role === 'admin'" :disabled="!canPublish" :loading="publishing" @click="publish">发布版本</el-button><el-button type="danger" plain :loading="deleting" :icon="Delete" @click="deleteDocument">删除资料</el-button></div>
+      <div class="calibration-header__actions"><el-tag :type="document?.calibration_status === 'published' ? 'success' : 'warning'">{{ document?.calibration_status }}</el-tag><el-button v-if="document?.calibration_status !== 'published'" :icon="RefreshLeft" :loading="refreshingOcr" @click="refreshOcr">重新提取文字</el-button><el-button :loading="autoSplitting" @click="autoSplit">重新自动拆分</el-button><el-button type="primary" :loading="saving" :icon="Select" @click="save">保存并重建索引</el-button><el-button v-if="auth.user?.role === 'admin'" :disabled="!canPublish" :loading="publishing" @click="publish">发布版本</el-button><el-button type="danger" plain :loading="deleting" :icon="Delete" @click="deleteDocument">删除资料</el-button></div>
     </header>
 
     <section class="calibration-settings">
@@ -228,7 +271,22 @@ watch(selectedPage, (page, previous) => { if (!loading.value && page !== previou
             <el-form-item label="PDF 页范围"><div class="page-pair"><el-input-number v-model="selectedNode.pdf_page_start" :min="1" :max="maxPage" /><span>—</span><el-input-number v-model="selectedNode.pdf_page_end" :min="selectedNode.pdf_page_start" :max="maxPage" /></div></el-form-item>
             <el-form-item><el-checkbox v-model="selectedNode.retrieval_enabled">纳入 AI 检索</el-checkbox></el-form-item>
           </el-form>
-          <div class="anchor-tools"><strong>本页文字（可拖选）</strong><p>{{ selectedPageData?.text || '该页未提取到可检索文字' }}</p><div><el-button size="small" @click="useSelectionAsAnchor('start')">设为正文起点</el-button><el-button size="small" @click="useSelectionAsAnchor('end')">设为正文终点</el-button></div></div>
+          <div class="anchor-tools">
+            <div class="anchor-tools__header"><strong>本页文字（可拖选）</strong><el-segmented v-model="textView" :options="textViewOptions" size="small" /></div>
+            <p>{{ textView === 'clean' ? selectedPageData?.text : selectedPageData?.raw_text || selectedPageData?.text || '该页未提取到可检索文字' }}</p>
+            <div><el-button size="small" :disabled="textView !== 'clean'" @click="useSelectionAsAnchor('start')">设为正文起点</el-button><el-button size="small" :disabled="textView !== 'clean'" @click="useSelectionAsAnchor('end')">设为正文终点</el-button></div>
+          </div>
+          <div v-if="selectedPageData?.text_blocks.length" class="ocr-block-review">
+            <div class="ocr-block-review__header"><strong>文本块校正</strong><span>{{ selectedPageData.text_blocks.filter((item) => item.excluded).length }} 项已排除</span></div>
+            <div class="ocr-block-list">
+              <div v-for="block in selectedPageData.text_blocks" :key="block.id" :class="['ocr-block', { excluded: block.excluded }]">
+                <div><el-tag v-if="block.excluded" size="small" type="warning">{{ exclusionLabel(block.exclusion_reason) }}</el-tag><p>{{ block.text }}</p></div>
+                <el-tooltip :content="block.excluded ? '恢复到正文' : '从正文排除'">
+                  <el-button :icon="block.excluded ? RefreshLeft : Remove" text :type="block.excluded ? 'primary' : 'danger'" :loading="blockUpdatingId === block.id" @click="overrideTextBlock(block)" />
+                </el-tooltip>
+              </div>
+            </div>
+          </div>
           <el-button plain type="danger" :icon="Delete" @click="removeNode">删除当前节点</el-button>
         </template>
         <el-empty v-else description="请选择或添加结构节点" />

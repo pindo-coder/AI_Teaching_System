@@ -36,16 +36,38 @@ def test_citation_only_document_exposes_only_requested_page(client: TestClient, 
         calibration_status="published", status="ready", chunk_count=1,
     )
     db.add(document); db.flush()
-    db.add(DocumentPage(document_id=document.id, pdf_page=1, printed_page_label="1",
-                        text="全过程人民民主是社会主义民主政治的本质属性。", text_blocks=[]))
+    page_text = "全过程人民民主是社会主义民主政治的本质属性。"
+    db.add(DocumentPage(
+        document_id=document.id, pdf_page=1, printed_page_label="1", raw_text=page_text, text=page_text,
+        text_blocks=[{
+            "id": "p1-b0", "text": page_text, "bbox": [60, 120, 520, 150],
+            "excluded": False, "exclusion_reason": None, "manual_override": None,
+        }],
+    ))
     db.commit()
 
     assert client.get(f"/api/v1/knowledge/documents/{document.id}/pages", headers=_headers(student)).status_code == 403
     page = client.get(f"/api/v1/knowledge/documents/{document.id}/pages?page=1", headers=_headers(student))
     assert page.status_code == 200
     assert page.json()["data"][0]["printed_page_label"] == "1"
+    assert page.json()["data"][0]["raw_text"] is None
     assert client.get(f"/api/v1/knowledge/documents/{document.id}/file", headers=_headers(student)).status_code == 403
     cited_file = client.get(f"/api/v1/knowledge/documents/{document.id}/file?page=1", headers=_headers(student))
     assert cited_file.status_code == 200
     assert cited_file.headers["content-type"].startswith("application/pdf")
     assert client.get(f"/api/v1/knowledge/documents/{document.id}/file", headers=_headers(teacher)).status_code == 200
+
+    excluded = client.put(
+        f"/api/v1/knowledge/documents/{document.id}/pages/1/text-blocks/p1-b0",
+        headers=_headers(teacher), json={"excluded": True},
+    )
+    assert excluded.status_code == 200, excluded.text
+    assert excluded.json()["data"]["text"] == ""
+    assert excluded.json()["data"]["text_blocks"][0]["manual_override"] == "exclude"
+
+    restored = client.put(
+        f"/api/v1/knowledge/documents/{document.id}/pages/1/text-blocks/p1-b0",
+        headers=_headers(teacher), json={"excluded": False},
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json()["data"]["text"] == page_text

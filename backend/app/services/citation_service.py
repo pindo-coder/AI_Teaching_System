@@ -1,20 +1,20 @@
 import re
+from types import SimpleNamespace
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.core.config import settings
 from app.models.chapter import Chapter
 from app.models.citation import (
     CitationFeedback, DocumentOutlineNode, DocumentPage, KnowledgeChunk, PageNumberRange,
     TextbookVersion,
 )
 from app.models.knowledge_document import KnowledgeDocument
-from app.rag.text_splitter import split_text
+from app.rag.page_cleaner import join_page_texts, render_clean_text
+from app.rag.text_splitter import split_pages
 from app.rag.embeddings import get_embedding_profile
 from app.rag.vector_store import add_precise_chunks, delete_document_vectors, resolve_active_collection_name
 from app.schemas.knowledge import CitationFeedbackCreate, DocumentCalibrationUpdate
-from app.schemas.knowledge import OutlineNodeInput
 
 
 def _roman(value: int) -> str:
@@ -75,6 +75,31 @@ class CitationService:
         return list(self.db.scalars(select(DocumentOutlineNode).where(
             DocumentOutlineNode.document_id == document_id
         ).order_by(DocumentOutlineNode.sort_order, DocumentOutlineNode.id)).all())
+
+    def update_text_block(self, document_id: int, pdf_page: int, block_id: str,
+                          *, excluded: bool) -> DocumentPage:
+        self.require_document(document_id)
+        page = self.db.scalar(select(DocumentPage).where(
+            DocumentPage.document_id == document_id,
+            DocumentPage.pdf_page == pdf_page,
+        ))
+        if page is None:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="教材页面不存在")
+        blocks = [dict(item) for item in page.text_blocks]
+        target = next((item for item in blocks if str(item.get("id")) == block_id), None)
+        if target is None:
+            from fastapi import HTTPException
+            detail = "该教材尚无坐标化文本块，请先执行重新索引" if not blocks else "文本块不存在"
+            raise HTTPException(status_code=404, detail=detail)
+        target["manual_override"] = "exclude" if excluded else "include"
+        target["excluded"] = excluded
+        target["exclusion_reason"] = "manual" if excluded else None
+        page.text_blocks = blocks
+        page.text = render_clean_text(blocks)
+        self.db.commit()
+        self.db.refresh(page)
+        return page
 
     def calibrate(self, document_id: int, payload: DocumentCalibrationUpdate) -> KnowledgeDocument:
         document = self.require_document(document_id)
@@ -156,7 +181,7 @@ class CitationService:
             chapter = self.db.get(Chapter, node.chapter_id)
             if chapter and chapter.course_id == document.course_id:
                 chapter.title = node.title
-                chapter.content = "\n\n".join(text for text in page_texts if text)
+                chapter.content = join_page_texts(page_texts)
 
         precise_chunks: list[dict[str, object]] = []
         leaf_nodes = [node for node in nodes if node.id not in children and node.retrieval_enabled]
@@ -164,21 +189,28 @@ class CitationService:
             path = lineage(node)
             chapter_id = next((item.chapter_id for item in reversed(path) if item.chapter_id), document.chapter_id)
             section_path = " / ".join(item.title for item in path)
+            node_pages = []
             for number in range(node.pdf_page_start, node.pdf_page_end + 1):
-                text = self._slice_page(pages[number].text,
-                                        is_start=number == node.pdf_page_start,
-                                        is_end=number == node.pdf_page_end,
-                                        start_anchor=node.start_anchor, end_anchor=node.end_anchor)
-                for paragraph_index, chunk in enumerate(split_text(text), start=1):
-                    precise_chunks.append({
-                        "content": chunk, "pdf_page_start": number, "pdf_page_end": number,
-                        "paragraph_index": paragraph_index,
-                        "printed_page_start": pages[number].printed_page_label or "",
-                        "printed_page_end": pages[number].printed_page_label or "",
-                        "section_path": section_path, "start_anchor": chunk[:120], "end_anchor": chunk[-120:],
-                        "metadata": {"chapter_id": chapter_id if chapter_id is not None else -1,
-                                     "outline_node_id": node.id},
-                    })
+                page = pages[number]
+                node_pages.append(SimpleNamespace(
+                    pdf_page=number,
+                    text=self._slice_page(
+                        page.text, is_start=number == node.pdf_page_start,
+                        is_end=number == node.pdf_page_end,
+                        start_anchor=node.start_anchor, end_anchor=node.end_anchor,
+                    ),
+                ))
+            for chunk in split_pages(node_pages):
+                start_page = int(chunk["pdf_page_start"])
+                end_page = int(chunk["pdf_page_end"])
+                precise_chunks.append({
+                    **chunk,
+                    "printed_page_start": pages[start_page].printed_page_label or "",
+                    "printed_page_end": pages[end_page].printed_page_label or "",
+                    "section_path": section_path,
+                    "metadata": {"chapter_id": chapter_id if chapter_id is not None else -1,
+                                 "outline_node_id": node.id},
+                })
         if not precise_chunks:
             from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="校准结果没有可用于检索的正文节点")

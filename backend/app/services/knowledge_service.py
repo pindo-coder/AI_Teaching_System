@@ -9,7 +9,8 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.rag.document_loader import SUPPORTED_EXTENSIONS, extract_pages, extract_text
+from app.rag.document_loader import SUPPORTED_EXTENSIONS, extract_pages
+from app.rag.page_cleaner import clean_document_pages
 from app.rag.retriever import RetrievedChunk, retrieve
 from app.rag.text_splitter import split_pages, split_text
 from app.rag.embeddings import get_embedding_profile
@@ -159,8 +160,10 @@ class KnowledgeService:
         )
         document_id = document.id
         try:
-            self.db.add_all([DocumentPage(document_id=document.id, pdf_page=page.pdf_page, text=page.text,
-                                          width=page.width, height=page.height, text_blocks=[]) for page in pages])
+            self.db.add_all([DocumentPage(
+                document_id=document.id, pdf_page=page.pdf_page, raw_text=page.raw_text, text=page.text,
+                width=page.width, height=page.height, text_blocks=page.text_blocks or [],
+            ) for page in pages])
             self.db.commit()
         except Exception as exc:
             logger.exception("knowledge_page_persist_failed document_id=%s", document_id)
@@ -260,12 +263,29 @@ class KnowledgeService:
         content = path.read_bytes()
         try:
             pages = extract_pages(document.original_filename, content)
-            chunks = split_pages(pages)
             delete_document_vectors(document.id, collection_name=document.vector_collection)
             self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
+            previous_pages = {page.pdf_page: page for page in self.db.scalars(select(DocumentPage).where(
+                DocumentPage.document_id == document.id
+            )).all()}
+            for page in pages:
+                previous = previous_pages.get(page.pdf_page)
+                overrides = {
+                    str(block.get("id")): block.get("manual_override")
+                    for block in (previous.text_blocks if previous else [])
+                    if block.get("manual_override") in {"include", "exclude"}
+                }
+                for block in page.text_blocks or []:
+                    override = overrides.get(str(block.get("id")))
+                    if override:
+                        block["manual_override"] = override
+            clean_document_pages(pages)
+            chunks = split_pages(pages)
             self.db.execute(delete(DocumentPage).where(DocumentPage.document_id == document.id))
-            self.db.add_all([DocumentPage(document_id=document.id, pdf_page=page.pdf_page, text=page.text,
-                                          width=page.width, height=page.height, text_blocks=[]) for page in pages])
+            self.db.add_all([DocumentPage(
+                document_id=document.id, pdf_page=page.pdf_page, raw_text=page.raw_text, text=page.text,
+                width=page.width, height=page.height, text_blocks=page.text_blocks or [],
+            ) for page in pages])
             vector_ids = add_precise_chunks(
                 document_id=document.id,
                 chunks=chunks,
@@ -306,6 +326,48 @@ class KnowledgeService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="重新索引失败，请稍后重试",
             ) from exc
+
+    def refresh_ocr_extraction(self, document_id: int) -> KnowledgeDocument:
+        document = self.require_document(document_id)
+        if document.material_type != "textbook" or document.source_type != "pdf":
+            raise HTTPException(status_code=400, detail="只有 OCR PDF 教材可以重新提取文字")
+        if document.calibration_status == "published":
+            raise HTTPException(status_code=409, detail="已发布教材不能原地修改，请上传 OCR 新版本")
+        path = Path(document.stored_path)
+        if not path.exists():
+            raise HTTPException(status_code=404, detail="原始 PDF 不存在，无法重新提取")
+        previous_pages = {page.pdf_page: page for page in self.db.scalars(select(DocumentPage).where(
+            DocumentPage.document_id == document.id
+        )).all()}
+        try:
+            pages = extract_pages(document.original_filename, path.read_bytes())
+            for page in pages:
+                previous = previous_pages.get(page.pdf_page)
+                overrides = {
+                    str(block.get("id")): block.get("manual_override")
+                    for block in (previous.text_blocks if previous else [])
+                    if block.get("manual_override") in {"include", "exclude"}
+                }
+                for block in page.text_blocks or []:
+                    if str(block.get("id")) in overrides:
+                        block["manual_override"] = overrides[str(block.get("id"))]
+            clean_document_pages(pages)
+            self.db.execute(delete(DocumentPage).where(DocumentPage.document_id == document.id))
+            self.db.add_all([DocumentPage(
+                document_id=document.id, pdf_page=page.pdf_page,
+                printed_page_label=(previous_pages.get(page.pdf_page).printed_page_label
+                                    if previous_pages.get(page.pdf_page) else None),
+                raw_text=page.raw_text, text=page.text, width=page.width, height=page.height,
+                text_blocks=page.text_blocks or [],
+            ) for page in pages])
+            document.status = "processing"
+            document.calibration_status = "pending"
+            self.db.commit()
+            self.db.refresh(document)
+            return document
+        except (ValueError, OSError) as exc:
+            self.db.rollback()
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def search(self, question: str, *, course_id: int, chapter_id: int | None, top_k: int) -> list[RetrievedChunk]:
         if self.courses.get(course_id) is None:

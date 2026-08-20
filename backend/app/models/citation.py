@@ -29,6 +29,7 @@ class DocumentPage(Base):
     printed_page_label: Mapped[str | None] = mapped_column(String(30))
     # 网页材料通常只有一个逻辑“页”，长篇中文正文很容易超过 MySQL TEXT 的 65KB 上限。
     text: Mapped[str] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"), default="", nullable=False)
+    raw_text: Mapped[str] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"), default="", nullable=False)
     width: Mapped[float | None] = mapped_column(Float)
     height: Mapped[float | None] = mapped_column(Float)
     text_blocks: Mapped[list[dict]] = mapped_column(JSON, default=list, nullable=False)

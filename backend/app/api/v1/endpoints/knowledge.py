@@ -22,6 +22,7 @@ from app.schemas.knowledge import (
     KnowledgeSearchItem, KnowledgeSearchRequest, MaterialBatchCreate, MaterialBatchPreview,
     MaterialBatchRead, MaterialBatchSummaryRead, MaterialClassificationUpdate,
     MaterialScopeUpdate, MaterialSuggestion, MaterialUrlCreate, TextbookVersionRead,
+    TextBlockOverride,
 )
 from app.services.knowledge_service import KnowledgeService
 from app.services.citation_service import CitationService
@@ -403,9 +404,34 @@ def document_pages(document_id: int, user: User = Depends(get_current_user),
     pages = service.pages(document_id)
     if page is not None:
         pages = [item for item in pages if item.pdf_page == page]
-    return ApiResponse(data=[{"id": page.id, "pdf_page": page.pdf_page,
-                              "printed_page_label": page.printed_page_label,
-                              "text": page.text, "width": page.width, "height": page.height} for page in pages])
+    can_review_ocr = user.role in {"teacher", "admin"}
+    return ApiResponse(data=[{
+        "id": item.id, "pdf_page": item.pdf_page,
+        "printed_page_label": item.printed_page_label,
+        "text": item.text, "raw_text": item.raw_text if can_review_ocr else None,
+        "text_blocks": item.text_blocks if can_review_ocr else [],
+        "width": item.width, "height": item.height,
+    } for item in pages])
+
+
+@router.put("/documents/{document_id}/pages/{pdf_page}/text-blocks/{block_id}",
+            response_model=ApiResponse[dict])
+def override_document_text_block(
+    document_id: int, pdf_page: int, block_id: str, payload: TextBlockOverride,
+    user: User = Depends(knowledge_manager), db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    document = KnowledgeService(db).require_document(document_id)
+    MaterialCenterService(db).ensure_document_access(document, user)
+    if document.material_type != "textbook":
+        raise HTTPException(status_code=400, detail="只有教材正文可以校正 OCR 文本块")
+    page = CitationService(db).update_text_block(
+        document_id, pdf_page, block_id, excluded=payload.excluded,
+    )
+    return ApiResponse(message="正文清洗结果已更新，保存校准后将重建索引", data={
+        "id": page.id, "pdf_page": page.pdf_page, "printed_page_label": page.printed_page_label,
+        "text": page.text, "raw_text": page.raw_text, "text_blocks": page.text_blocks,
+        "width": page.width, "height": page.height,
+    })
 
 
 @router.get("/documents/{document_id}/outline", response_model=ApiResponse[list[dict]])
@@ -420,6 +446,18 @@ def document_outline(document_id: int, user: User = Depends(get_current_user),
                               "start_anchor": node.start_anchor, "end_anchor": node.end_anchor,
                               "retrieval_enabled": node.retrieval_enabled,
                               "calibration_status": node.calibration_status} for node in nodes])
+
+
+@router.post("/documents/{document_id}/refresh-ocr", response_model=ApiResponse[KnowledgeDocumentRead])
+def refresh_document_ocr(document_id: int, user: User = Depends(knowledge_manager),
+                         db: Session = Depends(get_db)) -> ApiResponse[KnowledgeDocumentRead]:
+    document = KnowledgeService(db).require_document(document_id)
+    MaterialCenterService(db).ensure_document_access(document, user)
+    document = KnowledgeService(db).refresh_ocr_extraction(document_id)
+    return ApiResponse(
+        message="OCR 文字已重新提取，请复核清洗结果并保存校准",
+        data=KnowledgeDocumentRead.model_validate(document),
+    )
 
 
 @router.get("/documents/{document_id}/calibration-meta", response_model=ApiResponse[dict])

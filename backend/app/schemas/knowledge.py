@@ -244,6 +244,10 @@ class DocumentCalibrationUpdate(BaseModel):
     outline: list[OutlineNodeInput] = Field(min_length=1)
 
 
+class TextBlockOverride(BaseModel):
+    excluded: bool
+
+
 class CitationFeedbackCreate(BaseModel):
     document_id: int | None = None
     vector_id: str | None = Field(default=None, max_length=160)

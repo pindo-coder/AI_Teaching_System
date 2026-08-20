@@ -77,8 +77,8 @@ def test_all_mvp_tables_are_registered() -> None:
 
 
 def test_document_page_uses_longtext_on_mysql() -> None:
-    column_type = DocumentPage.__table__.c.text.type.dialect_impl(mysql.dialect())
-    assert isinstance(column_type, mysql.LONGTEXT)
+    for column in (DocumentPage.__table__.c.text, DocumentPage.__table__.c.raw_text):
+        assert isinstance(column.type.dialect_impl(mysql.dialect()), mysql.LONGTEXT)
 
 
 def test_ai_media_error_text_uses_longtext_on_mysql() -> None:

@@ -3,11 +3,12 @@ from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
 from app.models.chapter import Chapter
-from app.models.citation import DocumentOutlineNode, TextbookVersion
+from app.models.citation import DocumentOutlineNode, DocumentPage, TextbookVersion
 from app.models.course import Course
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.user import User
 from app.repositories.knowledge_repository import KnowledgeRepository
+from app.rag.document_loader import ExtractedPage
 
 
 def prepare_manager(db: Session, role: str = "teacher") -> tuple[dict[str, str], int, int]:
@@ -124,6 +125,50 @@ def test_upload_new_version_can_auto_create_pending_outline(client: TestClient, 
     rerun = client.post(f"/api/v1/knowledge/documents/{document['id']}/auto-calibrate", headers=headers)
     assert rerun.status_code == 200, rerun.text
     assert db.query(DocumentOutlineNode).filter_by(document_id=document["id"]).count() == 1
+
+
+def test_pending_pdf_can_refresh_ocr_without_losing_outline_or_printed_page(
+    client: TestClient, db: Session, tmp_path, monkeypatch,
+) -> None:
+    headers, course_id, chapter_id = prepare_manager(db)
+    pdf_path = tmp_path / "pending-ocr.pdf"
+    pdf_path.write_bytes(b"%PDF-placeholder")
+    document = KnowledgeDocument(
+        source_title="待清洗教材", source_type="pdf", original_filename="pending-ocr.pdf",
+        stored_path=str(pdf_path), course_id=course_id, vector_collection="test",
+        status="processing", calibration_status="pending", chunk_count=0,
+    )
+    db.add(document); db.flush()
+    db.add_all([
+        DocumentPage(
+            document_id=document.id, pdf_page=1, printed_page_label="137",
+            raw_text="旧文字", text="旧文字", text_blocks=[],
+        ),
+        DocumentOutlineNode(
+            document_id=document.id, chapter_id=chapter_id, node_type="chapter", title="第七章",
+            sort_order=1, pdf_page_start=1, pdf_page_end=1, retrieval_enabled=True,
+        ),
+    ])
+    db.commit()
+    blocks = [{
+        "id": "p1-b0", "text": "重新提取的正文", "bbox": [80, 150, 500, 180],
+        "excluded": False, "exclusion_reason": None, "manual_override": None,
+    }]
+    monkeypatch.setattr(
+        "app.services.knowledge_service.extract_pages",
+        lambda *_: [ExtractedPage(
+            pdf_page=1, raw_text="重新提取的正文", text="重新提取的正文",
+            width=595, height=842, text_blocks=blocks,
+        )],
+    )
+
+    response = client.post(f"/api/v1/knowledge/documents/{document.id}/refresh-ocr", headers=headers)
+
+    assert response.status_code == 200, response.text
+    refreshed_page = db.query(DocumentPage).filter_by(document_id=document.id).one()
+    assert refreshed_page.raw_text == "重新提取的正文"
+    assert refreshed_page.printed_page_label == "137"
+    assert db.query(DocumentOutlineNode).filter_by(document_id=document.id).count() == 1
 
 
 def test_only_current_published_pdf_version_is_ready_for_ai(db: Session) -> None:
