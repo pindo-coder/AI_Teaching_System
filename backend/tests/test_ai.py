@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -320,6 +322,71 @@ def test_workspace_context_keeps_explicit_page_course_and_chapter(client: TestCl
     assert data["chapter_id"] == chapter_id
     assert data["source"] == "page"
     assert data["confidence"] == "high"
+
+
+def test_workspace_context_supports_multiple_selected_chapters(client: TestClient, db: Session) -> None:
+    headers, course_id, first_chapter_id = prepare_context(db)
+    second_chapter = Chapter(
+        course_id=course_id,
+        title="弘扬中国精神",
+        content="中国精神是兴国强国之魂。",
+        sort_order=2,
+    )
+    db.add(second_chapter)
+    db.commit()
+
+    response = client.post(
+        "/api/v1/ai/workspace/context",
+        headers=headers,
+        json={
+            "course_id": course_id,
+            "chapter_ids": [first_chapter_id, second_chapter.id],
+            "learning_stage": "review",
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["chapter_id"] == first_chapter_id
+    assert data["chapter_ids"] == [first_chapter_id, second_chapter.id]
+    assert data["chapter_titles"] == ["坚定理想信念", "弘扬中国精神"]
+    assert data["requires_chapter_selection"] is False
+
+
+def test_workspace_chat_grounds_answer_in_all_selected_chapters(client: TestClient, db: Session) -> None:
+    headers, course_id, first_chapter_id = prepare_context(db)
+    second_chapter = Chapter(
+        course_id=course_id,
+        title="弘扬中国精神",
+        content="中国精神是兴国强国之魂。",
+        sort_order=2,
+    )
+    db.add(second_chapter)
+    db.commit()
+
+    response = client.post(
+        "/api/v1/ai/workspace/stream",
+        headers=headers,
+        json={
+            "mode": "chat",
+            "role": "student",
+            "course_id": course_id,
+            "chapter_id": first_chapter_id,
+            "chapter_ids": [first_chapter_id, second_chapter.id],
+            "learning_stage": "review",
+            "question": "比较两个专题的核心观点",
+        },
+    )
+
+    assert response.status_code == 200
+    answer = "".join(
+        json.loads(line.removeprefix("data: "))["text"]
+        for line in response.text.splitlines()
+        if line.startswith('data: {"text"')
+    )
+    assert "坚定理想信念、弘扬中国精神" in answer
+    assert f'"chapter_id": {first_chapter_id}' in response.text
+    assert f'"chapter_id": {second_chapter.id}' in response.text
 
 
 def test_workspace_context_lists_course_center_material_without_teaching_class(client: TestClient, db: Session) -> None:

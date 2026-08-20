@@ -54,23 +54,48 @@ const configs: Record<LearningStage, {
     title: '预习空间', subtitle: '先建立整体认识，再带着问题进入课堂', next: 'review',
     goals: ['了解本专题研究什么问题', '识别需要重点理解的核心概念', '形成自己的课前疑问'],
     tasks: ['阅读专题导览', '通读教材原文', '使用 AI 生成预习问题'],
-    aiHint: '使用右下角 AI 预习助手生成导读、概念解释和预习问题。',
+    aiHint: '展开页面上方的思政 AI 工作台，生成导读、概念解释和预习问题。',
   },
   review: {
     title: '课后巩固', subtitle: '梳理观点和逻辑，把课堂内容转化为知识结构', next: 'exam',
     goals: ['概括本专题核心观点', '理解概念之间的联系与区别', '形成自己的章节总结'],
     tasks: ['回看教材重点', '完成个人学习总结', '使用 AI 生成复习提纲'],
-    aiHint: '使用右下角 AI 巩固助手生成结构化总结、概念辨析和复习提纲。',
+    aiHint: '展开页面上方的思政 AI 工作台，生成结构化总结、概念辨析和复习提纲。',
   },
   exam: {
     title: '考前冲刺', subtitle: '从理解转向输出，集中训练考点和答题能力', next: null,
     goals: ['提炼必须掌握的核心考点', '熟悉简答和材料分析的答题结构', '通过模拟练习发现薄弱点'],
     tasks: ['快速回顾核心原文', '使用 AI 梳理重点考点', '完成一组模拟练习'],
-    aiHint: '使用右下角 AI 冲刺助手生成模拟题、参考答案和答题要点。',
+    aiHint: '展开页面上方的思政 AI 工作台，生成模拟题、参考答案和答题要点。',
   },
 }
 const config = computed(() => configs[stage.value])
 const stageStatus = computed(() => footprint.value?.status_label || '未开始')
+const orderedChapters = computed(() => [...(course.value?.chapters || [])].sort((left, right) => (
+  left.sort_order - right.sort_order || left.id - right.id
+)))
+const currentChapterIndex = computed(() => orderedChapters.value.findIndex((item) => item.id === chapterId.value))
+const previousChapter = computed(() => currentChapterIndex.value > 0 ? orderedChapters.value[currentChapterIndex.value - 1] : null)
+const nextChapter = computed(() => {
+  const index = currentChapterIndex.value
+  return index >= 0 && index < orderedChapters.value.length - 1 ? orderedChapters.value[index + 1] : null
+})
+const previousDestination = computed(() => {
+  if (stage.value === 'review') return { chapterId: chapterId.value, stage: 'preview' as LearningStage, label: '← 返回上一阶段' }
+  if (stage.value === 'exam') return { chapterId: chapterId.value, stage: 'review' as LearningStage, label: '← 返回上一阶段' }
+  if (previousChapter.value) return { chapterId: previousChapter.value.id, stage: 'exam' as LearningStage, label: '← 返回上一章节' }
+  return null
+})
+const nextDestination = computed(() => {
+  if (stage.value === 'preview') return { chapterId: chapterId.value, stage: 'review' as LearningStage, label: '进入下一阶段 →' }
+  if (stage.value === 'review') return { chapterId: chapterId.value, stage: 'exam' as LearningStage, label: '进入下一阶段 →' }
+  if (nextChapter.value) return { chapterId: nextChapter.value.id, stage: 'preview' as LearningStage, label: '进入下一章节 →' }
+  return null
+})
+const navigationHint = computed(() => {
+  if (stage.value === 'exam') return nextChapter.value ? `下一章节：${nextChapter.value.title}` : '当前已是本课程最后一章'
+  return `下一阶段：${configs[config.value.next!].title}`
+})
 
 async function recordEvent(event_type: Parameters<typeof learningApi.recordEvent>[0]['event_type'], event_data: Record<string, unknown> = {}) {
   if (!course.value || !chapter.value) return
@@ -109,14 +134,18 @@ async function load() {
     chapter.value = course.value.chapters.find((item) => item.id === chapterId.value) || null
     if (!chapter.value) return router.replace(`/courses/${courseId.value}`)
     const savedNote = (await studyApi.note(chapterId.value)).data.data
-    if (savedNote) selfNote.value = savedNote.content
+    selfNote.value = savedNote?.content || ''
     lastReadingPercent = 0
     await recordEvent('chapter_opened')
     await loadFootprint()
   } finally { loading.value = false }
 }
-function goToStage(nextStage: LearningStage) {
-  router.push(`/courses/${courseId.value}/chapters/${chapterId.value}/${nextStage}`)
+function goToDestination(destination: { chapterId: number; stage: LearningStage }) {
+  router.push(`/courses/${courseId.value}/chapters/${destination.chapterId}/${destination.stage}`)
+}
+function finishPracticeAndContinue() {
+  practiceDialogVisible.value = false
+  if (nextDestination.value) goToDestination(nextDestination.value)
 }
 function goToStageDirect(target: LearningStage) {
   router.push(`/courses/${courseId.value}/chapters/${chapterId.value}/${target}`)
@@ -219,7 +248,7 @@ async function savePracticeToNotes(silent = false) {
   } finally { practiceSavingToNotes.value = false }
 }
 onMounted(load)
-watch(stage, load)
+watch(() => [courseId.value, chapterId.value, stage.value], load)
 onMounted(() => window.addEventListener('scroll', trackReading, { passive: true }))
 onUnmounted(() => window.removeEventListener('scroll', trackReading))
 </script>
@@ -253,8 +282,12 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 
     <section class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>
     <footer class="learning-footer">
-      <span>系统会记录学习足迹，用于生成更合适的下一步建议。</span>
-      <el-button v-if="config.next" type="primary" @click="goToStage(config.next)">进入下一阶段 →</el-button>
+      <div class="learning-footer-copy"><span>系统会记录学习足迹，用于生成更合适的下一步建议。</span><small>{{ navigationHint }}</small></div>
+      <div class="learning-footer-actions">
+        <el-button v-if="previousDestination" @click="goToDestination(previousDestination)">{{ previousDestination.label }}</el-button>
+        <el-button v-if="nextDestination" type="primary" @click="goToDestination(nextDestination)">{{ nextDestination.label }}</el-button>
+        <el-button v-else-if="stage === 'exam'" type="primary" plain @click="router.push(`/courses/${courseId}`)">返回课程详情</el-button>
+      </div>
     </footer>
     <el-dialog v-model="practiceDialogVisible" width="720px" :close-on-click-modal="false" destroy-on-close title="本章练习">
       <div v-loading="practiceLoading" class="review-quiz">
@@ -271,7 +304,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
               <div class="practice-answer-block reference"><strong>AI 参考答案</strong><p v-if="practiceReferenceLoading" class="practice-reference-pending">正在根据本题生成参考答案，生成完成前不展示临时内容……</p><p v-else>{{ practiceReferences.find((item) => item.practice_id === submission.question.id)?.ai_reference_answer || submission.result.ai_reference_answer || submission.result.reference_answer || '暂未生成参考答案' }}</p></div>
               <div class="practice-answer-block"><strong>参考知识点</strong><p v-if="practiceReferenceLoading" class="practice-reference-pending">将在参考答案生成完成后显示。</p><template v-else><ul class="practice-knowledge-points"><li v-for="point in (practiceReferences.find((item) => item.practice_id === submission.question.id)?.reference_knowledge_points || submission.result.reference_knowledge_points)" :key="point">{{ point }}</li></ul><p v-if="!(practiceReferences.find((item) => item.practice_id === submission.question.id)?.reference_knowledge_points || submission.result.reference_knowledge_points).length">请结合教材依据检查章节主旨、核心概念和观点逻辑。</p></template></div>
             </article>
-            <footer><el-button :loading="practiceSavingToNotes" :disabled="practiceSavingToNotes" @click="savePracticeToNotes()">{{ practiceSavedToNotes ? '更新笔记记录' : '保存到笔记空间' }}</el-button><el-button v-if="practiceSavedToNotes" @click="router.push('/notes')">查看笔记</el-button><el-button type="primary" @click="practiceDialogVisible = false">完成并关闭</el-button></footer>
+            <footer><el-button :loading="practiceSavingToNotes" :disabled="practiceSavingToNotes" @click="savePracticeToNotes()">{{ practiceSavedToNotes ? '更新笔记记录' : '保存到笔记空间' }}</el-button><el-button v-if="practiceSavedToNotes" @click="router.push('/notes')">查看笔记</el-button><el-button v-if="nextChapter" type="primary" @click="finishPracticeAndContinue">进入下一章节</el-button><el-button v-else type="primary" @click="practiceDialogVisible = false">完成并关闭</el-button></footer>
           </section>
         </template>
         <template v-else-if="practiceQuestions.length">

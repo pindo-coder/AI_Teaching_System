@@ -92,6 +92,7 @@ const messageList = ref<HTMLElement | null>(null)
 const role = computed<AiWorkspaceRole>(() => auth.user?.role || 'student')
 const roleLabel = computed(() => ({ student: '学生学习助手', teacher: '教师备课助手', admin: '平台治理助手' }[role.value]))
 const contextLabel = computed(() => {
+  if (props.context?.course_name && props.context.chapter_ids.length > 1) return `${props.context.course_name} · 已选 ${props.context.chapter_ids.length} 个专题`
   if (props.context?.course_name && props.context.chapter_title) return `${props.context.course_name} · ${props.context.chapter_title}`
   if (props.context?.course_name) return `${props.context.course_name} · 待选专题`
   if (props.courseId && props.chapterId) return props.learningStage === 'review' ? '当前专题 · 课后巩固' : props.learningStage === 'exam' ? '当前专题 · 考前冲刺' : '当前专题 · 课前预习'
@@ -113,7 +114,7 @@ const modeHint = computed(() => mode.value === 'chat'
 const disclaimer = computed(() => role.value === 'admin'
   ? 'AI 生成内容仅汇总平台状态并提供管理入口，不会自动审核、发布、删除或修改服务配置。'
   : 'AI 生成内容依据当前教材资料，仅供教学参考；发布、删除、导入和通知等操作需人工确认。')
-const storageScopeKey = computed(() => `workspace-ai-history:${auth.user?.id || 'guest'}:${props.context?.course_id || props.courseId || 0}:${props.context?.chapter_id || props.chapterId || 0}`)
+const storageScopeKey = computed(() => `workspace-ai-history:${auth.user?.id || 'guest'}:${props.context?.course_id || props.courseId || 0}:${props.context?.chapter_ids.join('-') || props.context?.chapter_id || props.chapterId || 0}`)
 function storageKey(targetMode: AiWorkspaceMode) {
   return `${storageScopeKey.value}:${targetMode}`
 }
@@ -589,13 +590,14 @@ async function send(executionId?: number | Event) {
     const currentScope = {
       course_id: props.context?.course_id || props.courseId || null,
       chapter_id: props.context?.chapter_id || props.chapterId || null,
+      chapter_ids: props.context?.chapter_ids || (props.chapterId ? [props.chapterId] : []),
       teaching_class_id: props.context?.teaching_class_id || props.teachingClassId || null,
       learning_stage: props.context?.learning_stage || props.learningStage || 'preview',
       page_name: props.pageName || null,
     }
     // 从任务中心重试时必须锁定原任务的上下文快照，不能被当前页面的课程覆盖。
     const scope = safeExecutionId
-      ? { course_id: null, chapter_id: null, teaching_class_id: null, learning_stage: 'preview' as LearningStage, page_name: null }
+      ? { course_id: null, chapter_id: null, chapter_ids: [], teaching_class_id: null, learning_stage: 'preview' as LearningStage, page_name: null }
       : currentScope
     if (requestMode === 'agent') {
       await aiApi.workspaceAgentStream({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {

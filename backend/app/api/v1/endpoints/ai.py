@@ -201,7 +201,8 @@ def workspace_assist_stream(
     # 角色由服务端用户身份兜底，避免学生通过请求体伪装成教师或管理员。
     effective_role = _effective_role(user, payload.role)
 
-    if payload.course_id is None or payload.chapter_id is None:
+    selected_chapter_ids = list(dict.fromkeys(payload.chapter_ids or ([payload.chapter_id] if payload.chapter_id else [])))
+    if payload.course_id is None or not selected_chapter_ids:
         message = (
             "当前还没有绑定教材专题。请先从课程中心进入一个教材专题，"
             "再使用 Chat 或 Agent，这样回答才能带有真实教材依据。"
@@ -220,7 +221,8 @@ def workspace_assist_stream(
 
     request = AiAssistRequest(
         course_id=payload.course_id,
-        chapter_id=payload.chapter_id,
+        chapter_id=selected_chapter_ids[0],
+        chapter_ids=selected_chapter_ids,
         learning_stage=payload.learning_stage,
         task_type=payload.task_type,
         question=_chat_question_with_history(payload),
@@ -249,7 +251,7 @@ def workspace_assist_stream(
                         db,
                         user,
                         course_id=payload.course_id,
-                        chapter_id=payload.chapter_id,
+                        chapter_id=selected_chapter_ids[0],
                         learning_stage=payload.learning_stage,
                         task_type=payload.task_type,
                     )
@@ -272,6 +274,7 @@ def resolve_workspace_context(
     context = AgentContextService(db, user).resolve(
         course_id=payload.course_id,
         chapter_id=payload.chapter_id,
+        chapter_ids=payload.chapter_ids,
         teaching_class_id=payload.teaching_class_id,
         learning_stage=payload.learning_stage,
         page_name=payload.page_name,
@@ -382,12 +385,13 @@ def workspace_agent_stream(
     resolved_context = AgentContextService(db, user).resolve(
         course_id=payload.course_id,
         chapter_id=payload.chapter_id,
+        chapter_ids=payload.chapter_ids,
         teaching_class_id=payload.teaching_class_id,
         learning_stage=payload.learning_stage,
         page_name=payload.page_name,
     )
     # 重试任务在页面没有传显式范围时，必须沿用原执行快照，不能被“最近课程”覆盖。
-    if existing_execution and not any((payload.course_id, payload.chapter_id, payload.teaching_class_id)):
+    if existing_execution and not any((payload.course_id, payload.chapter_id, payload.chapter_ids, payload.teaching_class_id)):
         context = AiWorkspaceContextData.model_validate(existing_execution.context_snapshot or {})
     else:
         context = resolved_context

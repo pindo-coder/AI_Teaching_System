@@ -35,6 +35,7 @@ class AiConversationMessage(BaseModel):
 class AiAssistRequest(BaseModel):
     course_id: int
     chapter_id: int
+    chapter_ids: list[int] = Field(default_factory=list, max_length=6)
     learning_stage: LearningStage
     task_type: AiTaskType = "question_answer"
     # Workspace Chat may prepend a bounded conversation transcript before
@@ -54,6 +55,7 @@ class AiWorkspaceAssistRequest(BaseModel):
     role: AiWorkspaceRole = "student"
     course_id: int | None = Field(default=None, ge=1)
     chapter_id: int | None = Field(default=None, ge=1)
+    chapter_ids: list[int] = Field(default_factory=list, max_length=6)
     learning_stage: LearningStage = "preview"
     task_type: AiTaskType = "question_answer"
     question: str = Field(min_length=1, max_length=2000)
@@ -89,6 +91,8 @@ class AiWorkspaceContextData(BaseModel):
     course_name: str | None = None
     chapter_id: int | None = None
     chapter_title: str | None = None
+    chapter_ids: list[int] = Field(default_factory=list)
+    chapter_titles: list[str] = Field(default_factory=list)
     teaching_class_id: int | None = None
     teaching_class_name: str | None = None
     learning_stage: LearningStage = "preview"
@@ -103,6 +107,9 @@ class AiWorkspaceContextData(BaseModel):
 class AiWorkspaceContextRequest(BaseModel):
     course_id: int | None = Field(default=None, ge=1)
     chapter_id: int | None = Field(default=None, ge=1)
+    # None means automatic inference; an empty list means the user explicitly
+    # cleared the selection and should not be replaced by recent learning.
+    chapter_ids: list[int] | None = Field(default=None, max_length=6)
     teaching_class_id: int | None = Field(default=None, ge=1)
     learning_stage: LearningStage = "preview"
     page_name: str | None = Field(default=None, max_length=100)

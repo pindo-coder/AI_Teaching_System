@@ -161,7 +161,7 @@ class MockGenerator:
         if task == "生成预习问题":
             return (
                 f"【{stage}·{task}】\n\n"
-                f"以下问题均围绕当前专题《{title}》设计：\n\n"
+                f"以下问题均围绕所选教材范围《{title}》设计：\n\n"
                 "1. 本专题试图回答的核心问题是什么？\n提问意图：明确章节主旨。\n\n"
                 "2. 本专题涉及哪些核心概念，它们之间有什么关系？\n提问意图：梳理概念结构。\n\n"
                 "3. 本专题的主要观点和论证依据是什么？\n提问意图：理解教材论述。\n\n"
@@ -170,7 +170,7 @@ class MockGenerator:
             )
         if task == "章节重点总结":
             return (
-                f"【{stage}·{task}】\n\n本章主旨：围绕“{title}”理解教材核心论述。\n\n"
+                f"【{stage}·{task}】\n\n专题主旨：围绕“{title}”理解教材核心论述。\n\n"
                 f"核心内容：\n{excerpt}\n\n"
                 "学习提示：建议结合章节原文，按照“概念—观点—逻辑—现实意义”的顺序复习。"
             )
@@ -183,7 +183,7 @@ class MockGenerator:
             } for practice_id in practice_ids], ensure_ascii=False)
         return (
             f"【{stage}·{task}】\n\n"
-            f"本次学习围绕“{title}”展开。根据当前章节资料，可重点关注以下内容：\n\n"
+            f"本次学习围绕“{title}”展开。根据所选专题资料，可重点关注以下内容：\n\n"
             f"{excerpt}\n\n"
             "以上内容由本地模拟模式生成，用于验证业务流程；接入模型 API 后将生成更完整的教材化回答。"
         )
@@ -236,7 +236,8 @@ class AiService:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="附件必须是已就绪的图片")
             if asset.course_id is not None and asset.course_id != payload.course_id:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片不属于当前课程")
-            if asset.chapter_id is not None and asset.chapter_id != payload.chapter_id:
+            selected_chapter_ids = set(payload.chapter_ids or [payload.chapter_id])
+            if asset.chapter_id is not None and asset.chapter_id not in selected_chapter_ids:
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="图片不属于当前专题")
             if asset.byte_size > max_image_bytes:
                 raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="图片超过当前大小限制")
@@ -337,7 +338,7 @@ class AiService:
     def _validated_sources(self, sources: list[AiSource]) -> list[AiSource]:
         """引用卡片只使用数据库中仍然存在的资料与页码，拒绝过期向量元数据。"""
         output: list[AiSource] = []
-        seen: set[tuple[int | None, str | None, int | None]] = set()
+        seen: set[tuple[int | None, str | None, int | None, int | None]] = set()
         evidence_labels = {"central": "中央材料依据", "textbook": "教材直接依据", "local": "地方材料依据"}
         for source in sources:
             if source.document_id is not None:
@@ -360,7 +361,12 @@ class AiService:
                         source.pdf_page_end = None
                         source.printed_page_start = None
                         source.printed_page_end = None
-            key = (source.document_id, source.vector_id, source.pdf_page_start)
+            key = (
+                source.document_id,
+                source.vector_id,
+                source.pdf_page_start,
+                source.chapter_id if source.document_id is None and source.vector_id is None else None,
+            )
             if key in seen:
                 continue
             seen.add(key)
@@ -374,55 +380,94 @@ class AiService:
         retrieval_question: str | None = None,
     ) -> tuple[dict[str, str], list[AiSource], int] | AiAssistData:
         course = self.courses.get(payload.course_id)
-        chapter = self.chapters.get(payload.chapter_id)
         if course is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="课程不存在")
-        if chapter is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="章节不存在")
-        if chapter.course_id != course.id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节与课程不匹配")
+        selected_chapter_ids = list(dict.fromkeys(payload.chapter_ids or [payload.chapter_id]))
+        chapters = []
+        for selected_chapter_id in selected_chapter_ids:
+            selected_chapter = self.chapters.get(selected_chapter_id)
+            if selected_chapter is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="章节不存在")
+            if selected_chapter.course_id != course.id:
+                raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="章节与课程不匹配")
+            chapters.append(selected_chapter)
+        chapter = chapters[0]
+        chapter_by_id = {item.id: item for item in chapters}
         # Practice feedback must stay within the current chapter. General
         # layered retrieval may surface unrelated current-affairs material.
         chapter_only = payload.task_type == "review_feedback"
-        layer_document_ids = ({"central": [], "textbook": [], "local": []} if chapter_only else
-            self.documents.eligible_layer_ids(course_id=course.id, chapter_id=chapter.id, user=self.user))
+        if chapter_only:
+            chapters = [chapter]
+            selected_chapter_ids = [chapter.id]
+            chapter_by_id = {chapter.id: chapter}
+            layer_document_ids = {"central": [], "textbook": [], "local": []}
+        else:
+            layer_document_id_sets: dict[str, set[int]] = {"central": set(), "textbook": set(), "local": set()}
+            for selected_chapter in chapters:
+                eligible = self.documents.eligible_layer_ids(
+                    course_id=course.id, chapter_id=selected_chapter.id, user=self.user
+                )
+                for material_type, document_ids in eligible.items():
+                    layer_document_id_sets[material_type].update(document_ids)
+            layer_document_ids = {
+                material_type: sorted(document_ids)
+                for material_type, document_ids in layer_document_id_sets.items()
+            }
         # 导入教材自动生成的专题正文是当前章节的首要依据，不能在章节检索
         # 不到时回退到整本教材的 Top-K，否则容易把导论内容带入其他章节。
-        chapter_content = (chapter.content or "").strip()
+        chapter_contents = {item.id: (item.content or "").strip() for item in chapters}
         retrieved_chunks = []
         if not chapter_only and any(layer_document_ids.values()):
             retrieved_chunks = retrieve_layered(
-                f"{chapter.title} {retrieval_question or payload.question}", layer_document_ids=layer_document_ids,
-                chapter_id=chapter.id, top_k=6,
+                f"{' '.join(item.title for item in chapters)} {retrieval_question or payload.question}",
+                layer_document_ids=layer_document_ids,
+                chapter_id=chapter.id,
+                chapter_ids=selected_chapter_ids,
+                top_k=8 if len(chapters) > 1 else 6,
             )
-        if not chapter_content and any(layer_document_ids.values()) and not retrieved_chunks:
+        if not any(chapter_contents.values()) and any(layer_document_ids.values()) and not retrieved_chunks:
             return AiAssistData(
-                answer="当前专题没有可用的教材原文或知识库片段，暂时无法生成有依据的内容。",
+                answer="所选专题没有可用的教材原文或知识库片段，暂时无法生成有依据的内容。",
                 grounded=False,
                 model="none",
             )
 
         material_labels = {"central": "中央材料", "textbook": "教材正文", "local": "地方材料"}
-        content_parts = [
-            f"[资料 {index + 1}｜{material_labels.get(str(item.metadata.get('material_type')), '资料')}｜{item.metadata.get('section_path') or item.metadata.get('source_title', '未命名资料')}｜{item.metadata.get('position_label', '位置待校准')}]\n{item.content}"
-            for index, item in enumerate(retrieved_chunks)
-        ]
-        has_textbook_chunk = any(str(item.metadata.get("material_type")) == "textbook" for item in retrieved_chunks)
-        if chapter_content and not has_textbook_chunk:
+        content_parts = []
+        retrieved_textbook_chapter_ids: set[int] = set()
+        for index, item in enumerate(retrieved_chunks):
+            metadata_chapter_id = item.metadata.get("chapter_id")
+            source_chapter_id = int(metadata_chapter_id) if str(metadata_chapter_id).isdigit() else chapter.id
+            source_chapter = chapter_by_id.get(source_chapter_id, chapter)
+            if str(item.metadata.get("material_type")) == "textbook":
+                retrieved_textbook_chapter_ids.add(source_chapter.id)
             content_parts.append(
-                f"[资料 {len(content_parts) + 1}｜教材正文｜当前专题正文｜专题内容]\n{chapter_content}"
+                f"[资料 {index + 1}｜{material_labels.get(str(item.metadata.get('material_type')), '资料')}｜"
+                f"专题：{source_chapter.title}｜{item.metadata.get('section_path') or item.metadata.get('source_title', '未命名资料')}｜"
+                f"{item.metadata.get('position_label', '位置待校准')}]\n{item.content}"
             )
-        content = "\n\n".join(content_parts) if content_parts else chapter_content
+
+        direct_chapters = []
+        for selected_chapter in chapters:
+            chapter_content = chapter_contents[selected_chapter.id]
+            if not chapter_content or selected_chapter.id in retrieved_textbook_chapter_ids:
+                continue
+            direct_chapters.append(selected_chapter)
+            bounded_content = chapter_content if len(chapters) == 1 else chapter_content[:6000]
+            content_parts.append(
+                f"[资料 {len(content_parts) + 1}｜教材正文｜专题：{selected_chapter.title}｜专题内容]\n{bounded_content}"
+            )
+        content = "\n\n".join(content_parts)
         if not content:
             return AiAssistData(
-                answer="当前章节尚未录入课程资料，无法生成有依据的回答。请联系教师完善章节内容。",
+                answer="所选专题尚未录入课程资料，无法生成有依据的回答。请联系教师完善章节内容。",
                 grounded=False,
                 model="none",
             )
 
         variables = {
             "course_name": course.name,
-            "chapter_title": chapter.title,
+            "chapter_title": "、".join(item.title for item in chapters),
             "learning_stage_label": STAGE_LABELS[payload.learning_stage],
             "task_type_label": TASK_LABELS[payload.task_type],
             "assistant_mode_label": WORKSPACE_MODE_LABELS[payload.assistant_mode],
@@ -434,15 +479,17 @@ class AiService:
             "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],
             "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
-        direct_source = self._chapter_direct_source(
-            course_id=course.id, chapter_id=chapter.id, excerpt=chapter_content
-        ) if not has_textbook_chunk else None
         sources = [
                 AiSource(
                     source_type=str(item.metadata.get("source_type", "document")),
                     source_title=str(item.metadata.get("source_title", "未命名资料")),
                     course_id=course.id,
-                    chapter_id=chapter.id,
+                    chapter_id=(
+                        int(item.metadata["chapter_id"])
+                        if str(item.metadata.get("chapter_id", "")).isdigit()
+                        and int(item.metadata["chapter_id"]) in chapter_by_id
+                        else chapter.id
+                    ),
                     excerpt=item.content[:180] + ("……" if len(item.content) > 180 else ""),
                     position=source_position(item.metadata),
                     document_id=int(item.metadata["document_id"]) if item.metadata.get("document_id") is not None else None,
@@ -464,19 +511,38 @@ class AiService:
         evidence_labels = {"central": "中央材料依据", "textbook": "教材直接依据", "local": "地方材料依据"}
         for source in sources:
             source.evidence_type = evidence_labels.get(source.material_type, "资料依据")
-        if direct_source:
-            sources.append(direct_source)
+        for direct_chapter in direct_chapters:
+            direct_source = self._chapter_direct_source(
+                course_id=course.id,
+                chapter_id=direct_chapter.id,
+                excerpt=chapter_contents[direct_chapter.id],
+            )
+            if direct_source:
+                sources.append(direct_source)
+            else:
+                excerpt = chapter_contents[direct_chapter.id]
+                sources.append(AiSource(
+                    source_type="chapter",
+                    source_title=f"{course.name} · {direct_chapter.title}",
+                    course_id=course.id,
+                    chapter_id=direct_chapter.id,
+                    excerpt=excerpt[:180] + ("……" if len(excerpt) > 180 else ""),
+                    position="所选专题正文",
+                    material_type="textbook",
+                ))
         if not sources:
             sources = [
                 AiSource(
                     source_type="chapter",
-                    source_title=f"{course.name} · {chapter.title}",
+                    source_title=f"{course.name} · {selected_chapter.title}",
                     course_id=course.id,
-                    chapter_id=chapter.id,
-                    excerpt=content[:180] + ("……" if len(content) > 180 else ""),
-                    position="当前专题正文",
+                    chapter_id=selected_chapter.id,
+                    excerpt=chapter_contents[selected_chapter.id][:180] + ("……" if len(chapter_contents[selected_chapter.id]) > 180 else ""),
+                    position="所选专题正文",
                     material_type="textbook",
                 )
+                for selected_chapter in chapters
+                if chapter_contents[selected_chapter.id]
             ]
         return variables, self._validated_sources(sources), len(retrieved_chunks)
 

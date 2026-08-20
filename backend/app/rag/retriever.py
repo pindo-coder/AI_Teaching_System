@@ -18,13 +18,15 @@ def retrieve_documents(
     top_k: int,
     material_type: str,
     chapter_id: int | None = None,
+    chapter_ids: list[int] | None = None,
     restrict_to_chapter: bool = False,
 ) -> list[RetrievedChunk]:
     if not document_ids:
         return []
     clauses: list[dict[str, object]] = [{"document_id": {"$in": document_ids}}]
-    if restrict_to_chapter and chapter_id is not None:
-        clauses.append({"chapter_id": chapter_id})
+    selected_chapter_ids = list(dict.fromkeys(chapter_ids or ([chapter_id] if chapter_id is not None else [])))
+    if restrict_to_chapter and selected_chapter_ids:
+        clauses.append({"chapter_id": {"$in": selected_chapter_ids}})
     filters: dict[str, object] = clauses[0] if len(clauses) == 1 else {"$and": clauses}
     results = get_vector_store().similarity_search_with_relevance_scores(
         question, k=max(top_k, 1), filter=filters
@@ -50,6 +52,7 @@ def retrieve_layered(
     *,
     layer_document_ids: dict[str, list[int]],
     chapter_id: int | None,
+    chapter_ids: list[int] | None = None,
     top_k: int = 6,
 ) -> list[RetrievedChunk]:
     """中央/教材/地方独立召回，再按 2/至少2/最多1 的证据配额合并。"""
@@ -60,7 +63,7 @@ def retrieve_layered(
         ),
         "textbook": retrieve_documents(
             question, document_ids=layer_document_ids.get("textbook", []), top_k=10,
-            material_type="textbook", chapter_id=chapter_id, restrict_to_chapter=True,
+            material_type="textbook", chapter_id=chapter_id, chapter_ids=chapter_ids, restrict_to_chapter=True,
         ),
         "local": retrieve_documents(
             question, document_ids=layer_document_ids.get("local", []), top_k=6,

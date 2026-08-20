@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ArrowDown, MagicStick, RefreshRight, Setting } from '@element-plus/icons-vue'
+import { ArrowDown, Check, MagicStick, RefreshRight, Setting } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
 import { aiApi, type AiWorkspaceContext } from '@/api/ai'
 import { useRoute } from 'vue-router'
 import type { LearningStage } from '@/types'
@@ -15,7 +16,7 @@ const expanded = ref(false)
 const loading = ref(false)
 const context = ref<AiWorkspaceContext | null>(null)
 const manualCourseId = ref<number | null>(null)
-const manualChapterId = ref<number | null>(null)
+const manualChapterIds = ref<number[] | null>(null)
 const manualClassId = ref<number | null>(null)
 
 function toPositiveNumber(value: unknown) {
@@ -31,11 +32,12 @@ const stage = computed<LearningStage>(() => {
 })
 const scope = computed(() => ({
   course_id: manualCourseId.value || routeCourseId.value || workspace.currentCourse?.id || null,
-  chapter_id: manualChapterId.value || routeChapterId.value || (
+  chapter_id: manualChapterIds.value !== null ? manualChapterIds.value[0] || null : routeChapterId.value || (
     !routeCourseId.value || routeCourseId.value === workspace.currentCourse?.id
       ? workspace.currentChapter?.id || null
       : null
   ),
+  chapter_ids: manualChapterIds.value !== null ? manualChapterIds.value : undefined,
   teaching_class_id: manualClassId.value || workspace.currentClass?.id || null,
   learning_stage: stage.value,
   page_name: String(route.name || ''),
@@ -45,6 +47,7 @@ const sourceLabel = computed(() => ({
 }[context.value?.source || 'none']))
 const confidenceLabel = computed(() => ({ high: '范围已确认', medium: '建议确认', low: '待确认' }[context.value?.confidence || 'low']))
 const contextTitle = computed(() => {
+  if (context.value?.course_name && context.value.chapter_ids.length > 1) return `${context.value.course_name} · 已选 ${context.value.chapter_ids.length} 个专题`
   if (context.value?.course_name && context.value?.chapter_title) return `${context.value.course_name} · ${context.value.chapter_title}`
   if (context.value?.course_name) return `${context.value.course_name} · 请选择专题`
   return '自动识别当前教学内容'
@@ -65,17 +68,26 @@ async function refreshContext() {
 
 function chooseCandidate(candidate: AiWorkspaceContext['candidates'][number]) {
   manualCourseId.value = candidate.course_id
-  manualChapterId.value = null
+  manualChapterIds.value = []
   manualClassId.value = candidate.teaching_class_id
   void refreshContext()
 }
 function chooseChapter(id: number) {
-  manualChapterId.value = id
+  const selected = manualChapterIds.value === null
+    ? [...(context.value?.chapter_ids || (context.value?.chapter_id ? [context.value.chapter_id] : []))]
+    : [...manualChapterIds.value]
+  const index = selected.indexOf(id)
+  if (index >= 0) selected.splice(index, 1)
+  else {
+    if (selected.length >= 6) return ElMessage.warning('一次最多选择 6 个专题')
+    selected.push(id)
+  }
+  manualChapterIds.value = selected
   void refreshContext()
 }
 function resetToAutomatic() {
   manualCourseId.value = null
-  manualChapterId.value = null
+  manualChapterIds.value = null
   manualClassId.value = null
   void refreshContext()
 }
@@ -115,7 +127,7 @@ onMounted(() => void refreshContext())
               </button>
             </div>
             <p v-else class="agent-context-empty">当前尚未导入教材；导入后可在这里选择教学范围。</p>
-            <div v-if="context?.chapters.length" class="agent-context-chapters"><span>专题</span><button v-for="chapter in context.chapters" :key="chapter.id" type="button" :class="{ active: chapter.id === context?.chapter_id }" @click="chooseChapter(chapter.id)">{{ chapter.title }}</button></div>
+            <div v-if="context?.chapters.length" class="agent-context-chapters"><span>专题（可多选，最多 6 个）</span><small>已选 {{ context.chapter_ids.length }} 个；Agent 写入操作以首个专题为主</small><button v-for="chapter in context.chapters" :key="chapter.id" type="button" :class="{ active: context?.chapter_ids.includes(chapter.id) }" @click="chooseChapter(chapter.id)"><el-icon v-if="context?.chapter_ids.includes(chapter.id)"><Check /></el-icon>{{ chapter.title }}</button></div>
           </section>
         </el-popover>
         <button class="agent-dock-toggle" type="button" :aria-label="expanded ? '收起 AI 工作台' : '展开 AI 工作台'" @click="expanded = !expanded"><span>{{ expanded ? '收起' : '展开' }}</span><el-icon :class="{ 'is-rotated': expanded }"><ArrowDown /></el-icon></button>
@@ -124,7 +136,7 @@ onMounted(() => void refreshContext())
     <transition name="agent-dock-reveal">
       <div v-if="expanded" class="agent-dock-body">
         <WorkspaceAiAssistant
-          :key="`${context?.course_id || 0}-${context?.chapter_id || 0}-${context?.teaching_class_id || 0}-${stage}`"
+          :key="`${context?.course_id || 0}-${context?.chapter_ids.join('-') || 0}-${context?.teaching_class_id || 0}-${stage}`"
           :course-id="context?.course_id"
           :chapter-id="context?.chapter_id"
           :teaching-class-id="context?.teaching_class_id"
@@ -150,6 +162,6 @@ onMounted(() => void refreshContext())
 .agent-dock-actions { display: flex; align-items: center; gap: 8px; }.agent-dock-actions :deep(.el-button) { border-radius: 9px; }.agent-dock-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 8px; color: #466086; background: #f4f7fd; border: 1px solid #e0e8f5; border-radius: 9px; cursor: pointer; font-size: 11px; }.agent-dock-toggle .el-icon { transition: transform .2s ease; }.agent-dock-toggle .is-rotated { transform: rotate(180deg); }
 .agent-dock-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; background: linear-gradient(180deg, #f7f9fe, #fff 65%); border-top: 1px solid #e7edf7; border-radius: 0 0 18px 18px; scrollbar-gutter: stable; }
 .agent-dock-reveal-enter-active, .agent-dock-reveal-leave-active { transition: opacity .2s ease, transform .2s ease; }.agent-dock-reveal-enter-from, .agent-dock-reveal-leave-to { opacity: 0; transform: translateY(-8px); }
-:global(.agent-context-popover) { max-width: min(520px, calc(100vw - 20px)); border-radius: 14px; }.agent-context-picker { padding: 4px; }.agent-context-picker-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }.agent-context-picker-heading strong { color: #2d4160; }.agent-context-picker-heading p { margin: 4px 0 0; color: #7f8ca0; font-size: 11px; }.agent-context-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }.agent-context-candidates button { display: grid; gap: 3px; min-width: 0; padding: 9px 10px; color: #465673; text-align: left; background: #f8faff; border: 1px solid #e0e7f3; border-radius: 9px; cursor: pointer; }.agent-context-candidates button.active { color: #295fcb; background: #edf3ff; border-color: #86a9ed; }.agent-context-candidates strong, .agent-context-candidates small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.agent-context-candidates strong { font-size: 12px; }.agent-context-candidates small { color: #8795ab; font-size: 10px; }.agent-context-chapters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 13px; padding-top: 12px; border-top: 1px dashed #dce4f0; }.agent-context-chapters > span { color: #64748b; font-size: 11px; font-weight: 700; }.agent-context-chapters button { padding: 4px 7px; color: #536782; background: #fff; border: 1px solid #dce5f2; border-radius: 7px; cursor: pointer; font-size: 11px; }.agent-context-chapters button.active { color: #fff; background: #4968cf; border-color: #4968cf; }.agent-context-empty { margin: 0; color: #8190a6; font-size: 12px; }
+:global(.agent-context-popover) { max-width: min(520px, calc(100vw - 20px)); border-radius: 14px; }.agent-context-picker { padding: 4px; }.agent-context-picker-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; }.agent-context-picker-heading strong { color: #2d4160; }.agent-context-picker-heading p { margin: 4px 0 0; color: #7f8ca0; font-size: 11px; }.agent-context-candidates { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }.agent-context-candidates button { display: grid; gap: 3px; min-width: 0; padding: 9px 10px; color: #465673; text-align: left; background: #f8faff; border: 1px solid #e0e7f3; border-radius: 9px; cursor: pointer; }.agent-context-candidates button.active { color: #295fcb; background: #edf3ff; border-color: #86a9ed; }.agent-context-candidates strong, .agent-context-candidates small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.agent-context-candidates strong { font-size: 12px; }.agent-context-candidates small { color: #8795ab; font-size: 10px; }.agent-context-chapters { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-top: 13px; padding-top: 12px; border-top: 1px dashed #dce4f0; }.agent-context-chapters > span { color: #64748b; font-size: 11px; font-weight: 700; }.agent-context-chapters > small { flex-basis: 100%; color: #8795ab; font-size: 10px; }.agent-context-chapters button { display: inline-flex; align-items: center; gap: 3px; padding: 4px 7px; color: #536782; background: #fff; border: 1px solid #dce5f2; border-radius: 7px; cursor: pointer; font-size: 11px; }.agent-context-chapters button.active { color: #fff; background: #4968cf; border-color: #4968cf; }.agent-context-empty { margin: 0; color: #8190a6; font-size: 12px; }
 @media (max-width: 760px) { .agent-dock { top: 58px; margin: 0 10px; border-radius: 0 0 14px 14px; }.agent-dock.is-expanded { max-height: calc(100vh - 58px); }.agent-dock-bar { gap: 8px; padding: 8px 10px; }.agent-dock-brand { min-width: 43px; }.agent-dock-title, .agent-dock-context { display: none; }.agent-dock-actions { flex: 1; justify-content: flex-end; }.agent-dock-actions :deep(.el-button) { padding: 7px 9px; }.agent-context-candidates { grid-template-columns: 1fr; } }
 </style>

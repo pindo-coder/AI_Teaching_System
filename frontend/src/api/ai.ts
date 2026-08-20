@@ -61,6 +61,7 @@ export interface AiWorkspacePayload {
   role: AiWorkspaceRole
   course_id?: number | null
   chapter_id?: number | null
+  chapter_ids?: number[]
   learning_stage?: LearningStage
   task_type?: AiTaskType
   question: string
@@ -86,6 +87,8 @@ export interface AiWorkspaceContext {
   course_name: string | null
   chapter_id: number | null
   chapter_title: string | null
+  chapter_ids: number[]
+  chapter_titles: string[]
   teaching_class_id: number | null
   teaching_class_name: string | null
   learning_stage: LearningStage
@@ -100,6 +103,7 @@ export interface AiWorkspaceContext {
 export interface AiWorkspaceContextPayload {
   course_id?: number | null
   chapter_id?: number | null
+  chapter_ids?: number[]
   teaching_class_id?: number | null
   learning_stage?: LearningStage
   page_name?: string | null

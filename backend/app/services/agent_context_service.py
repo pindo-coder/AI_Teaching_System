@@ -113,6 +113,7 @@ class AgentContextService:
         *,
         course_id: int | None = None,
         chapter_id: int | None = None,
+        chapter_ids: list[int] | None = None,
         teaching_class_id: int | None = None,
         learning_stage: str = "preview",
         page_name: str | None = None,
@@ -159,23 +160,30 @@ class AgentContextService:
 
         recent = self._recent_learning(course.id if course else None)
         assignment = self._recent_assignment(course.id if course else None)
-        chapter = self.db.get(Chapter, chapter_id) if chapter_id else None
-        if chapter is not None:
-            if course is None:
-                course = self.db.get(Course, chapter.course_id)
-            elif chapter.course_id != course.id:
-                chapter = None
+        explicit_chapter_selection = chapter_ids is not None
+        requested_chapter_ids = list(dict.fromkeys(chapter_ids or ([] if chapter_id is None else [chapter_id])))
+        selected_chapters = [
+            item for item in (self.db.get(Chapter, item_id) for item_id in requested_chapter_ids)
+            if item is not None
+        ]
+        if selected_chapters and course is None:
+            course = self.db.get(Course, selected_chapters[0].course_id)
+        if course is not None:
+            selected_chapters = [item for item in selected_chapters if item.course_id == course.id]
+        chapter = selected_chapters[0] if selected_chapters else None
         if chapter is not None:
             confidence = "high"
-        elif recent is not None and (course is None or recent.course_id == course.id):
+        elif not explicit_chapter_selection and recent is not None and (course is None or recent.course_id == course.id):
             chapter = self.db.get(Chapter, recent.chapter_id)
             if chapter is not None:
                 course = self.db.get(Course, chapter.course_id)
+                selected_chapters = [chapter]
                 source, confidence = "recent_learning", "medium"
-        elif assignment is not None and (course is None or assignment.course_id == course.id):
+        elif not explicit_chapter_selection and assignment is not None and (course is None or assignment.course_id == course.id):
             chapter = self.db.get(Chapter, assignment.chapter_id)
             course = self.db.get(Course, assignment.course_id)
             if chapter is not None:
+                selected_chapters = [chapter]
                 source, confidence = "assignment", "medium"
 
         # 所有可见教学班-教材组合都会返回前端，便于人工一键纠偏。
@@ -228,12 +236,14 @@ class AgentContextService:
             course_name=course.name if course else None,
             chapter_id=chapter.id if chapter else None,
             chapter_title=chapter.title if chapter else None,
+            chapter_ids=[item.id for item in selected_chapters],
+            chapter_titles=[item.title for item in selected_chapters],
             teaching_class_id=selected_class.id if selected_class else None,
             teaching_class_name=selected_class.name if selected_class else None,
             learning_stage=learning_stage,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             confidence=confidence,  # type: ignore[arg-type]
-            requires_chapter_selection=course is not None and chapter is None,
+            requires_chapter_selection=course is not None and not selected_chapters,
             chapters=chapters,
             candidates=candidates[:24],
             state_summary=self._state_summary(),

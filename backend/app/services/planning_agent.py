@@ -606,10 +606,14 @@ class PlanningAgent:
                     },
                     data={"grounded": False},
                 )
+            selected_titles = context.chapter_titles or ([context.chapter_title] if context.chapter_title else [])
+            scope_label = "、".join(selected_titles)
+            primary_hint = f"；写入操作以“{context.chapter_title}”为主专题" if len(selected_titles) > 1 else ""
             return ToolResult(
-                f"已锁定《{context.course_name}》·{context.chapter_title}"
-                + (f"·教学班：{context.teaching_class_name}" if context.teaching_class_name else ""),
-                data={"grounded": True},
+                f"已锁定《{context.course_name}》·{scope_label}"
+                + (f"·教学班：{context.teaching_class_name}" if context.teaching_class_name else "")
+                + primary_hint,
+                data={"grounded": True, "chapter_ids": context.chapter_ids},
             )
         if call.name == "summarize_recent_learning":
             summary = StudentLearningSummaryService(self.db).summarize(self.user.id)
