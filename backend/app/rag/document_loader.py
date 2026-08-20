@@ -1,6 +1,7 @@
 from io import BytesIO
 from pathlib import Path
 from dataclasses import dataclass
+import re
 
 from pypdf import PdfReader
 
@@ -56,23 +57,27 @@ def _pypdf_pages(content: bytes) -> list[ExtractedPage]:
     reader = PdfReader(BytesIO(content))
     pages = []
     for page_number, page in enumerate(reader.pages, start=1):
-        fragments = []
-
-        def visit(text, _cm, tm, _font, font_size):
-            value = str(text or "").strip()
-            if value:
-                x, y = float(tm[4]), float(tm[5])
-                fragments.append((x, y, float(font_size or 0), value))
-
-        page.extract_text(visitor_text=visit)
+        extracted = "\n".join(
+            line.rstrip() for line in (page.extract_text() or "").splitlines() if line.strip()
+        ).strip()
         height = float(page.mediabox.height)
-        fragments.sort(key=lambda item: (-item[1], item[0]))
+        lines = [line.strip() for line in extracted.splitlines() if line.strip()]
         blocks = [{
             "id": f"p{page_number}-b{index}", "text": value,
-            "bbox": [round(x, 2), round(height - y - size, 2), round(x, 2), round(height - y, 2)],
+            # pypdf does not provide reliable block geometry across OCR PDFs.
+            # Region hints let the text-level cleaner apply safe batch rules.
+            "region": (
+                "header" if index == 0 else
+                ("footer" if re.fullmatch(
+                    r"\s*(?:[-—–·•]\s*)?(?:第\s*)?(?:\d{1,4}|[ivxlcdm]{1,12})(?:\s*页)?(?:\s*[-—–·•])?\s*",
+                    value, re.IGNORECASE,
+                ) else None)
+            ),
+            "line_break": index > 0,
+            "bbox": None,
             "excluded": False, "exclusion_reason": None, "manual_override": None,
-        } for index, (x, y, size, value) in enumerate(fragments)]
-        raw_text = "\n\n".join(str(block["text"]) for block in blocks).strip()
+        } for index, value in enumerate(lines)]
+        raw_text = extracted
         pages.append(ExtractedPage(
             pdf_page=page_number, raw_text=raw_text, text=raw_text,
             width=float(page.mediabox.width), height=height, text_blocks=blocks,

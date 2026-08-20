@@ -1,15 +1,19 @@
 from pathlib import Path
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pypdf import PdfWriter
 from sqlalchemy.orm import Session
 
 from app.core.security import create_access_token, hash_password
-from app.models.citation import DocumentPage
+from app.models.citation import DocumentOutlineNode, DocumentPage, KnowledgeChunk
 from app.models.course import Course
 from app.models.knowledge_document import KnowledgeDocument
 from app.models.user import User
-from app.services.citation_service import _roman, _roman_value
+from app.rag.vector_store import IncompatibleVectorIndexError
+from app.schemas.knowledge import DocumentCalibrationUpdate
+from app.services.citation_service import CitationService, _roman, _roman_value
 
 
 def _headers(user: User) -> dict[str, str]:
@@ -19,6 +23,62 @@ def _headers(user: User) -> dict[str, str]:
 def test_roman_printed_page_roundtrip() -> None:
     assert _roman_value("xiv") == 14
     assert _roman(14) == "XIV"
+
+
+def test_calibration_manifest_failure_rolls_back_database_changes(
+    db: Session, monkeypatch,
+) -> None:
+    course = Course(name="校准事务测试")
+    db.add(course); db.flush()
+    document = KnowledgeDocument(
+        source_title="事务教材", source_type="pdf", original_filename="transaction.pdf",
+        stored_path="/tmp/transaction.pdf", course_id=course.id,
+        vector_collection="old-active", calibration_status="pending", status="processing",
+        chunk_count=1,
+    )
+    db.add(document); db.flush()
+    page_text = "第一章 绪论\n\n这是用于重新生成索引的教材正文。"
+    page = DocumentPage(
+        document_id=document.id, pdf_page=1, raw_text=page_text, text=page_text,
+        text_blocks=[],
+    )
+    old_outline = DocumentOutlineNode(
+        document_id=document.id, node_type="chapter", title="旧章节",
+        sort_order=1, pdf_page_start=1, pdf_page_end=1, retrieval_enabled=True,
+    )
+    old_chunk = KnowledgeChunk(
+        document_id=document.id, vector_id=f"document-{document.id}-chunk-0",
+        chunk_index=0, content="旧索引正文", pdf_page_start=1, pdf_page_end=1,
+        index_version="old:embedding:256:test",
+    )
+    db.add_all([page, old_outline, old_chunk]); db.commit()
+
+    monkeypatch.setattr(
+        "app.services.citation_service.resolve_active_collection_name",
+        lambda: (_ for _ in ()).throw(IncompatibleVectorIndexError("活动索引维度不兼容")),
+    )
+    payload = DocumentCalibrationUpdate.model_validate({
+        "version_label": "当前版",
+        "access_policy": "full_preview",
+        "page_number_ranges": [],
+        "outline": [{
+            "client_id": "new-chapter", "node_type": "chapter", "title": "新章节",
+            "sort_order": 1, "pdf_page_start": 1, "pdf_page_end": 1,
+            "retrieval_enabled": True,
+        }],
+    })
+
+    with pytest.raises(HTTPException) as raised:
+        CitationService(db).calibrate(document.id, payload)
+
+    assert raised.value.status_code == 503
+    assert raised.value.detail == "活动索引维度不兼容"
+    assert db.query(KnowledgeChunk).filter_by(document_id=document.id).one().content == "旧索引正文"
+    assert db.query(DocumentOutlineNode).filter_by(document_id=document.id).one().title == "旧章节"
+    restored = db.get(KnowledgeDocument, document.id)
+    assert restored is not None
+    assert restored.vector_collection == "old-active"
+    assert restored.status == "processing"
 
 
 def test_citation_only_document_exposes_only_requested_page(client: TestClient, db: Session, tmp_path: Path) -> None:

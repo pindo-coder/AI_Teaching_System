@@ -1,3 +1,4 @@
+import logging
 import re
 from types import SimpleNamespace
 
@@ -13,8 +14,11 @@ from app.models.knowledge_document import KnowledgeDocument
 from app.rag.page_cleaner import join_page_texts, render_clean_text
 from app.rag.text_splitter import split_pages
 from app.rag.embeddings import get_embedding_profile
-from app.rag.vector_store import add_precise_chunks, delete_document_vectors, resolve_active_collection_name
+from app.rag.vector_store import replace_precise_chunks, resolve_active_collection_name
 from app.schemas.knowledge import CitationFeedbackCreate, DocumentCalibrationUpdate
+
+
+logger = logging.getLogger(__name__)
 
 
 def _roman(value: int) -> str:
@@ -215,18 +219,39 @@ class CitationService:
             from fastapi import HTTPException
             raise HTTPException(status_code=400, detail="校准结果没有可用于检索的正文节点")
 
-        delete_document_vectors(document_id, collection_name=document.vector_collection)
         self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document_id))
-        vector_ids = add_precise_chunks(
-            document_id=document_id, chunks=precise_chunks,
-            metadata={"source_title": document.source_title, "source_type": document.source_type,
-                      "course_id": document.course_id, "chapter_id": document.chapter_id or -1,
-                      "knowledge_point": document.knowledge_point or "", "source_role": document.source_role,
-                      "material_type": document.material_type, "publisher": document.publisher or "",
-                      "published_date": document.published_date.isoformat() if document.published_date else "",
-                      "source_url": document.source_url or "",
-                      "authority_level": "", "effective_date": "", "expired_date": ""},
-        )
+        active_collection = ""
+        try:
+            # Resolving the active manifest also validates its Embedding profile.
+            # Keep this inside the protected block so an old production index
+            # produces an actionable 503 instead of an opaque server error.
+            active_collection = resolve_active_collection_name()
+            vector_ids = replace_precise_chunks(
+                document_id=document_id, chunks=precise_chunks, collection_name=active_collection,
+                metadata={"source_title": document.source_title, "source_type": document.source_type,
+                          "course_id": document.course_id, "chapter_id": document.chapter_id or -1,
+                          "knowledge_point": document.knowledge_point or "", "source_role": document.source_role,
+                          "material_type": document.material_type, "publisher": document.publisher or "",
+                          "published_date": document.published_date.isoformat() if document.published_date else "",
+                          "source_url": document.source_url or "",
+                          "authority_level": "", "effective_date": "", "expired_date": ""},
+            )
+        except Exception as exc:
+            self.db.rollback()
+            logger.exception(
+                "citation_calibration_vector_write_failed document_id=%s collection=%s",
+                document_id, active_collection or "unresolved",
+            )
+            from fastapi import HTTPException
+            from app.rag.embeddings import EmbeddingDimensionMismatchError
+            from app.rag.vector_store import IncompatibleVectorIndexError
+            if isinstance(exc, (EmbeddingDimensionMismatchError, IncompatibleVectorIndexError)):
+                detail = str(exc)
+            elif isinstance(exc, (TimeoutError, ConnectionError)):
+                detail = "Embedding 服务连接超时或不可用，请检查 API 配置后重试"
+            else:
+                detail = f"向量索引写入失败：{str(exc)[:400]}"
+            raise HTTPException(status_code=503, detail=detail) from exc
         version = get_embedding_profile().version
         for index, (chunk, vector_id) in enumerate(zip(precise_chunks, vector_ids)):
             metadata = dict(chunk.get("metadata") or {})
@@ -241,7 +266,7 @@ class CitationService:
                 end_anchor=str(chunk.get("end_anchor") or "")[-500:], index_version=version,
             ))
         document.access_policy = payload.access_policy
-        document.vector_collection = resolve_active_collection_name()
+        document.vector_collection = active_collection
         document.calibration_status = "calibrated"
         document.status = "ready"
         document.chunk_count = len(precise_chunks)

@@ -39,6 +39,9 @@ def _repeat_key(value: str) -> str:
 
 
 def _margin(block: dict, height: float | None) -> str | None:
+    declared_region = block.get("region")
+    if declared_region in {"header", "footer"}:
+        return declared_region
     if not height:
         return None
     bbox = block.get("bbox") or []
@@ -68,13 +71,16 @@ def _join_lines(value: str) -> str:
 
 
 def render_clean_text(blocks: list[dict]) -> str:
-    paragraphs = []
+    paragraphs: list[str] = []
     for block in blocks:
         if block.get("excluded"):
             continue
         text = _join_lines(str(block.get("text") or ""))
         if text:
-            paragraphs.append(text)
+            if paragraphs and block.get("line_break"):
+                paragraphs[-1] += "\n" + text
+            else:
+                paragraphs.append(text)
     return "\n\n".join(paragraphs).strip()
 
 
@@ -90,7 +96,7 @@ def clean_document_pages(pages: list[CleanablePage]) -> list[CleanablePage]:
 
     counts = Counter((margin, key) for _, margin, key in candidates)
     required_repeats = max(3, math.ceil(len(pages) * 0.15))
-    for page in pages:
+    for page_index, page in enumerate(pages):
         normalized_blocks = []
         for index, source in enumerate(page.text_blocks):
             block = dict(source)
@@ -113,6 +119,17 @@ def clean_document_pages(pages: list[CleanablePage]) -> list[CleanablePage]:
             elif margin and key and counts[(margin, key)] >= required_repeats:
                 block["excluded"] = True
                 block["exclusion_reason"] = f"repeated_{margin}"
+            elif (
+                margin == "header"
+                and page_index > 0
+                and len(_compact(text)) <= 120
+                and _HEADING_RE.match(text)
+            ):
+                # A chapter/section title repeated on every subsequent page is
+                # page furniture, even when OCR varies its spacing or digits so
+                # much that the repeated-key rule cannot match it.
+                block["excluded"] = True
+                block["exclusion_reason"] = "repeated_header"
             normalized_blocks.append(block)
         page.text_blocks = normalized_blocks
         if normalized_blocks:

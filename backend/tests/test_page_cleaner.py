@@ -1,5 +1,11 @@
 from types import SimpleNamespace
+from io import BytesIO
 
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+
+from app.rag import document_loader
+from app.rag.document_loader import extract_pages
 from app.rag.page_cleaner import CleanablePage, clean_document_pages, join_page_texts
 from app.rag.text_splitter import split_pages
 
@@ -68,3 +74,58 @@ def test_cross_page_heading_is_not_joined() -> None:
     text = join_page_texts(["上一节正文没有句号", "第二节 新的发展阶段\n\n本节正文。"])
 
     assert "没有句号\n\n第二节" in text
+
+
+def test_ocr_short_blocks_are_packed_before_embedding() -> None:
+    fragments = [f"第{index}行是 OCR 提取出的连续教材正文。" for index in range(120)]
+    page = SimpleNamespace(pdf_page=1, text="\n\n".join(fragments))
+
+    chunks = split_pages([page])
+
+    assert len(chunks) < 10
+    merged = "".join(str(chunk["content"]) for chunk in chunks)
+    assert all(fragment in merged for fragment in fragments)
+    assert all(chunk["pdf_page_start"] == 1 for chunk in chunks)
+    assert all(chunk["pdf_page_end"] == 1 for chunk in chunks)
+
+
+def _simple_pdf(page_lines: list[list[str]]) -> bytes:
+    writer = PdfWriter()
+    font = DictionaryObject({
+        NameObject("/Type"): NameObject("/Font"),
+        NameObject("/Subtype"): NameObject("/Type1"),
+        NameObject("/BaseFont"): NameObject("/Helvetica"),
+    })
+    font_ref = writer._add_object(font)
+    for lines in page_lines:
+        page = writer.add_blank_page(width=600, height=800)
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font_ref}),
+        })
+        operations = ["BT /F1 12 Tf 50 750 Td"]
+        for index, line in enumerate(lines):
+            escaped = line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+            if index:
+                operations.append("0 -40 Td")
+            operations.append(f"({escaped}) Tj")
+        operations.append("ET")
+        stream = DecodedStreamObject()
+        stream.set_data(" ".join(operations).encode("latin-1"))
+        page[NameObject("/Contents")] = writer._add_object(stream)
+    output = BytesIO()
+    writer.write(output)
+    return output.getvalue()
+
+
+def test_pypdf_fallback_batch_removes_repeated_headers_and_page_numbers(monkeypatch) -> None:
+    monkeypatch.setattr(document_loader, "fitz", None)
+    content = _simple_pdf([
+        ["Section 1 Modernization", str(136 + index), f"Body continuation page {index}"]
+        for index in range(1, 5)
+    ])
+
+    pages = extract_pages("textbook.pdf", content)
+
+    assert all("Section 1" not in page.text for page in pages)
+    assert all(str(136 + page.pdf_page) not in page.text for page in pages)
+    assert all("Body continuation" in page.text for page in pages)

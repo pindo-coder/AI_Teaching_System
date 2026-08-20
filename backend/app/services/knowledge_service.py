@@ -16,7 +16,7 @@ from app.rag.text_splitter import split_pages, split_text
 from app.rag.embeddings import get_embedding_profile
 from app.rag.vector_store import (
     add_chunks,
-    add_precise_chunks,
+    add_precise_chunks, replace_precise_chunks,
     delete_document_vectors,
     resolve_active_collection_name,
     resolve_backend_path,
@@ -42,10 +42,7 @@ class KnowledgeService:
         self.db.rollback()
         document = self.db.get(KnowledgeDocument, document_id)
         try:
-            delete_document_vectors(
-                document_id,
-                collection_name=document.vector_collection if document is not None else None,
-            )
+            delete_document_vectors(document_id, collection_name=resolve_active_collection_name())
         except Exception:
             logger.exception("knowledge_vector_cleanup_failed document_id=%s", document_id)
         if document is not None:
@@ -243,7 +240,8 @@ class KnowledgeService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail="已发布资料不能直接删除，请先归档后再处理",
             )
-        delete_document_vectors(document.id, collection_name=document.vector_collection)
+        active_collection = resolve_active_collection_name()
+        delete_document_vectors(document.id, collection_name=active_collection)
         path = Path(document.stored_path)
         if path.exists():
             path.unlink()
@@ -263,7 +261,6 @@ class KnowledgeService:
         content = path.read_bytes()
         try:
             pages = extract_pages(document.original_filename, content)
-            delete_document_vectors(document.id, collection_name=document.vector_collection)
             self.db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.document_id == document.id))
             previous_pages = {page.pdf_page: page for page in self.db.scalars(select(DocumentPage).where(
                 DocumentPage.document_id == document.id
@@ -286,9 +283,9 @@ class KnowledgeService:
                 document_id=document.id, pdf_page=page.pdf_page, raw_text=page.raw_text, text=page.text,
                 width=page.width, height=page.height, text_blocks=page.text_blocks or [],
             ) for page in pages])
-            vector_ids = add_precise_chunks(
-                document_id=document.id,
-                chunks=chunks,
+            active_collection = resolve_active_collection_name()
+            vector_ids = replace_precise_chunks(
+                document_id=document.id, chunks=chunks, collection_name=active_collection,
                 metadata={
                     "source_title": document.source_title,
                     "source_type": document.source_type,
@@ -317,7 +314,7 @@ class KnowledgeService:
             ])
             document.status = "ready"
             document.chunk_count = len(chunks)
-            document.vector_collection = resolve_active_collection_name()
+            document.vector_collection = active_collection
             return self.documents.save(document)
         except Exception as exc:
             logger.exception("knowledge_reindex_failed document_id=%s", document_id)

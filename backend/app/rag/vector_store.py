@@ -11,6 +11,7 @@ from app.rag.embeddings import EmbeddingProfile, get_embedding_profile, get_embe
 
 
 INDEX_MANIFEST_VERSION = 2
+MAX_DOCUMENT_VECTOR_CHUNKS = 2500
 
 
 class IncompatibleVectorIndexError(RuntimeError):
@@ -243,6 +244,33 @@ def add_precise_chunks(*, document_id: int, chunks: list[dict[str, object]],
                       "position_label": position_label},
         ))
     get_vector_store(collection_name).add_documents(documents, ids=ids)
+    return ids
+
+
+def replace_precise_chunks(*, document_id: int, chunks: list[dict[str, object]],
+                           metadata: dict[str, str | int], collection_name: str) -> list[str]:
+    """Upsert a document's new chunks before removing stale IDs.
+
+    Calibration must not delete the working index before a remote Embedding or
+    Chroma write succeeds. The new IDs are deterministic, so a successful
+    upsert replaces same-position chunks and stale tail chunks can be removed
+    afterwards.
+    """
+    if len(chunks) > MAX_DOCUMENT_VECTOR_CHUNKS:
+        raise ValueError(
+            f"文档被拆分为 {len(chunks)} 个向量块，超过安全上限 "
+            f"{MAX_DOCUMENT_VECTOR_CHUNKS}。请先重新自动清洗 OCR 文本后再保存。"
+        )
+    store = get_vector_store(collection_name)
+    previous = store.get(where={"document_id": document_id}, include=[])
+    old_ids = set(previous.get("ids") or [])
+    ids = add_precise_chunks(
+        document_id=document_id, chunks=chunks, metadata=metadata,
+        collection_name=collection_name,
+    )
+    stale_ids = old_ids.difference(ids)
+    if stale_ids:
+        store.delete(ids=list(stale_ids))
     return ids
 
 
