@@ -433,16 +433,15 @@ def workspace_agent_stream(
                 calls = planner.plan(payload.question, effective_role, context)
             except Exception as exc:
                 logger.exception("planning_agent_plan_failed")
-                calls = (
-                    planner._deterministic_plan(payload.question, "admin")
-                    if effective_role == "admin"
-                    else [ToolCall("inspect_context", "确认当前教学上下文")]
-                )
+                # 规划器本身异常时仍沿用角色受限的确定性计划。明确的学习总结、
+                # 待办或备课目标不应统一退化为“只读取上下文”；invoke 仍会再次
+                # 执行服务端工具白名单校验，不能借此越权。
+                calls = planner._deterministic_plan(payload.question, effective_role)
                 yield _sse("progress", {
                     "title": (
                         f"智能规划暂不可用，已切换为规则化治理检查：{str(exc) or '请稍后重试'}"
                         if effective_role == "admin"
-                        else f"智能规划暂不可用，已切换为基础范围检查：{str(exc) or '请稍后重试'}"
+                        else f"智能规划暂不可用，已切换为规则化任务计划：{str(exc) or '请稍后重试'}"
                     ),
                     "status": "blocked",
                 })

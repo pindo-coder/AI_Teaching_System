@@ -40,7 +40,6 @@ const practiceSavedToNotes = ref(false)
 const readingContainer = ref<HTMLElement | null>(null)
 let lastReadingPercent = 0
 const contentBlocks = computed(() => formatTextbookParagraphs(chapter.value?.content))
-const contentPreview = computed(() => contentBlocks.value.slice(0, 3))
 
 const configs: Record<LearningStage, {
   title: string
@@ -267,7 +266,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 
     <section v-if="stage === 'preview'" class="stage-workspace">
       <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template><div class="guide-grid"><div><strong>本专题</strong><p>{{ chapter?.title }}</p></div><div><strong>阅读方法</strong><p>先找章节主旨，再标记核心概念和重要论述。</p></div><div><strong>预习产出</strong><p>形成至少 3 个问题，带着问题进入课堂。</p></div></div></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材原文预读</span><span class="muted">阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材原文预读滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材原文预读</span><span class="muted">完整正文可滚动查看 · 阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材原文预读滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
     </section>
 
     <section v-else-if="stage === 'review'" class="stage-workspace">
@@ -277,7 +276,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 
     <section v-else class="stage-workspace exam-workspace">
       <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template><div class="exam-task-grid"><div><strong>考点提炼</strong><p>识别章节主旨、核心概念和重要论述。</p></div><div><strong>答题训练</strong><p>按照“概念—观点—依据—意义”组织答案。</p></div><div><strong>薄弱点检查</strong><p>通过错题定位未掌握的知识点。</p></div></div><el-button class="practice-launch-button" type="primary" @click="beginPractice">开始本章练习</el-button></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>核心原文速览</span><span class="muted">阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentPreview.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="核心原文速览滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentPreview" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>核心原文速览</span><span class="muted">完整正文可滚动查看 · 阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="核心原文速览滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
     </section>
 
     <section class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>

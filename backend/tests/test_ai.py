@@ -673,6 +673,28 @@ def test_admin_planning_exception_falls_back_to_matching_governance_tool(
     assert "平台治理范围可验证" in response.text
 
 
+def test_student_planning_exception_falls_back_to_recent_summary_tool(
+    client: TestClient, db: Session, monkeypatch,
+) -> None:
+    headers, _, _ = prepare_context(db)
+
+    def broken_plan(*_args, **_kwargs):
+        raise RuntimeError("模拟规划异常")
+
+    monkeypatch.setattr(PlanningAgent, "plan", broken_plan)
+    response = client.post(
+        "/api/v1/ai/workspace/agent/stream",
+        headers=headers,
+        json={"role": "student", "question": "请汇总我近 7 天在本网站的个人学习情况，并给出下一步建议。"},
+    )
+
+    assert response.status_code == 200
+    assert '"name": "summarize_recent_learning"' in response.text
+    assert '"name": "inspect_context"' not in response.text
+    assert "规则化任务计划" in response.text
+    assert "近 7 天你学习了" in response.text
+
+
 def test_planning_agent_selects_tools_for_teacher_assignment_draft(client: TestClient, db: Session) -> None:
     teacher = User(username="planner_teacher", password_hash=hash_password("secure-pass-123"), role="teacher")
     course = Course(name="规划器测试教材", description="测试教材")

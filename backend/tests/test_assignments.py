@@ -210,3 +210,13 @@ def test_legacy_local_due_time_is_read_as_business_time(client: TestClient, db: 
     summary_now = after_sync.replace(tzinfo=UTC).astimezone(BUSINESS_TIMEZONE)
     summary = StudentLearningSummaryService(db).summarize(student.id, now=summary_now)
     assert summary["assignments"]["completed_in_period"] == 1
+    assert summary["assignments"]["completed_items"] == [{
+        "assignment_id": assignment.id,
+        "course_id": course.id,
+        "course_name": course.name,
+        "chapter_id": chapter.id,
+        "chapter_title": chapter.title,
+        "title": assignment.title,
+        "completed_time": utc_iso(normalized_completed),
+    }]
+    assert summary["assignments"]["completed_items_truncated"] is False

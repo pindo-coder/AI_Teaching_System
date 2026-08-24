@@ -6,7 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.time import to_utc_naive, utc_iso, utc_now
@@ -29,6 +29,8 @@ EVENT_LABELS = {
     "activity_submitted": "活动提交",
     "quiz_completed": "练习完成",
 }
+
+COMPLETED_ITEM_LIMIT = 10
 
 
 class StudentLearningSummaryService:
@@ -56,19 +58,55 @@ class StudentLearningSummaryService:
         active_course_ids.update(item.course_id for item in recent_progress)
         active_chapter_ids.update(item.chapter_id for item in recent_progress)
 
-        task_rows = self.db.execute(
+        # “最近完成”以不可变的完成时间为准；进行中任务仍以最近更新时间判断
+        # 本期是否活跃。不能用 updated_time 统计已完成项，否则历史任务被同步
+        # 或重新保存后会被误报成最近完成。
+        task_rows = list(self.db.execute(
             select(UserTaskProgress, LearningTaskPoint, Course.name, Chapter.title)
             .join(LearningTaskPoint, LearningTaskPoint.id == UserTaskProgress.task_point_id)
             .join(Course, Course.id == LearningTaskPoint.course_id)
             .join(Chapter, Chapter.id == LearningTaskPoint.chapter_id)
             .where(
                 UserTaskProgress.user_id == user_id,
-                UserTaskProgress.updated_time >= start,
-                UserTaskProgress.updated_time <= end,
+                or_(
+                    and_(
+                        UserTaskProgress.status == "completed",
+                        UserTaskProgress.completed_time.is_not(None),
+                        UserTaskProgress.completed_time >= start,
+                        UserTaskProgress.completed_time <= end,
+                    ),
+                    and_(
+                        UserTaskProgress.status == "in_progress",
+                        UserTaskProgress.updated_time >= start,
+                        UserTaskProgress.updated_time <= end,
+                    ),
+                ),
             )
-        ).all()
-        completed_tasks = sum(progress.status == "completed" for progress, *_ in task_rows)
+        ).all())
+        completed_task_rows = sorted(
+            (row for row in task_rows if row[0].status == "completed" and row[0].completed_time),
+            key=lambda row: row[0].completed_time,
+            reverse=True,
+        )
+        completed_tasks = len(completed_task_rows)
         in_progress_tasks = sum(progress.status == "in_progress" for progress, *_ in task_rows)
+        completed_task_items = [
+            {
+                "task_point_id": task.id,
+                "course_id": task.course_id,
+                "course_name": course_name,
+                "chapter_id": task.chapter_id,
+                "chapter_title": chapter_title,
+                "learning_stage": task.learning_stage,
+                "task_type": task.task_type,
+                "title": task.title,
+                "completed_time": utc_iso(progress.completed_time),
+                "evidence_summary": progress.evidence_summary,
+            }
+            for progress, task, course_name, chapter_title in completed_task_rows[:COMPLETED_ITEM_LIMIT]
+        ]
+        active_course_ids.update(task.course_id for _progress, task, *_ in task_rows)
+        active_chapter_ids.update(task.chapter_id for _progress, task, *_ in task_rows)
 
         notes = list(self.db.scalars(select(StudyNote).where(
             StudyNote.user_id == user_id,
@@ -91,10 +129,31 @@ class StudentLearningSummaryService:
 
         assignments = AssignmentService(self.db).student_assignments(user_id, include_completed=True)
         assignment_counts = Counter(item["status"] for item in assignments)
-        completed_recent = sum(
-            item["status"] == "completed" and item["completed_time"] and start <= item["completed_time"] <= end
-            for item in assignments
+        completed_assignment_rows = sorted(
+            (
+                item for item in assignments
+                if item["status"] == "completed"
+                and item["completed_time"]
+                and start <= item["completed_time"] <= end
+            ),
+            key=lambda item: item["completed_time"],
+            reverse=True,
         )
+        completed_recent = len(completed_assignment_rows)
+        completed_assignment_items = [
+            {
+                "assignment_id": item["id"],
+                "course_id": item["course_id"],
+                "course_name": item["course_name"],
+                "chapter_id": item["chapter_id"],
+                "chapter_title": item["chapter_title"],
+                "title": item["title"],
+                "completed_time": utc_iso(item["completed_time"]),
+            }
+            for item in completed_assignment_rows[:COMPLETED_ITEM_LIMIT]
+        ]
+        active_course_ids.update(item["course_id"] for item in completed_assignment_rows)
+        active_chapter_ids.update(item["chapter_id"] for item in completed_assignment_rows)
 
         chapter_names = {
             chapter_id: title for chapter_id, title in self.db.execute(
@@ -137,11 +196,18 @@ class StudentLearningSummaryService:
                 "course_count": len(active_course_ids), "chapter_count": len(active_chapter_ids),
                 "topics": active_topics,
             },
-            "task_points": {"completed": completed_tasks, "in_progress": in_progress_tasks},
+            "task_points": {
+                "completed": completed_tasks,
+                "in_progress": in_progress_tasks,
+                "completed_items": completed_task_items,
+                "completed_items_truncated": completed_tasks > len(completed_task_items),
+            },
             "assignments": {
                 "completed_in_period": completed_recent,
                 "pending": assignment_counts["not_started"] + assignment_counts["in_progress"],
                 "overdue": assignment_counts["overdue"],
+                "completed_items": completed_assignment_items,
+                "completed_items_truncated": completed_recent > len(completed_assignment_items),
             },
             "learning_actions": {
                 "events": {EVENT_LABELS.get(key, key): value for key, value in event_counts.items()},

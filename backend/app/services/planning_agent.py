@@ -160,7 +160,8 @@ class PlanningAgent:
                 ToolCall("search_materials", "检索可引用的教材与权威资料"),
             ]
         if role == "student" and any(term in text for term in (
-            "近7天", "最近7天", "七天总结", "近期总结", "学习周报", "最近学了什么", "本周学习"
+            "近7天", "最近7天", "七天总结", "近期总结", "学习周报", "最近学了什么", "本周学习",
+            "最近完成", "近期完成", "最近做完", "近期做完", "完成了哪些任务", "完成过哪些任务",
         )):
             return [ToolCall("summarize_recent_learning", "汇总近 7 天个人学习情况")]
         if role == "student" and any(term in text for term in ("我的进度", "学习状态", "笔记情况", "完成了什么", "还要做什么")):
@@ -231,14 +232,30 @@ class PlanningAgent:
     def _allowed_tools(self, role: str) -> set[str]:
         return set(self.ROLE_TOOL_ALLOWLIST.get(role, self.ROLE_TOOL_ALLOWLIST["student"]))
 
+    @staticmethod
+    def _planning_prompt() -> ChatPromptTemplate:
+        """Build the optional LLM planner prompt.
+
+        The JSON example must escape braces for LangChain's f-string template
+        parser.  Keeping construction in one helper also makes this production
+        failure mode testable without calling an external model.
+        """
+        return ChatPromptTemplate.from_messages([
+            (
+                "system",
+                "你是高校思政课工作流规划器。只能从给定工具中选择，不能编造工具。"
+                "返回 JSON：{{\"tools\":[{{\"name\":\"工具名\",\"reason\":\"原因\","
+                "\"requires_confirmation\":false}}]}}。最多选择 5 个工具；"
+                "发布、删除、通知永远不能自主调用。",
+            ),
+            ("human", "角色：{role}\n问题：{question}\n当前范围：{context}\n可用工具：{tools}"),
+        ])
+
     def _llm_plan(self, question: str, role: str, context: AiWorkspaceContextData) -> list[ToolCall] | None:
         runtime = AiProviderConfigService.resolve(self.db)
         if not settings.agent_planner_use_llm or settings.ai_mock_mode or not runtime.api_key:
             return None
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", "你是高校思政课工作流规划器。只能从给定工具中选择，不能编造工具。返回 JSON：{\"tools\":[{\"name\":\"工具名\",\"reason\":\"原因\",\"requires_confirmation\":false}]}。最多选择 5 个工具；发布、删除、通知永远不能自主调用。"),
-            ("human", "角色：{role}\n问题：{question}\n当前范围：{context}\n可用工具：{tools}"),
-        ])
+        prompt = self._planning_prompt()
         model, _ = build_chat_model(
             feature="agent_planning",
             user_id=self.user.id,
@@ -281,10 +298,15 @@ class PlanningAgent:
         # 外部模型做二次规划。这样 AI 服务配置异常时，管理员仍能读取平台进度。
         if role == "admin":
             return deterministic[: settings.agent_planner_max_steps]
-        # 备课、任务、资料检索等明确目标已有可审计的安全路径。先直接采用它们，
-        # 不能让一次外部模型规划调用卡住整个 SSE 首屏；大模型仅用于模糊问题的
-        # 工具补充与最终结果归纳。
-        calls = deterministic if len(deterministic) > 1 else (self._llm_plan(question, role, context) or deterministic)
+        # 所有已被规则识别的明确目标都直接采用可审计路径，包括只有一个工具的
+        # “近 7 天学习总结”。仅默认的上下文检查代表意图仍然模糊，此时才请求
+        # 外部模型补充计划。这样模型、网络或 Prompt 异常不会阻断已知业务工具。
+        is_ambiguous = (
+            len(deterministic) == 1
+            and deterministic[0].name == "inspect_context"
+            and deterministic[0].reason == "确认当前教学上下文"
+        )
+        calls = (self._llm_plan(question, role, context) or deterministic) if is_ambiguous else deterministic
         # LLM 计划即使格式正确，也可能漏掉完成目标所必需的工具；补齐由规则
         # 推导出的最小安全计划，避免“只读了上下文却没有生成结果”。
         if calls is not deterministic:
@@ -621,16 +643,39 @@ class PlanningAgent:
             tasks = summary["task_points"]
             assignments = summary["assignments"]
             actions = summary["learning_actions"]
+            completion_parts: list[str] = []
+            if tasks["completed_items"]:
+                task_labels = "；".join(
+                    f"《{item['course_name']}》·{item['chapter_title']}：{item['title']}"
+                    for item in tasks["completed_items"][:5]
+                )
+                remaining = tasks["completed"] - min(5, len(tasks["completed_items"]))
+                completion_parts.append(f"任务点：{task_labels}" + (f"；另有 {remaining} 项" if remaining > 0 else ""))
+            if assignments["completed_items"]:
+                assignment_labels = "；".join(
+                    f"《{item['title']}》（{item['chapter_title']}）"
+                    for item in assignments["completed_items"][:5]
+                )
+                remaining = assignments["completed_in_period"] - min(5, len(assignments["completed_items"]))
+                completion_parts.append(
+                    f"教师任务：{assignment_labels}" + (f"；另有 {remaining} 项" if remaining > 0 else "")
+                )
+            completion_text = (
+                "\n具体完成：" + "\n".join(completion_parts) + "。"
+                if completion_parts
+                else "\n具体完成：近 7 天未记录到已完成的任务点或教师任务。"
+            )
             weak_text = "；".join(summary["weak_points"]) if summary["weak_points"] else "暂未形成足够证据判断薄弱点"
             suggestion_text = "；".join(summary["suggestions"])
             return ToolResult(
                 f"近 7 天你学习了 {active['course_count']} 门课程、{active['chapter_count']} 个专题；"
                 f"完成 {tasks['completed']} 个任务点，另有 {tasks['in_progress']} 个进行中。"
-                f"教师任务本期完成 {assignments['completed_in_period']} 项、待完成 {assignments['pending']} 项、"
+                f"教师任务本期完成 {assignments['completed_in_period']} 项、当前待完成 {assignments['pending']} 项、"
                 f"逾期 {assignments['overdue']} 项。更新笔记 {actions['notes_updated']} 篇，"
                 f"完成复习练习 {actions['practice_answered']} 题（答对 {actions['practice_correct']} 题）。"
                 f"记录到 AI 任务辅助 {actions['ai_assist_events']} 次、笔记空间 AI 提问 {actions['ai_chat_questions']} 次；"
-                f"这些仅作为学习投入参考，不计为知识掌握。\n薄弱点：{weak_text}。\n下一步：{suggestion_text}。",
+                f"这些仅作为学习投入参考，不计为知识掌握。{completion_text}"
+                f"\n薄弱点：{weak_text}。\n下一步：{suggestion_text}。",
                 action={
                     "kind": "open_student_assignments", "label": "查看我的任务", "href": "/assignments",
                     "requires_confirmation": False,
