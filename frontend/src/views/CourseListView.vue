@@ -111,7 +111,6 @@ onMounted(loadCourses)
         <p>以《习近平新时代中国特色社会主义思想概论》为理论主线，把专题学习、时政关联与课堂互动组织成一条有依据、有情境、有反馈的学习路径。</p>
         <div class="course-hero-actions">
           <el-button type="warning" size="large" :disabled="!textbook" @click="textbook && router.push(`/courses/${textbook.id}`)">进入专题目录 <el-icon><ArrowRight /></el-icon></el-button>
-          <el-button size="large" plain @click="router.push('/current-affairs')">查看时政要点</el-button>
         </div>
         <div class="course-overview-stats">
           <div v-for="item in overviewStats" :key="item.label" class="course-overview-stat">
@@ -121,16 +120,16 @@ onMounted(loadCourses)
         </div>
       </div>
 
-      <div class="course-intelligence-map" aria-label="课程智能知识导航示意图">
-        <div class="intelligence-map-heading"><span>THEORY · KNOWLEDGE MAP</span><strong>理论知识智能导航</strong></div>
+      <div class="course-intelligence-map" aria-label="课程知识关系示意图">
+        <div class="intelligence-map-heading"><span>THEORY · KNOWLEDGE MAP</span><strong>理论知识关系概览</strong></div>
         <div class="intelligence-orbit orbit-one"></div>
         <div class="intelligence-orbit orbit-two"></div>
         <div class="intelligence-axis axis-horizontal"></div>
         <div class="intelligence-axis axis-vertical"></div>
         <div class="intelligence-core"><span>AI</span><strong>思想坐标</strong><small>教材为本 · 智能助学</small></div>
-        <button type="button" class="intelligence-node node-theory" :disabled="!textbook" @click="openModule('')"><span>01</span><strong>专题学习</strong><small>理论主线</small></button>
-        <button type="button" class="intelligence-node node-affairs" @click="openModule('/current-affairs')"><span>02</span><strong>时政关联</strong><small>现实坐标</small></button>
-        <button type="button" class="intelligence-node node-classroom" @click="openModule('/interaction')"><span>03</span><strong>课堂互动</strong><small>实践表达</small></button>
+        <div class="intelligence-node intelligence-node-static node-theory"><span>01</span><strong>专题学习</strong><small>理论主线</small></div>
+        <div class="intelligence-node intelligence-node-static node-affairs"><span>02</span><strong>时政关联</strong><small>现实坐标</small></div>
+        <div class="intelligence-node intelligence-node-static node-classroom"><span>03</span><strong>课堂互动</strong><small>实践表达</small></div>
         <span class="intelligence-pulse pulse-one"></span><span class="intelligence-pulse pulse-two"></span><span class="intelligence-pulse pulse-three"></span>
         <div class="intelligence-map-caption"><span></span>AI 围绕教材与当前专题提供学习支持</div>
       </div>

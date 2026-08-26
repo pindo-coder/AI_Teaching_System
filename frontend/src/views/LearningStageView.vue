@@ -6,7 +6,8 @@ import { learningApi } from '@/api/learning'
 import type { Chapter, CourseDetail, LearningFootprint, LearningStage } from '@/types'
 import { formatTextbookParagraphs } from '@/utils/textbookText'
 import { studyApi } from '@/api/study'
-import type { ReviewAnswerResult, ReviewQuestion, ReviewReferenceItem } from '@/api/study'
+import type { ReviewAnswerResult, ReviewQuestion, ReviewReferenceItem, StudyNote } from '@/api/study'
+import { notePlainText, sanitizeNoteHtml } from '@/utils/noteContent'
 import { ElMessage } from 'element-plus'
 
 const route = useRoute()
@@ -17,8 +18,7 @@ const stage = computed(() => route.params.stage as LearningStage)
 const course = ref<CourseDetail | null>(null)
 const chapter = ref<Chapter | null>(null)
 const loading = ref(true)
-const selfNote = ref('')
-const noteSaving = ref(false)
+const savedNote = ref<StudyNote | null>(null)
 const footprint = ref<LearningFootprint | null>(null)
 const practiceDialogVisible = ref(false)
 const practiceLoading = ref(false)
@@ -40,6 +40,8 @@ const practiceSavedToNotes = ref(false)
 const readingContainer = ref<HTMLElement | null>(null)
 let lastReadingPercent = 0
 const contentBlocks = computed(() => formatTextbookParagraphs(chapter.value?.content))
+const savedNoteText = computed(() => notePlainText(savedNote.value?.content || ''))
+const savedNoteHtml = computed(() => sanitizeNoteHtml(savedNote.value?.content || ''))
 
 const configs: Record<LearningStage, {
   title: string
@@ -132,8 +134,7 @@ async function load() {
     course.value = (await courseApi.detail(courseId.value)).data.data
     chapter.value = course.value.chapters.find((item) => item.id === chapterId.value) || null
     if (!chapter.value) return router.replace(`/courses/${courseId.value}`)
-    const savedNote = (await studyApi.note(chapterId.value)).data.data
-    selfNote.value = savedNote?.content || ''
+    savedNote.value = (await studyApi.note(chapterId.value)).data.data
     lastReadingPercent = 0
     await recordEvent('chapter_opened')
     await loadFootprint()
@@ -149,14 +150,8 @@ function finishPracticeAndContinue() {
 function goToStageDirect(target: LearningStage) {
   router.push(`/courses/${courseId.value}/chapters/${chapterId.value}/${target}`)
 }
-async function saveStudyNote() {
-  noteSaving.value = true
-  try {
-    await studyApi.saveNote(chapterId.value, selfNote.value)
-    await studyApi.activateReview(chapterId.value)
-    try { await loadFootprint() } catch { /* 笔记事件由保存接口记录，刷新失败不阻塞保存。 */ }
-    ElMessage.success('学习笔记已保存，并加入间隔复习计划')
-  } finally { noteSaving.value = false }
+function openNoteWorkspace() {
+  void router.push({ path: '/notes', query: { chapter_id: String(chapterId.value) } })
 }
 async function beginPractice() {
   practiceDialogVisible.value = true
@@ -253,7 +248,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 </script>
 
 <template>
-  <div v-loading="loading">
+  <div v-loading="loading" class="learning-stage-page">
     <el-button link @click="router.push(`/courses/${courseId}`)">← 返回课程详情</el-button>
     <nav class="stage-switcher" aria-label="学习阶段">
       <button v-for="item in (['preview', 'review', 'exam'] as LearningStage[])" :key="item" :class="{ active: stage === item }" @click="goToStageDirect(item)">{{ configs[item].title }}</button>
@@ -271,7 +266,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 
     <section v-else-if="stage === 'review'" class="stage-workspace">
       <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材重点回看</span><span class="muted">阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材重点回看滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
-      <el-card shadow="never" class="workspace-card note-workspace"><template #header><div class="content-heading"><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div></template><p class="note-guide">建议按照“章节主旨—核心观点—概念关系—现实意义”四部分整理。保存后会加入间隔复习计划。</p><el-input v-model="selfNote" type="textarea" :rows="8" maxlength="10000" show-word-limit placeholder="请用自己的语言写下本专题笔记……" /><el-button class="note-save-button" type="primary" :loading="noteSaving" @click="saveStudyNote">保存笔记并加入复习</el-button></el-card>
+      <el-card shadow="never" class="workspace-card note-workspace"><template #header><div class="content-heading"><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div></template><p class="note-guide">笔记统一在笔记空间编辑，保存后会自动同步到这里并加入间隔复习计划。</p><article v-if="savedNoteText" class="learning-note-preview rich-note-content" v-html="savedNoteHtml"></article><el-empty v-else :image-size="64" description="本章还没有保存笔记" /><div class="learning-note-actions"><el-button type="primary" @click="openNoteWorkspace">进入笔记空间编辑</el-button></div></el-card>
     </section>
 
     <section v-else class="stage-workspace exam-workspace">

@@ -102,8 +102,8 @@ onMounted(async () => {
         <h1>{{ auth.isTeacher ? '以教材为主线，让每一次教学有迹可循' : `你好，${auth.user?.username}` }}</h1>
         <p>{{ auth.isTeacher ? '围绕教材专题布置任务、组织课堂互动，并通过真实学习行为掌握教学进展。' : '从教材出发，在真实问题中理解新时代中国，让专题、任务、笔记和时政形成一条学习路径。' }}</p>
         <div class="dashboard-hero-actions">
-          <el-button type="primary" size="large" @click="router.push(auth.isTeacher ? '/assignments' : continuePath)">{{ auth.isTeacher ? '布置学习任务' : latestProgress ? '继续当前专题' : '选择学习专题' }}</el-button>
-          <el-button class="dashboard-secondary-action" size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>教材知识图谱</el-button>
+          <el-button type="primary" size="large" @click="router.push(auth.isTeacher ? '/assignments' : continuePath)">{{ auth.isTeacher ? '布置学习任务' : latestProgress ? '继续当前专题' : '开始专题学习' }}</el-button>
+          <el-button v-if="auth.isTeacher" class="dashboard-secondary-action" size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>教材知识图谱</el-button>
         </div>
         <div class="dashboard-live-context">
           <span><small>{{ auth.isTeacher ? '当前教学内容' : '当前学习专题' }}</small><strong>{{ dashboard?.current_chapter?.title || '尚未选择专题' }}</strong></span>
@@ -148,8 +148,10 @@ onMounted(async () => {
       </article>
     </section>
 
-    <div class="section-heading dashboard-module-heading"><div><p class="eyebrow">能力矩阵</p><h2>{{ auth.isTeacher ? '开展教学工作' : '进入学习空间' }}</h2></div><span>教材为主线 · AI 为辅助 · 学习有依据</span></div>
-    <section class="dashboard-quick-grid"><article v-for="item in quickLinks" :key="item.path" @click="router.push(item.path)"><el-icon :size="27"><component :is="item.icon" /></el-icon><h3>{{ item.title }}</h3><p>{{ item.description }}</p><span>立即进入 →</span></article></section>
+    <template v-if="auth.isTeacher">
+      <div class="section-heading dashboard-module-heading"><div><p class="eyebrow">能力矩阵</p><h2>开展教学工作</h2></div><span>教材为主线 · AI 为辅助 · 学习有依据</span></div>
+      <section class="dashboard-quick-grid"><article v-for="item in quickLinks" :key="item.path" @click="router.push(item.path)"><el-icon :size="27"><component :is="item.icon" /></el-icon><h3>{{ item.title }}</h3><p>{{ item.description }}</p><span>立即进入 →</span></article></section>
+    </template>
   </div>
 </template>
 

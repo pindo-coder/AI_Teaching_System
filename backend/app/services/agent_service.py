@@ -791,7 +791,46 @@ def _invoke_streaming_text(
             str(exc) or type(exc).__name__,
         )
 
-    raise RuntimeError("大模型连续两次未返回有效内容，请稍后重试") from last_error
+    reason = str(last_error).strip() if last_error else "未知原因"
+    # Keep the provider's actionable reason (for example context overflow or
+    # an empty SSE body) in the run record.  The old generic message made the
+    # frontend look like a transport failure and hid the real diagnosis.
+    raise RuntimeError(f"大模型未返回有效内容：{reason[:500]}") from last_error
+
+
+def _invoke_non_streaming_text(
+    prompt: ChatPromptTemplate,
+    model: ChatOpenAI,
+    variables: dict[str, str],
+) -> str:
+    """Invoke a structured-output model without relying on an SSE response.
+
+    A number of compatible gateways return HTTP 200 for ``stream=true`` but
+    emit no content.  PPT generation consumes one complete JSON document, so a
+    normal response is both more reliable and easier to validate.
+    """
+    try:
+        response = (prompt | model).invoke(variables)
+        content = getattr(response, "content", response)
+        if isinstance(content, str):
+            result = clean_model_text(content)
+        elif isinstance(content, list):
+            result = clean_model_text("".join(
+                str(item.get("text", "")) if isinstance(item, dict) else str(item)
+                for item in content
+            ))
+        else:
+            result = clean_model_text(content)
+        if result:
+            return result
+        raise RuntimeError("模型非流式响应为空")
+    except Exception as exc:
+        logger.warning(
+            "llm_non_streaming_call_failed model=%s reason=%s",
+            getattr(model, "model_name", "unknown"),
+            str(exc) or type(exc).__name__,
+        )
+        raise RuntimeError(f"大模型非流式调用失败：{str(exc)[:500]}") from exc
 
 
 def _extract_json_object(raw: str, *, error_message: str) -> dict[str, Any]:
@@ -1341,9 +1380,13 @@ class LessonArtifactGenerator:
             db=self.db,
             user_id=self.user_id,
             timeout=max(runtime.timeout_seconds, 120),
-            streaming=True,
+            # The result is one large JSON document.  Do not depend on the
+            # provider's streaming implementation, which currently returns an
+            # empty body for deepseek-v4-flash despite HTTP 200.
+            max_tokens=8192,
+            streaming=False,
         )
-        raw = _invoke_streaming_text(prompt, model, variables)
+        raw = _invoke_non_streaming_text(prompt, model, variables)
         parsed = _extract_json_object(raw, error_message="模型未返回合法的教学成果 JSON")
         if not isinstance(parsed, dict):
             raise RuntimeError("模型返回的教学成果格式无效")

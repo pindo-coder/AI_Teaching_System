@@ -9,7 +9,7 @@ import { newsApi, type NewsItem, type TextbookRelationItem } from '@/api/news'
 import { studyApi } from '@/api/study'
 import type { CourseDetail } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
-import { Refresh, Search } from '@element-plus/icons-vue'
+import { MagicStick, Refresh, Search } from '@element-plus/icons-vue'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatBeijingDateTime } from '@/utils/time'
@@ -51,6 +51,8 @@ const noteExists = ref(false)
 const savedChapterId = ref<number | null>(null)
 const textbookLoading = ref(false)
 let textbookPromise: Promise<CourseDetail | null> | null = null
+let aiStreamController: AbortController | null = null
+let aiRequestSequence = 0
 let lastNewsLoadedAt = 0
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
@@ -177,8 +179,28 @@ onMounted(() => {
   })()
   document.addEventListener('visibilitychange', refreshWhenReturning)
 })
-onUnmounted(() => document.removeEventListener('visibilitychange', refreshWhenReturning))
+function cancelAiStream() {
+  aiRequestSequence += 1
+  aiStreamController?.abort()
+  aiStreamController = null
+  aiLoading.value = false
+}
+function closeAiDialog() {
+  cancelAiStream()
+  dialogVisible.value = false
+}
+function handleAiDialogVisibility(visible: boolean) {
+  if (!visible) cancelAiStream()
+}
+onUnmounted(() => {
+  cancelAiStream()
+  document.removeEventListener('visibilitychange', refreshWhenReturning)
+})
 async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
+  cancelAiStream()
+  const requestSequence = aiRequestSequence
+  const controller = new AbortController()
+  aiStreamController = controller
   selectedNews.value = item
   aiMode.value = mode
   aiResult.value = null
@@ -193,7 +215,8 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
   try {
     let relationHint = ''
     if (mode === 'relation') {
-      const recommended = (await newsApi.textbookRelations(item.id, course.id)).data.data[0]
+      const recommended = (await newsApi.textbookRelations(item.id, course.id, { signal: controller.signal })).data.data[0]
+      if (controller.signal.aborted || requestSequence !== aiRequestSequence) return
       const matched = recommended ? course.chapters.find((candidate) => candidate.id === recommended.chapter_id) : null
       if (matched) chapter = matched
       if (recommended) relationHint = `系统初步匹配位置：${recommended.position}；匹配线索：${recommended.reason}。`
@@ -202,6 +225,7 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
       ? `请用思政教材化表达总结以下时政信息，提炼核心事实、重要观点和学习关键词。标题：${item.title}；摘要：${item.summary || '无'}`
       : `请分析以下时政信息与当前教材专题的关系，指出对应的教材知识点并说明关联理由。${relationHint}标题：${item.title}；摘要：${item.summary || '无'}`
     aiResult.value = { answer: '', grounded: true, model: '', sources: [] }
+    if (controller.signal.aborted || requestSequence !== aiRequestSequence) return
     await aiApi.assistStream({
       course_id: course.id,
       chapter_id: chapter.id,
@@ -212,10 +236,17 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
       onMeta: (meta) => { if (aiResult.value) { aiResult.value.grounded = meta.grounded; aiResult.value.model = meta.model } },
       onChunk: (text) => { if (aiResult.value) aiResult.value.answer += text },
       onSources: (sources) => { if (aiResult.value) aiResult.value.sources = sources },
-    })
+    }, { signal: controller.signal })
   } catch (error: unknown) {
-    ElMessage.error(getErrorMessage(error, 'AI 暂时无法生成结果'))
-  } finally { aiLoading.value = false }
+    if (!controller.signal.aborted && requestSequence === aiRequestSequence) {
+      ElMessage.error(getErrorMessage(error, 'AI 暂时无法生成结果'))
+    }
+  } finally {
+    if (aiStreamController === controller) {
+      aiStreamController = null
+      aiLoading.value = false
+    }
+  }
 }
 
 async function openStudyNote(item: NewsItem) {
@@ -350,7 +381,7 @@ function openSavedNote() {
       </div>
 
     </section>
-    <el-dialog v-model="dialogVisible" :title="aiMode === 'summary' ? 'AI 时政总结' : 'AI 课本关联'" width="720px">
+    <el-dialog v-model="dialogVisible" :title="aiMode === 'summary' ? 'AI 时政总结' : 'AI 课本关联'" width="720px" @update:model-value="handleAiDialogVisibility">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要' }}</p></div>
       <section v-if="aiResult" class="ai-dialog-result ai-result">
         <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? 'AI 生成内容 · 依据教材资料' : 'AI 生成内容 · 教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
@@ -358,7 +389,7 @@ function openSavedNote() {
         <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对真实来源</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (source.source_type !== 'pdf' || !source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.source_type === 'pdf' && source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div>
       </section>
       <el-empty v-else-if="!aiLoading" description="暂无生成结果" />
-      <template #footer><el-button @click="dialogVisible = false">关闭</el-button></template>
+      <template #footer><el-button @click="closeAiDialog">关闭</el-button></template>
     </el-dialog>
     <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
     <el-dialog v-model="studyDialogVisible" title="生成时政研学笔记" width="880px" class="study-note-dialog">
@@ -377,6 +408,7 @@ function openSavedNote() {
         </section>
         <section class="study-note-step">
           <div class="step-title"><span>2</span><div><strong>生成并修改草稿</strong><small>事实来自新闻，理论观点限定在所选章节</small></div><el-button type="primary" :loading="draftLoading" :disabled="!selectedRelation" @click="generateStudyDraft">{{ studyDraft ? '重新生成' : '生成草稿' }}</el-button></div>
+          <div class="ai-draft-hint" role="note"><el-icon><MagicStick /></el-icon><span><strong>AI 生成提示</strong>以下内容由 AI 根据所选时政材料和教材章节生成，仅供参考；请核对事实，并结合自己的理解修改后再保存。</span></div>
           <el-input v-model="studyDraft" type="textarea" :autosize="{ minRows: 12, maxRows: 20 }" maxlength="16000" show-word-limit placeholder="生成后可在这里增删、改写；保存后还能在笔记空间继续排版。" />
           <span v-if="draftLoading" class="stream-cursor" aria-label="正在生成"></span>
         </section>

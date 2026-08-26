@@ -86,6 +86,7 @@ const taskCenterVisible = ref(false)
 const executions = ref<AiAgentExecution[]>([])
 const serverTemplates = ref<AiAgentTemplate[]>([])
 const executionLoading = ref(false)
+const deletingExecutionId = ref<number | null>(null)
 const mediaAssets = ref<AiMediaAsset[]>([])
 const mediaBusy = ref(false)
 const messageList = ref<HTMLElement | null>(null)
@@ -293,8 +294,16 @@ function newConversation() {
   localStorage.removeItem(storageKey(mode.value))
   return true
 }
-function clearHistory() {
-  if (newConversation()) ElMessage.success('本次 AI 会话已清空')
+async function clearHistory() {
+  if (!newConversation()) return
+  try {
+    const response = await aiApi.clearWorkspaceAgentExecutions()
+    executions.value = []
+    const deletedCount = response.data.data.deleted_count
+    ElMessage.success(deletedCount ? `本次 AI 会话已清空，已删除 ${deletedCount} 条 Agent 记录` : '本次 AI 会话已清空')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'Agent 会话清空失败，请稍后重试')
+  }
 }
 async function loadExecutions() {
   executionLoading.value = true
@@ -362,6 +371,19 @@ async function cancelPendingExecution(execution: AiAgentExecution) {
     await loadExecutions()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '取消失败，请稍后重试')
+  }
+}
+async function deleteExecution(execution: AiAgentExecution) {
+  if (deletingExecutionId.value !== null) return
+  try {
+    deletingExecutionId.value = execution.id
+    await aiApi.deleteWorkspaceAgentExecution(execution.id)
+    executions.value = executions.value.filter((item) => item.id !== execution.id)
+    ElMessage.success('Agent 任务已删除')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : 'Agent 任务删除失败，请稍后重试')
+  } finally {
+    deletingExecutionId.value = null
   }
 }
 function updateAssistantMessage(id: number, updater: (message: AssistantMessage) => void) {
@@ -706,6 +728,15 @@ onMounted(() => { void loadTemplates() })
             <el-button size="small" @click="cancelPendingExecution(execution)">取消</el-button>
           </template>
           <el-button v-else-if="execution.status === 'failed' || execution.status === 'completed'" size="small" type="primary" plain @click="retryExecution(execution)">基于此任务重试</el-button>
+          <el-button
+            size="small"
+            text
+            type="danger"
+            :icon="Delete"
+            :loading="deletingExecutionId === execution.id"
+            aria-label="删除 Agent 任务"
+            @click="deleteExecution(execution)"
+          >删除</el-button>
         </div>
       </article>
       <el-empty v-if="!executions.length && !executionLoading" description="还没有可追踪的 Agent 任务" :image-size="68" />
@@ -876,9 +907,9 @@ onMounted(() => { void loadTemplates() })
 .is-user .workspace-ai-bubble { color: #fff; background: linear-gradient(135deg, #3164d8, #4a55d5); border-color: transparent; border-bottom-right-radius: 5px; }
 .is-assistant .workspace-ai-bubble { border-bottom-left-radius: 5px; }
 .workspace-ai-bubble > p { margin: 0; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
-.workspace-ai-bubble :deep(.teaching-document) { color: #33415b; font-size: 13px; line-height: 1.75; }
-.workspace-ai-bubble :deep(.teaching-document h3), .workspace-ai-bubble :deep(.teaching-document h4) { margin: 0 0 8px; color: #213b69; font-size: 15px; }
-.workspace-ai-bubble :deep(.teaching-document p) { margin: 0 0 8px; }
+.workspace-ai-bubble :deep(.teaching-document) { color: #33415b; font-size: 15px; line-height: 1.85; }
+.workspace-ai-bubble :deep(.teaching-document h3), .workspace-ai-bubble :deep(.teaching-document h4) { margin: 0 0 10px; color: #213b69; font-size: 17px; }
+.workspace-ai-bubble :deep(.teaching-document p) { margin: 0 0 10px; }
 .workspace-ai-bubble :deep(.teaching-document strong) { color: #2e54c4; font-weight: 750; }
 .workspace-ai-meta, .workspace-ai-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; color: #8693a9; font-size: 10px; }
 .workspace-ai-sources span { padding: 3px 6px; color: #5572a7; background: #f1f5fc; border-radius: 5px; }

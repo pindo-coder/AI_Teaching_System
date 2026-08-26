@@ -1,4 +1,5 @@
 from io import BytesIO
+import logging
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query
@@ -20,6 +21,7 @@ from app.schemas.task import LearningEventCreate
 
 
 router = APIRouter(prefix="/study", tags=["study"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/chat-history/{chapter_id}", response_model=ApiResponse[list[StudyChatMessageRead]])
@@ -87,13 +89,19 @@ def get_note(chapter_id: int, user: User = Depends(get_current_user), db: Sessio
 def save_note(chapter_id: int, payload: StudyNoteUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[StudyNoteRead]:
     service = StudyService(db)
     note = service.save_note(user.id, chapter_id, payload.content)
-    TaskService(db).record(user.id, LearningEventCreate(
-        course_id=note.course_id,
-        chapter_id=note.chapter_id,
-        learning_stage="review",
-        event_type="note_saved",
-        event_data={"content": service.plain_note_content(note.content)},
-    ))
+    try:
+        TaskService(db).record(user.id, LearningEventCreate(
+            course_id=note.course_id,
+            chapter_id=note.chapter_id,
+            learning_stage="review",
+            event_type="note_saved",
+            event_data={"content_length": len(service.plain_note_content(note.content))},
+        ))
+    except Exception:
+        # The note has already been committed. Telemetry/task generation is
+        # secondary and must not turn a successful note save into an error.
+        db.rollback()
+        logger.exception("study_note_event_record_failed user_id=%s chapter_id=%s", user.id, chapter_id)
     return ApiResponse(message="学习笔记已保存", data=note)
 
 

@@ -483,6 +483,68 @@ def test_workspace_agent_persists_execution_and_supports_retry(client: TestClien
     assert retried.json()["data"]["retry_of_execution_id"] == execution.id
 
 
+def test_workspace_agent_execution_can_be_deleted_or_cleared_per_user(
+    client: TestClient, db: Session
+) -> None:
+    headers, course_id, chapter_id = prepare_context(db)
+    response = client.post(
+        "/api/v1/ai/workspace/agent/stream",
+        headers=headers,
+        json={
+            "role": "student",
+            "course_id": course_id,
+            "chapter_id": chapter_id,
+            "learning_stage": "preview",
+            "question": "请根据当前专题制定学习计划",
+        },
+    )
+    assert response.status_code == 200
+    execution = db.scalar(select(AgentExecution).order_by(AgentExecution.id.desc()))
+    assert execution is not None
+    execution_user_id = execution.user_id
+
+    deleted = client.delete(
+        f"/api/v1/ai/workspace/agent/executions/{execution.id}",
+        headers=headers,
+    )
+    assert deleted.status_code == 200
+    assert client.get("/api/v1/ai/workspace/agent/executions", headers=headers).json()["data"] == []
+    db.expunge(execution)
+
+    # Recreate two records and verify the bulk operation only affects this user.
+    for question in ("任务一", "任务二"):
+        db.add(
+            AgentExecution(
+                user_id=execution_user_id,
+                role="student",
+                status="completed",
+                intent="guided_question",
+                question=question,
+                context_snapshot={},
+            )
+        )
+    other = User(username="agent_delete_other", password_hash=hash_password("secure-pass-123"), role="student")
+    db.add(other)
+    db.flush()
+    db.add(
+        AgentExecution(
+            user_id=other.id,
+            role="student",
+            status="completed",
+            intent="guided_question",
+            question="保留任务",
+            context_snapshot={},
+        )
+    )
+    db.commit()
+
+    cleared = client.delete("/api/v1/ai/workspace/agent/executions", headers=headers)
+    assert cleared.status_code == 200
+    assert cleared.json()["data"]["deleted_count"] == 2
+    assert db.scalar(select(AgentExecution).where(AgentExecution.user_id == execution_user_id)) is None
+    assert db.scalar(select(AgentExecution).where(AgentExecution.user_id == other.id)) is not None
+
+
 def test_workspace_agent_templates_follow_authenticated_role(client: TestClient, db: Session) -> None:
     headers, _, _ = prepare_context(db)
     response = client.get("/api/v1/ai/workspace/agent/templates", headers=headers)

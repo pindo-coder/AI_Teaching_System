@@ -51,8 +51,8 @@ export const newsApi = {
     return http.get<ApiResponse<NewsSearchData>>('/current-affairs/search', { params })
   },
   refresh: () => http.post<ApiResponse<NewsItem[]>>('/current-affairs/refresh'),
-  textbookRelations: (newsId: number, courseId: number) =>
-    http.get<ApiResponse<TextbookRelationItem[]>>(`/current-affairs/${newsId}/textbook-relations`, { params: { course_id: courseId } }),
+  textbookRelations: (newsId: number, courseId: number, options: { signal?: AbortSignal } = {}) =>
+    http.get<ApiResponse<TextbookRelationItem[]>>(`/current-affairs/${newsId}/textbook-relations`, { params: { course_id: courseId }, signal: options.signal }),
   saveStudyNote: (newsId: number, payload: { chapter_id: number; content: string; textbook_relation: string; mode: 'append' | 'create' }) =>
     http.post<ApiResponse<NewsStudyNoteResult>>(`/current-affairs/${newsId}/study-note`, payload),
 }

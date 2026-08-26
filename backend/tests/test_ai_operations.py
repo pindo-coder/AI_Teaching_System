@@ -930,6 +930,32 @@ def test_streaming_known_providers_enable_usage_chunks_but_custom_does_not(
     assert "stream_usage" not in captured[2]
 
 
+def test_build_chat_model_passes_explicit_positive_output_budget(monkeypatch) -> None:
+    captured: list[dict] = []
+
+    class FakeChatOpenAI:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    monkeypatch.setattr("app.services.ai_operation_service.ChatOpenAI", FakeChatOpenAI)
+    runtime = RuntimeLlmConfig(
+        config_id=1,
+        source="database",
+        base_url="https://api.deepseek.com",
+        api_key="sk-output-budget",
+        model_name="deepseek-v4-flash",
+        temperature=0.2,
+        timeout_seconds=120,
+        streaming_enabled=False,
+    )
+    monkeypatch.setattr(AiProviderConfigService, "resolve", lambda db=None: runtime)
+
+    build_chat_model(feature="structured-artifacts", max_tokens=8192)
+
+    assert captured[0]["max_tokens"] == 8192
+    assert captured[0]["streaming"] is False
+
+
 def test_audit_token_usage_falls_back_to_generation_message_metadata() -> None:
     result = SimpleNamespace(
         llm_output={"token_usage": {"prompt_tokens": 11}},

@@ -1001,6 +1001,7 @@ def build_chat_model(
     db: Session | None = None,
     temperature: float | None = None,
     timeout: int | None = None,
+    max_tokens: int | None = None,
     streaming: bool = False,
 ) -> tuple[ChatOpenAI, RuntimeLlmConfig]:
     config = AiProviderConfigService.resolve(db)
@@ -1017,6 +1018,11 @@ def build_chat_model(
         "streaming": effective_streaming,
         "callbacks": [handler],
     }
+    if max_tokens is not None:
+        # Some OpenAI-compatible gateways interpret an omitted output budget as
+        # zero.  Structured Agent responses must always send an explicit,
+        # positive budget.
+        model_options["max_tokens"] = max(1, int(max_tokens))
     hostname = AiProviderConfigService._hostname(config.base_url) or ""
     supports_stream_usage = hostname == "api.openai.com" or (
         hostname.startswith("dashscope") and hostname.endswith(".aliyuncs.com")

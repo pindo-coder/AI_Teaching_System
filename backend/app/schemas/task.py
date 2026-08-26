@@ -44,9 +44,14 @@ class LearningEventCreate(BaseModel):
             if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= 100:
                 raise ValueError("学习行为次数必须是 1 到 100 的整数")
         elif self.event_type == "note_saved":
-            content = self.event_data.get("content")
-            if not isinstance(content, str) or len(content) > 10_000:
-                raise ValueError("笔记内容格式无效或超过 10000 字")
+            content_length = self.event_data.get("content_length")
+            if content_length is not None:
+                if isinstance(content_length, bool) or not isinstance(content_length, int) or not 0 <= content_length <= 30_000:
+                    raise ValueError("笔记字数格式无效或超过 30000 字")
+            else:
+                content = self.event_data.get("content")
+                if not isinstance(content, str) or len(content) > 10_000:
+                    raise ValueError("笔记内容格式无效或超过 10000 字")
         elif self.event_type == "ai_assist_used":
             task_type = self.event_data.get("task_type")
             if task_type is not None and (

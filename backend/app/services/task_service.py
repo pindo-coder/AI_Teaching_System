@@ -130,7 +130,9 @@ class TaskService:
         if "min_count" in rule:
             return 100 if int(data.get("count", 1)) >= rule["min_count"] else 50
         if "min_length" in rule:
-            return 100 if len(str(data.get("content", ""))) >= rule["min_length"] else 40
+            content_length = data.get("content_length")
+            measured_length = content_length if isinstance(content_length, int) else len(str(data.get("content", "")))
+            return 100 if measured_length >= rule["min_length"] else 40
         if rule.get("tasks"):
             # AI use is supporting evidence, not proof that the student has mastered the topic.
             return 50 if data.get("task_type") in rule["tasks"] else 0

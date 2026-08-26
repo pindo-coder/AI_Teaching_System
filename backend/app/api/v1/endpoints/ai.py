@@ -183,6 +183,11 @@ def assist_stream(
             yield "event: done\ndata: {}\n\n"
         except Exception as exc:
             yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            # 客户端关闭弹窗会断开 SSE；显式释放模型迭代器，避免后台继续持有本次生成。
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -294,6 +299,34 @@ def list_workspace_agent_executions(
         message="已获取近期 Agent 任务",
         data=[execution_data(item) for item in service.list_recent(min(max(limit, 1), 40))],
     )
+
+
+@router.delete("/workspace/agent/executions")
+def clear_workspace_agent_executions(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    """清空当前用户的 Agent 会话记录，不影响其他用户的任务。"""
+    deleted_count = AgentExecutionService(db, user).clear()
+    return ApiResponse(
+        message="Agent 会话已清空",
+        data={"deleted_count": deleted_count},
+    )
+
+
+@router.delete("/workspace/agent/executions/{execution_id}")
+def delete_workspace_agent_execution(
+    execution_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[None]:
+    """删除当前用户的一条 Agent 会话记录。"""
+    service = AgentExecutionService(db, user)
+    execution = service.get(execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
+    service.delete(execution)
+    return ApiResponse(message="Agent 任务已删除", data=None)
 
 
 @router.get("/workspace/agent/templates")

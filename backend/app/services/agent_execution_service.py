@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import Engine, select
+from sqlalchemy import Engine, delete, select
 from sqlalchemy.orm import Session
 
 from app.core.time import utc_iso, utc_now
@@ -118,6 +118,19 @@ class AgentExecutionService:
             .order_by(AgentExecution.updated_time.desc(), AgentExecution.id.desc())
             .limit(limit)
         ).all())
+
+    def delete(self, execution: AgentExecution) -> None:
+        """删除当前用户的一条 Agent 执行记录。"""
+        self.db.delete(execution)
+        self.db.commit()
+
+    def clear(self) -> int:
+        """删除当前用户的全部 Agent 执行记录并返回删除数量。"""
+        result = self.db.execute(
+            delete(AgentExecution).where(AgentExecution.user_id == self.user.id)
+        )
+        self.db.commit()
+        return max(int(result.rowcount or 0), 0)
 
     def retry(self, source: AgentExecution) -> AgentExecution:
         context = AiWorkspaceContextData.model_validate(source.context_snapshot or {})

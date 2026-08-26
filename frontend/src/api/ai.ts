@@ -230,12 +230,13 @@ export const aiApi = {
     onMeta: (data: { grounded: boolean; model: string }) => void
     onChunk: (text: string) => void
     onSources: (sources: AiSource[]) => void
-  }) {
+  }, options: { signal?: AbortSignal } = {}) {
     const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
     const response = await fetch(`${baseURL}/ai/assist/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
       body: JSON.stringify(payload),
+      signal: options.signal,
     })
     if (!response.ok || !response.body) throw new Error('AI 流式服务暂时不可用')
     const reader = response.body.getReader()
@@ -280,6 +281,10 @@ export const aiApi = {
     http.post<ApiResponse<AiWorkspaceContext>>('/ai/workspace/context', payload),
   workspaceAgentExecutions: (limit = 12) =>
     http.get<ApiResponse<AiAgentExecution[]>>('/ai/workspace/agent/executions', { params: { limit } }),
+  clearWorkspaceAgentExecutions: () =>
+    http.delete<ApiResponse<{ deleted_count: number }>>('/ai/workspace/agent/executions'),
+  deleteWorkspaceAgentExecution: (executionId: number) =>
+    http.delete<ApiResponse<null>>(`/ai/workspace/agent/executions/${executionId}`),
   workspaceAgentTemplates: () =>
     http.get<ApiResponse<AiAgentTemplate[]>>('/ai/workspace/agent/templates'),
   retryWorkspaceAgentExecution: (executionId: number) =>

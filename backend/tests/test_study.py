@@ -6,6 +6,7 @@ from app.models.chapter import Chapter
 from app.models.course import Course
 from app.models.user import User
 from app.models.news_item import NewsItem
+from app.models.learning_task import LearningEvent
 
 
 def test_note_and_review_plan(client: TestClient, db: Session) -> None:
@@ -44,6 +45,23 @@ def test_note_and_review_plan(client: TestClient, db: Session) -> None:
     deleted = client.delete(f"/api/v1/study/notes/{saved.json()['data']['id']}", headers=headers)
     assert deleted.status_code == 200
     assert client.get("/api/v1/study/notes", headers=headers).json()["data"] == []
+
+
+def test_long_note_save_is_not_blocked_by_learning_event_payload(client: TestClient, db: Session) -> None:
+    user = User(username="long_note_student", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="习概", description="测试")
+    db.add_all([user, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="第一章", content="教材正文", sort_order=1)
+    db.add(chapter); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+    content = "核心观点" * 2_000
+
+    saved = client.put(f"/api/v1/study/notes/{chapter.id}", headers=headers, json={"content": content})
+
+    assert saved.status_code == 200
+    assert saved.json()["data"]["content"] == content
+    event = db.query(LearningEvent).filter_by(user_id=user.id, chapter_id=chapter.id, event_type="note_saved").one()
+    assert event.event_data == {"content_length": len(content)}
 
 
 def test_review_question_loop(client: TestClient, db: Session, monkeypatch) -> None:
