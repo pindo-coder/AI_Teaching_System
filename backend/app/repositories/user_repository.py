@@ -15,9 +15,10 @@ class UserRepository:
         return self.db.scalar(select(User).where(User.username == username))
 
     def create(self, *, username: str, password_hash: str, role: str = "student",
-               identity_no: str | None = None, approval_status: str = "approved") -> User:
+               identity_no: str | None = None, email: str | None = None,
+               email_hash: str | None = None, approval_status: str = "approved") -> User:
         user = User(username=username, password_hash=password_hash, role=role, identity_no=identity_no,
-                    approval_status=approval_status)
+                    email=email, email_hash=email_hash, approval_status=approval_status)
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)

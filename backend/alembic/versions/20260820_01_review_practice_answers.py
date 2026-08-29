@@ -6,6 +6,7 @@ Revises: 20260819_01
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.exc import NoInspectionAvailable
 
 
 revision = "20260820_01"
@@ -18,9 +19,17 @@ def upgrade() -> None:
     # MySQL 5.7 rejects defaults on TEXT and JSON columns. Add the columns as
     # nullable, backfill existing rows, then enforce the model's NOT NULL
     # invariant without leaving a database-level default behind.
-    op.add_column("review_practices", sa.Column("student_answer", sa.Text(), nullable=True))
-    op.add_column("review_practices", sa.Column("ai_reference_answer", sa.Text(), nullable=True))
-    op.add_column("review_practices", sa.Column("reference_knowledge_points", sa.JSON(), nullable=True))
+    try:
+        existing = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("review_practices")}
+    except NoInspectionAvailable:
+        # Offline/static SQL generation has no inspector; emit the full DDL.
+        existing = set()
+    if "student_answer" not in existing:
+        op.add_column("review_practices", sa.Column("student_answer", sa.Text(), nullable=True))
+    if "ai_reference_answer" not in existing:
+        op.add_column("review_practices", sa.Column("ai_reference_answer", sa.Text(), nullable=True))
+    if "reference_knowledge_points" not in existing:
+        op.add_column("review_practices", sa.Column("reference_knowledge_points", sa.JSON(), nullable=True))
     op.execute(sa.text("UPDATE review_practices SET student_answer = '' WHERE student_answer IS NULL"))
     op.execute(sa.text("UPDATE review_practices SET ai_reference_answer = '' WHERE ai_reference_answer IS NULL"))
     op.execute(sa.text(

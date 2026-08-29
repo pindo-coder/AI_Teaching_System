@@ -70,10 +70,13 @@ def test_all_mvp_tables_are_registered() -> None:
                     "material_snapshots",
                     "policy_changes",
                         "teaching_notifications",
-                        "ai_provider_configs",
-                        "ai_call_logs",
-                        "ai_media_assets",
-                    }
+                            "ai_provider_configs",
+                            "ai_call_logs",
+                            "ai_media_assets",
+                            "password_reset_tokens",
+                            "admin_password_reset_audits",
+                            "password_reset_requests",
+                        }
 
 
 def test_document_page_uses_longtext_on_mysql() -> None:

@@ -6,6 +6,11 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     { path: '/register', name: 'register', component: () => import('@/views/RegisterView.vue'), meta: { public: true } },
+    { path: '/forgot-password', name: 'forgot-password', component: () => import('@/views/ForgotPasswordView.vue'), meta: { public: true } },
+    { path: '/reset-password', name: 'reset-password', component: () => import('@/views/ResetPasswordView.vue'), meta: { public: true } },
+    { path: '/verify-email', name: 'verify-email', component: () => import('@/views/VerifyEmailView.vue'), meta: { public: true } },
+    { path: '/change-password', name: 'change-password', component: () => import('@/views/ChangePasswordView.vue') },
+    { path: '/account', name: 'account', component: () => import('@/views/AccountView.vue'), meta: { roles: ['student', 'teacher'] } },
     { path: '/teacher-pending', name: 'teacher-pending', component: () => import('@/views/TeacherPendingView.vue') },
     {
       path: '/', component: () => import('@/layouts/MainLayout.vue'),
@@ -15,6 +20,7 @@ const router = createRouter({
         { path: 'material-review', name: 'material-review', component: () => import('@/views/MaterialReviewView.vue'), meta: { roles: ['teacher'] } },
         { path: 'material-discovery', name: 'material-discovery', component: () => import('@/views/MaterialDiscoveryView.vue'), meta: { roles: ['admin'] } },
         { path: 'ai-operations', name: 'ai-operations', component: () => import('@/views/AiOperationsView.vue'), meta: { roles: ['admin'] } },
+        { path: 'admin/password-resets', name: 'admin-password-resets', component: () => import('@/views/AdminPasswordResetView.vue'), meta: { roles: ['admin'] } },
         { path: 'courses', name: 'courses', component: () => import('@/views/CourseListView.vue') },
         { path: 'courses/:id', name: 'course-detail', component: () => import('@/views/CourseDetailView.vue') },
         { path: 'current-affairs', name: 'current-affairs', component: () => import('@/views/CurrentAffairsView.vue') },
@@ -39,6 +45,7 @@ const router = createRouter({
 router.beforeEach((to) => {
   const auth = useAuthStore()
   if (!to.meta.public && !auth.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } }
+  if (auth.user?.must_change_password && to.name !== 'change-password') return { name: 'change-password' }
   if (auth.user?.role === 'admin' && to.name === 'material-review') {
     return {
       name: 'material-discovery',
@@ -49,7 +56,7 @@ router.beforeEach((to) => {
   }
   if (auth.user?.role === 'teacher' && auth.user.approval_status !== 'approved' && to.name !== 'teacher-pending') return { name: 'teacher-pending' }
   if (to.name === 'teacher-pending' && auth.user?.approval_status === 'approved') return { name: 'dashboard' }
-  if (to.meta.public && auth.isAuthenticated) return { name: 'dashboard' }
+  if (to.meta.public && auth.isAuthenticated && to.name !== 'verify-email') return { name: 'dashboard' }
   if (to.meta.roles && auth.user && !(to.meta.roles as string[]).includes(auth.user.role)) return { name: 'dashboard' }
 })
 

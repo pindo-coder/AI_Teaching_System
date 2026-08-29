@@ -28,11 +28,12 @@ def get_session_user(
     if credentials is None:
         raise unauthorized
     try:
-        user_id = int(decode_access_token(credentials.credentials))
+        subject, token_version = decode_access_token(credentials.credentials)
+        user_id = int(subject)
     except (jwt.InvalidTokenError, ValueError):
         raise unauthorized from None
     user = UserRepository(db).get_by_id(user_id)
-    if user is None or teacher_authentication_block_reason(user):
+    if user is None or teacher_authentication_block_reason(user) or user.auth_version != token_version:
         raise unauthorized
     return user
 

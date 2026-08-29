@@ -47,6 +47,7 @@ async function submit() {
         <el-form-item label="密码" prop="password"><el-input v-model="form.password" autocomplete="current-password" type="password" show-password size="large" placeholder="请输入密码" /></el-form-item>
         <el-button type="primary" size="large" :loading="loading" class="full-button" @click="submit">登录</el-button>
       </el-form>
+      <p class="forgot-link"><router-link to="/forgot-password">忘记密码？</router-link></p>
       <p class="auth-switch">还没有账号？<router-link to="/register">立即注册</router-link></p>
     </UiCard>
   </main>
@@ -160,6 +161,8 @@ async function submit() {
   color: var(--ink-600);
   text-align: center;
 }
+
+.forgot-link { margin: var(--space-3) 0 0; text-align: right; }
 
 @media (max-width: 767px) {
   .auth-page {

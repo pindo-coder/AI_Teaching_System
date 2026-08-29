@@ -10,6 +10,7 @@ import { useWorkspaceStore } from '@/stores/workspace'
 import { agentApi, type AgentRun } from '@/api/agents'
 import { notificationApi, type TeachingNotification } from '@/api/notifications'
 import { knowledgeApi } from '@/api/knowledge'
+import { authApi } from '@/api/auth'
 import { formatBeijingDateTime } from '@/utils/time'
 
 const auth = useAuthStore()
@@ -24,6 +25,7 @@ const agentRuns = ref<AgentRun[]>([])
 const notifications = ref<TeachingNotification[]>([])
 const notificationLoading = ref(false)
 const actionableCandidateCount = ref(0)
+const pendingPasswordResetCount = ref(0)
 let notificationTimer: number | undefined
 
 const navigationItems = computed(() => navigationForRole(auth.user?.role))
@@ -33,6 +35,7 @@ const contextDetail = computed(() => {
   if (auth.user?.role === 'student') return workspace.currentChapter?.title || '今日学习'
   return workspace.currentClass?.name || '当前教学空间'
 })
+const shouldBindEmail = computed(() => auth.user?.role !== 'admin' && !auth.user?.email_verified_at)
 
 function isActive(item: NavigationItem) {
   if (item.path === '/') return route.path === '/'
@@ -63,16 +66,28 @@ onUnmounted(() => {
 })
 
 const unreadNotificationCount = computed(() => notifications.value.filter((item) => !item.is_read).length)
-const headerBadgeCount = computed(() => auth.user?.role === 'admin' ? actionableCandidateCount.value : unreadNotificationCount.value)
+const headerBadgeCount = computed(() => auth.user?.role === 'admin'
+  ? actionableCandidateCount.value + pendingPasswordResetCount.value
+  : unreadNotificationCount.value)
+const headerAlertTooltip = computed(() => auth.user?.role === 'admin'
+  ? `待处理：资料 ${actionableCandidateCount.value} 条，账号找回 ${pendingPasswordResetCount.value} 条`
+  : (unreadNotificationCount.value ? `未读消息：${unreadNotificationCount.value} 条` : '暂无未读消息'))
 
 async function loadNotifications() {
   if (!auth.user) return
   notificationLoading.value = true
   try {
-    const response = await notificationApi.list(false, 80)
-    notifications.value = response.data.data
+    try {
+      const response = await notificationApi.list(false, 80)
+      notifications.value = response.data.data
+    } catch { /* 提醒接口异常不应阻断管理员账号找回入口 */ }
     if (auth.user?.role === 'admin') {
-      actionableCandidateCount.value = (await knowledgeApi.candidateDecisionSummary()).data.data.pending_review
+      const [candidateSummary, resetRequests] = await Promise.all([
+        knowledgeApi.candidateDecisionSummary(),
+        authApi.pendingPasswordResets(),
+      ])
+      actionableCandidateCount.value = candidateSummary.data.data.pending_review
+      pendingPasswordResetCount.value = resetRequests.data.data.length
     }
   } finally {
     notificationLoading.value = false
@@ -124,7 +139,10 @@ function openAgentRun() {
 }
 
 function openHeaderAlerts() {
-  if (auth.user?.role === 'admin') router.push('/material-discovery')
+  if (auth.user?.role === 'admin') {
+    if (pendingPasswordResetCount.value > 0) router.push('/admin/password-resets')
+    else router.push('/material-discovery')
+  }
   else {
     messageVisible.value = true
     void loadNotifications()
@@ -183,7 +201,7 @@ watch(() => auth.user?.id, () => {
           <el-tooltip content="后台任务">
             <el-button circle text :icon="Clock" aria-label="查看后台任务" @click="taskVisible = true" />
           </el-tooltip>
-          <el-tooltip :content="auth.user?.role === 'admin' ? `待人工决策：${actionableCandidateCount} 条` : (unreadNotificationCount ? `未读消息：${unreadNotificationCount} 条` : '暂无未读消息')">
+          <el-tooltip :content="headerAlertTooltip">
             <el-badge :value="headerBadgeCount" :hidden="headerBadgeCount === 0" :max="99" class="notification-badge">
               <el-button circle text :icon="Bell" aria-label="查看待处理提醒" @click="openHeaderAlerts" />
             </el-badge>
@@ -193,12 +211,37 @@ watch(() => auth.user?.id, () => {
             <template #dropdown>
               <el-dropdown-menu>
                 <el-dropdown-item disabled>{{ auth.user?.username }} · {{ roleLabel }}</el-dropdown-item>
+                <el-dropdown-item v-if="auth.user?.role !== 'admin'" @click="router.push('/account')">账号设置</el-dropdown-item>
                 <el-dropdown-item divided @click="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
         </div>
       </header>
+
+      <el-alert
+        v-if="shouldBindEmail"
+        class="email-binding-reminder"
+        type="warning"
+        :closable="false"
+        title="建议绑定并验证邮箱"
+        description="绑定邮箱后可以自助找回密码，避免只能联系管理员人工重置。"
+        show-icon
+      >
+        <template #default><el-button text type="warning" @click="router.push('/account')">立即绑定邮箱</el-button></template>
+      </el-alert>
+
+      <el-alert
+        v-if="auth.user?.role === 'admin' && pendingPasswordResetCount > 0"
+        class="password-reset-reminder"
+        type="warning"
+        :closable="false"
+        :title="`有 ${pendingPasswordResetCount} 条账号找回请求待处理`"
+        description="老账号用户无法通过邮箱自助找回时，请在账号找回页面生成统一临时密码。"
+        show-icon
+      >
+        <template #default><el-button text type="warning" @click="router.push('/admin/password-resets')">立即处理</el-button></template>
+      </el-alert>
 
       <AgentDock />
       <main class="page"><router-view /></main>
@@ -342,6 +385,8 @@ watch(() => auth.user?.id, () => {
 .sidebar-navigation small, .mobile-navigation small { margin-top: 2px; color: inherit; font-size: 10px; opacity: .68; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sidebar-footer { display: flex; justify-content: space-between; padding: var(--space-3) var(--space-2) 0; border-top: 1px solid rgb(255 255 255 / 12%); font-size: var(--fs-meta); }
 .app-content { min-width: 0; }
+.email-binding-reminder { margin: var(--space-3) var(--page-padding) 0; }
+.password-reset-reminder { margin: var(--space-3) var(--page-padding) 0; }
 .context-topbar { position: sticky; z-index: 110; top: 0; display: flex; height: 64px; align-items: center; gap: var(--space-3); padding: 0 var(--page-padding); background: rgb(255 255 255 / 96%); border-bottom: 1px solid var(--line); backdrop-filter: blur(10px); }
 .context-copy { gap: 2px; }
 .context-copy strong { max-width: min(54vw, 560px); color: var(--ink-900); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

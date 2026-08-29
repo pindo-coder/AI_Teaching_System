@@ -17,6 +17,12 @@ depends_on = None
 
 def upgrade() -> None:
     bind = op.get_bind()
+    existing_columns = {column["name"] for column in sa.inspect(bind).get_columns("document_pages")}
+    # The initial migration creates tables from current metadata on a brand-new
+    # database.  On such databases raw_text already exists; keep this migration
+    # idempotent instead of issuing a duplicate ADD COLUMN.
+    if "raw_text" in existing_columns:
+        return
     column_type = mysql.LONGTEXT() if bind.dialect.name == "mysql" else sa.Text()
     op.add_column("document_pages", sa.Column("raw_text", column_type, nullable=True))
     op.execute(sa.text("UPDATE document_pages SET raw_text = text WHERE raw_text IS NULL"))

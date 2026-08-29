@@ -6,6 +6,7 @@ Revises: 20260820_01
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.exc import NoInspectionAvailable
 
 
 revision = "20260820_02"
@@ -16,7 +17,12 @@ depends_on = None
 
 def upgrade() -> None:
     # MySQL 5.7 does not allow a DEFAULT on TEXT columns.
-    op.add_column("review_practices", sa.Column("reference_cache_key", sa.Text(), nullable=True))
+    try:
+        existing = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("review_practices")}
+    except NoInspectionAvailable:
+        existing = set()
+    if "reference_cache_key" not in existing:
+        op.add_column("review_practices", sa.Column("reference_cache_key", sa.Text(), nullable=True))
     op.execute(sa.text(
         "UPDATE review_practices SET reference_cache_key = '' WHERE reference_cache_key IS NULL"
     ))

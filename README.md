@@ -32,8 +32,21 @@ cd presentation_runtime
 pnpm install
 cd ..
 cp .env.example .env
+# 已有 SQLite 数据库升级代码后，先执行迁移；新库也可以直接执行。
+PYTHONPATH=. alembic upgrade head
 uvicorn app.main:app --reload
 ```
+
+本地使用 SQLite 时，如果通过 `DATABASE_URL` 指定了已有数据库文件，启动前必须对
+同一个数据库执行 `PYTHONPATH=. alembic upgrade head`。`create_all()` 只能创建缺失的
+表，不能为已经存在的表补充新字段。检查当前迁移版本：
+
+```bash
+PYTHONPATH=. alembic current
+```
+
+本地密码找回和邮箱验证默认使用 `MAIL_BACKEND=console`，验证码内容会直接输出在后端终端，
+无需准备真实发件邮箱。部署到服务器时再切换为 `MAIL_BACKEND=smtp` 并填写 SMTP 发件账号和授权码。
 
 访问：
 

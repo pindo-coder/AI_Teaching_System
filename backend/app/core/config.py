@@ -24,6 +24,20 @@ class Settings(BaseSettings):
     jwt_secret_key: str = "please-change-this-development-secret"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 120
+    # 密码找回：development 默认 console，生产请改为 smtp 或 provider。
+    mail_backend: str = "console"
+    mail_host: str | None = None
+    mail_port: int = 465
+    mail_username: str | None = None
+    mail_password: str | None = None
+    mail_from: str | None = None
+    mail_use_ssl: bool = True
+    password_reset_url: str = "http://localhost:5173/reset-password"
+    password_reset_token_expire_minutes: int = Field(default=20, ge=5, le=120)
+    password_reset_rate_limit_seconds: int = Field(default=60, ge=10, le=3600)
+    password_reset_hourly_limit: int = Field(default=5, ge=1, le=100)
+    admin_temporary_password: str = "12345678"
+    email_verification_url: str = "http://localhost:5173/verify-email"
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: str | None = None
     ai_mock_mode: bool = True

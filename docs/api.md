@@ -11,6 +11,17 @@
 | POST | `/auth/register` | 注册学生账号 |
 | POST | `/auth/login` | 登录并获取 JWT |
 | GET | `/auth/me` | 获取当前用户 |
+| POST | `/auth/email/verification/request` | 发送 6 位邮箱验证码（需登录） |
+| POST | `/auth/email/verification/confirm` | 使用邮箱和 6 位验证码确认验证 |
+| POST | `/auth/password-reset/request` | 申请密码重置验证码；未验证邮箱会先发送邮箱验证验证码 |
+| POST | `/auth/password-reset/confirm` | 使用用户名/邮箱、6 位验证码和新密码完成重置 |
+| POST | `/auth/password/change` | 登录后修改密码 |
+| GET | `/auth/users` | 管理员查看用户列表 |
+| GET | `/auth/password-reset/pending` | 管理员查看待人工重置请求 |
+| POST | `/auth/users/{id}/temporary-password` | 管理员重置为统一临时密码（默认 12345678） |
+
+`/auth/password-reset/request` 返回 `next_step`：已验证邮箱为 `email`（发送密码重置验证码），未验证邮箱为
+`verify_email`（发送 6 位验证码，验证后重新申请），没有邮箱的历史用户名为 `admin`（进入管理员人工处理队列）。
 
 ## 课程与章节
 

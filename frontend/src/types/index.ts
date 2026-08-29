@@ -8,6 +8,9 @@ export interface User {
   approval_status: 'pending' | 'approved' | 'rejected' | 'disabled'
   approval_note: string | null
   identity_no: string | null
+  email: string | null
+  email_verified_at: string | null
+  must_change_password: boolean
   created_time: string
 }
 

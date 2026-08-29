@@ -17,15 +17,19 @@ def verify_password(password: str, hashed_password: str) -> bool:
     return password_hash.verify(password, hashed_password)
 
 
-def create_access_token(subject: str) -> str:
+def create_access_token(subject: str, auth_version: int = 0) -> str:
     expires_at = datetime.now(UTC) + timedelta(minutes=settings.access_token_expire_minutes)
-    payload = {"sub": subject, "exp": expires_at, "iat": datetime.now(UTC)}
+    payload = {"sub": subject, "ver": auth_version, "exp": expires_at, "iat": datetime.now(UTC)}
     return jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
-def decode_access_token(token: str) -> str:
+def decode_access_token(token: str) -> tuple[str, int]:
     payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
     subject = payload.get("sub")
     if not subject:
         raise jwt.InvalidTokenError("Token subject is missing")
-    return str(subject)
+    try:
+        version = int(payload.get("ver", 0))
+    except (TypeError, ValueError):
+        raise jwt.InvalidTokenError("Token version is invalid") from None
+    return str(subject), version

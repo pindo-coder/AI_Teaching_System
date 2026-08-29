@@ -23,12 +23,27 @@ JWT_SECRET_KEY=足够长的随机字符串
 BOOTSTRAP_ADMIN_PASSWORD=强管理员密码
 DATABASE_URL=mysql+pymysql://用户名:密码@外部MySQL主机:3306/数据库名?charset=utf8mb4
 APP_SITE_ADDRESS=teaching.example.edu.cn
+
+# 密码找回邮件（生产不能使用 console）
+MAIL_BACKEND=smtp
+MAIL_HOST=smtp.example.edu.cn
+MAIL_PORT=465
+MAIL_USERNAME=发件邮箱账号
+MAIL_PASSWORD=发件邮箱授权码
+MAIL_FROM=no-reply@example.edu.cn
+MAIL_USE_SSL=true
+PASSWORD_RESET_URL=https://你的域名/reset-password
+# 验证页面地址（验证码邮件不再生成验证链接，保留配置仅供兼容）
+EMAIL_VERIFICATION_URL=https://你的域名/verify-email
 ```
 
 Compose 不启动内置 MySQL。`DATABASE_URL` 中的主机必须能从 `backend`
 容器访问，例如云数据库的内网 DNS 或同一 Docker 网络中的独立数据库服务名；
 不要使用 `127.0.0.1` 或 `localhost`，它们在容器中指向后端容器自身。首次启动时
 后端会先执行 `alembic upgrade head`，因此数据库和最小权限业务账号需要提前创建。
+
+本次认证升级新增邮箱验证、密码重置令牌和会话版本字段。没有邮箱的旧账号仍可由
+管理员生成临时密码；临时密码登录后必须修改。
 
 启动：
 

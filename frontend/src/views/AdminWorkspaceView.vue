@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { authApi } from '@/api/auth'
+import type { User } from '@/types'
 import { knowledgeApi, type CandidateDecisionSummary, type KnowledgeDocument, type MaterialCandidate } from '@/api/knowledge'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import EvidenceCard from '@/components/ui/EvidenceCard.vue'
@@ -15,6 +18,10 @@ const materials = ref<KnowledgeDocument[]>([])
 const pendingCandidates = ref<MaterialCandidate[]>([])
 const candidateSummary = ref<CandidateDecisionSummary>({ pending_review: 0, high_priority: 0, observed: 0, filtered: 0 })
 const classes = ref<TeachingClass[]>([])
+const users = ref<User[]>([])
+const pendingPasswordResets = ref<Array<{ id: number; user_id: number; username: string; email: string | null; requested_at: string; request_ip: string | null }>>([])
+const selectedUserId = ref<number>()
+const temporaryPassword = ref('')
 const failed = computed(() => materials.value.filter((item) => item.status === 'failed'))
 const activeClasses = computed(() => classes.value.filter((item) => item.status === 'active'))
 const centralMaterials = computed(() => materials.value.filter((item) => item.material_type === 'central' && item.review_status === 'published'))
@@ -25,20 +32,35 @@ function openPendingCandidates() {
 
 onMounted(async () => {
   try {
-    const [materialResult, classResult, candidateResult, summaryResult] = await Promise.allSettled([
+    const [materialResult, classResult, candidateResult, summaryResult, usersResult, resetResult] = await Promise.allSettled([
       knowledgeApi.materials(),
       teachingClassApi.list(),
       knowledgeApi.discoveryCandidates({ status: 'pending_review', limit: 4 }),
       knowledgeApi.candidateDecisionSummary(),
+      authApi.users(),
+      authApi.pendingPasswordResets(),
     ])
     if (materialResult.status === 'fulfilled') materials.value = materialResult.value.data.data
     if (classResult.status === 'fulfilled') classes.value = classResult.value.data.data
     if (candidateResult.status === 'fulfilled') pendingCandidates.value = candidateResult.value.data.data
     if (summaryResult.status === 'fulfilled') candidateSummary.value = summaryResult.value.data.data
+    if (usersResult.status === 'fulfilled') users.value = usersResult.value.data.data
+    if (resetResult.status === 'fulfilled') pendingPasswordResets.value = resetResult.value.data.data
   } finally {
     loading.value = false
   }
 })
+
+async function generateTemporaryPassword() {
+  if (!selectedUserId.value) return
+  try {
+    const { data } = await authApi.temporaryPassword(selectedUserId.value)
+    temporaryPassword.value = data.data.temporary_password
+    ElMessage.success('临时密码已生成，请通过安全渠道交给用户')
+  } catch (error: unknown) {
+    ElMessage.error(error instanceof Error ? error.message : '生成临时密码失败')
+  }
+}
 </script>
 
 <template>
@@ -56,6 +78,7 @@ onMounted(async () => {
       <UiCard><div class="admin-metric"><StatusChip label="异常" :status="failed.length ? 'danger' : 'success'" /><strong>{{ failed.length }}</strong><span>解析或索引失败</span></div></UiCard>
       <UiCard><div class="admin-metric"><StatusChip label="运行中" status="info" /><strong>{{ activeClasses.length }}</strong><span>活跃教学班</span></div></UiCard>
       <UiCard><div class="admin-metric"><StatusChip label="已发布" status="success" /><strong>{{ centralMaterials.length }}</strong><span>中央材料</span></div></UiCard>
+      <UiCard class="reset-metric"><div class="admin-metric"><StatusChip label="待人工重置" :status="pendingPasswordResets.length ? 'danger' : 'success'" /><strong>{{ pendingPasswordResets.length }}</strong><span>账号找回请求</span></div></UiCard>
     </section>
 
     <section class="admin-main-grid">
@@ -86,17 +109,48 @@ onMounted(async () => {
         </div>
       </UiCard>
     </section>
+
+    <UiCard class="admin-password-card">
+      <template #title><div><p class="eyebrow">ACCOUNT RECOVERY</p><h2>管理员临时密码</h2></div></template>
+      <p class="muted">用于未绑定邮箱或无法收取邮件的账号。临时密码只展示一次，用户登录后必须立即修改。</p>
+      <div class="password-tools">
+        <el-select v-model="selectedUserId" placeholder="选择用户" filterable clearable>
+          <el-option v-for="user in users" :key="user.id" :label="`${user.username}（${user.role} · ${user.email_verified_at ? '邮箱已验证' : '未绑定或未验证邮箱'}）`" :value="user.id" />
+        </el-select>
+        <el-button type="primary" :disabled="!selectedUserId" @click="generateTemporaryPassword">生成临时密码</el-button>
+      </div>
+      <el-alert v-if="temporaryPassword" type="warning" :closable="false" title="请立即记录并通过安全渠道交给用户">
+        <template #default><code>{{ temporaryPassword }}</code></template>
+      </el-alert>
+      <div class="pending-resets">
+        <h3>待处理的找回请求</h3>
+        <p v-if="!pendingPasswordResets.length" class="muted">当前没有待处理请求。老账号输入用户名申请找回后，会出现在这里。</p>
+        <div v-for="item in pendingPasswordResets" :key="item.id" class="pending-reset-item">
+          <span><strong>{{ item.username }}</strong><small>未绑定或未验证邮箱 · {{ item.requested_at }}</small></span>
+          <el-button size="small" type="primary" @click="selectedUserId = item.user_id; generateTemporaryPassword()">生成临时密码</el-button>
+        </div>
+      </div>
+    </UiCard>
   </div>
 </template>
 
 <style scoped>
 .admin-workspace { display: grid; gap: var(--space-6); }
-.admin-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
+.admin-status-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-3); }
 .admin-metric { display: grid; gap: var(--space-2); }
 .admin-metric strong { font-size: 32px; }
 .admin-metric > span:last-child { color: var(--ink-600); }
 .admin-main-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(280px, .7fr); gap: var(--space-4); align-items: start; }
 .admin-main-grid h2 { margin: var(--space-1) 0 0; font-size: var(--fs-section); }
+.admin-password-card h2 { margin: var(--space-1) 0 0; font-size: var(--fs-section); }
+.muted { color: var(--ink-600); line-height: 1.6; }
+.password-tools { display: flex; flex-wrap: wrap; gap: var(--space-3); margin: var(--space-4) 0; }
+.password-tools .el-select { width: min(100%, 320px); }
+.pending-resets { display: grid; gap: var(--space-3); margin-top: var(--space-5); }
+.pending-resets h3 { margin: 0; font-size: var(--fs-body); }
+.pending-reset-item { display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--space-3); align-items: center; padding: var(--space-3); background: var(--surface-muted); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.pending-reset-item span { display: grid; gap: 3px; }
+.pending-reset-item small { color: var(--ink-500); }
 .admin-evidence-list, .admin-attention-list { display: grid; gap: var(--space-3); }
 .admin-attention-list button { display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: var(--space-3); align-items: center; width: 100%; padding: var(--space-3); color: var(--ink-900); background: var(--surface-muted); border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
 .admin-attention-list strong { color: var(--authority-red); font-size: 22px; text-align: center; }
