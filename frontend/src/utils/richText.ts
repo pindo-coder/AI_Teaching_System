@@ -30,7 +30,9 @@ export function renderTeachingDocument(source: string): string {
   for (const rawLine of lines) {
     const line = rawLine.trim()
     if (!line) {
-      closeList()
+      // 模型经常在编号项之间插入空行，甚至把每一项都写成 ``1.``。
+      // 空行本身不结束列表；后续标题、段落或另一种列表会按各自分支关闭，
+      // 这样连续编号会渲染在同一个 ol 中，既不会重置也不会产生额外间距。
       continue
     }
     const heading = line.match(/^#{1,4}\s+(.+)$/)
