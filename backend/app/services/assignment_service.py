@@ -99,6 +99,7 @@ class AssignmentService:
             task_kind=payload.task_kind,
             title=payload.title.strip(),
             description=payload.description.strip(),
+            rubric=payload.rubric,
             due_time=due_time,
             due_time_is_utc=True,
             status="published",
@@ -202,7 +203,7 @@ class AssignmentService:
                 "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
-                "title": assignment.title, "description": assignment.description, "due_time": due_time,
+                "title": assignment.title, "description": assignment.description, "rubric": assignment.rubric or {}, "due_time": due_time,
                 "status": display_status, "progress_value": recipient.progress_value,
                 "completed_time": _assignment_time_utc(assignment, recipient.completed_time),
                 "created_time": assignment.created_time,
@@ -240,7 +241,7 @@ class AssignmentService:
                 "teaching_class_id": assignment.teaching_class_id,
                 "course_name": course_name, "chapter_title": chapter_title,
                 "learning_stage": assignment.learning_stage, "task_kind": assignment.task_kind,
-                "title": assignment.title, "description": assignment.description, "due_time": due_time,
+                "title": assignment.title, "description": assignment.description, "rubric": assignment.rubric or {}, "due_time": due_time,
                 "status": assignment.status, "target_scope": assignment.target_scope, "created_time": assignment.created_time,
                 "total_count": len(recipients),
                 "completed_count": sum(item.status == "completed" for item in recipients),
@@ -324,6 +325,28 @@ class AssignmentService:
             if relation is None:
                 raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权撤回该教学班任务")
         assignment.status = "cancelled"
+        self.db.commit()
+        self.db.refresh(assignment)
+        return assignment
+
+    def confirm_rubric(self, assignment_id: int, requester: User, rubric: dict) -> TeacherAssignment:
+        assignment = self.db.get(TeacherAssignment, assignment_id)
+        if assignment is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="任务不存在")
+        if requester.role != "admin" and assignment.created_by != requester.id:
+            relation = self.db.scalar(select(TeachingClassTeacher.id).where(
+                TeachingClassTeacher.teaching_class_id == assignment.teaching_class_id,
+                TeachingClassTeacher.user_id == requester.id,
+            )) if assignment.teaching_class_id else None
+            if relation is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权确认该任务量规")
+        items = rubric.get("items") if isinstance(rubric, dict) else None
+        if not isinstance(items, list) or not items:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="量规至少需要一个评分维度")
+        total = sum(float(item.get("weight", 0)) for item in items if isinstance(item, dict))
+        if abs(total - 100) > 0.01:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="量规权重总和必须为 100%")
+        assignment.rubric = rubric
         self.db.commit()
         self.db.refresh(assignment)
         return assignment

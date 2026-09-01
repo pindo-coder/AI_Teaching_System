@@ -18,6 +18,7 @@ class AssignmentCreate(BaseModel):
     task_kind: TaskKind
     title: str = Field(min_length=2, max_length=160)
     description: str = Field(default="", max_length=3000)
+    rubric: dict = Field(default_factory=dict)
     due_time: datetime
     target_scope: Literal["all_students", "selected_students", "selected_groups"] = "all_students"
     student_ids: list[int] = Field(default_factory=list)
@@ -39,6 +40,10 @@ class AssignmentCreate(BaseModel):
         return self
 
 
+class AssignmentRubricConfirm(BaseModel):
+    rubric: dict = Field(default_factory=dict)
+
+
 class AssignmentStudentItem(BaseModel):
     id: int
     username: str
@@ -56,6 +61,7 @@ class StudentAssignmentRead(BaseModel):
     task_kind: TaskKind
     title: str
     description: str
+    rubric: dict = Field(default_factory=dict)
     due_time: datetime
     status: str
     progress_value: int
@@ -83,6 +89,7 @@ class TeacherAssignmentRead(BaseModel):
     task_kind: TaskKind
     title: str
     description: str
+    rubric: dict = Field(default_factory=dict)
     due_time: datetime
     status: str
     target_scope: str

@@ -28,7 +28,7 @@ class AgentVerifier:
 
     CONTEXT_REQUIRED_TOOLS = {
         "search_materials", "create_lesson_draft", "draft_assignment",
-        "draft_study_plan", "prepare_grading_rubric", "check_lesson_readiness",
+        "draft_study_plan", "draft_note_improvement", "prepare_grading_rubric", "check_lesson_readiness",
         "generate_lesson_outline", "generate_ppt", "generate_lesson_plan",
         "generate_classroom_activity", "generate_all_artifacts",
     }
@@ -51,6 +51,8 @@ class AgentVerifier:
             "passed": bool(summary.strip()),
         })
         failed = [(call, result) for call, result in results if result.status == "failed"]
+        needs_input = [result for _, result in results if result.status == "needs_input"]
+        advice_ready = [result for _, result in results if result.status in {"advice_ready", "waiting_user_action"}]
         checks.append({
             "key": "tools_succeeded",
             "label": "所有计划工具执行成功",
@@ -83,5 +85,10 @@ class AgentVerifier:
         })
 
         verified = bool(summary.strip()) and not failed and context_ok
-        status = "waiting_confirmation" if blocking_actions else "completed"
+        status = (
+            "waiting_confirmation" if blocking_actions
+            else "waiting_input" if needs_input
+            else "waiting_user_action" if advice_ready
+            else "completed"
+        )
         return VerificationResult(verified, status, checks, list(dict.fromkeys(warnings)), blocking_actions)

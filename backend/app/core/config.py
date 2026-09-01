@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     agent_planner_enabled: bool = True
     agent_planner_use_llm: bool = True
     agent_planner_max_steps: int = 5
+    # V2 使用声明式工具注册和单步重规划；保留开关便于灰度回退旧协议。
+    agent_runtime_v2_enabled: bool = True
+    agent_runtime_max_iterations: int = Field(default=8, ge=1, le=20)
+    agent_tool_timeout_seconds: float = Field(default=30.0, ge=1, le=300)
+    agent_tool_max_retries: int = Field(default=1, ge=0, le=2)
+    agent_execution_deadline_seconds: float = Field(default=300.0, ge=10, le=3600)
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

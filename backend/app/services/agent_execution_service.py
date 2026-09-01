@@ -14,7 +14,7 @@ from app.schemas.ai import AiWorkspaceContextData
 from app.services.llm_compat import clean_model_text
 
 
-FINAL_STATUSES = {"completed", "failed", "cancelled"}
+FINAL_STATUSES = {"completed", "advice_ready", "waiting_user_action", "failed", "cancelled"}
 
 
 class AgentExecutionService:
@@ -77,6 +77,31 @@ class AgentExecutionService:
             error_message=None,
             finished_time=None,
         )
+
+    def wait_for_input(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
+        """暂停在需要用户补充上下文/参数的位置，可由同一 execution 继续。"""
+        return self.update(
+            execution,
+            status="waiting_input",
+            result=result,
+            error_message=None,
+            finished_time=None,
+        )
+
+    def advice_ready(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
+        """已生成建议/草案，但仍需用户在业务页面编辑或保存。"""
+        return self.update(
+            execution,
+            status="waiting_user_action",
+            result=result,
+            error_message=None,
+            finished_time=None,
+        )
+
+    def request_cancel(self, execution: AgentExecution) -> AgentExecution:
+        if execution.status in FINAL_STATUSES:
+            return execution
+        return self.update(execution, cancel_requested=True, status="cancelled", finished_time=utc_now())
 
     def resolve(self, execution: AgentExecution, *, resolution: str, note: str | None = None) -> AgentExecution:
         result = dict(execution.result or {})
@@ -164,6 +189,7 @@ def execution_data(execution: AgentExecution) -> dict[str, Any]:
         "result": result,
         "error_message": execution.error_message,
         "retry_count": execution.retry_count,
+        "cancel_requested": bool(execution.cancel_requested),
         "retry_of_execution_id": execution.retry_of_execution_id,
         # TimestampMixin uses database func.now(); historical deployments did
         # not record that session timezone, so do not invent a UTC basis here.

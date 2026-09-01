@@ -20,6 +20,7 @@ class TeacherAssignment(Base):
     task_kind: Mapped[str] = mapped_column(String(30), nullable=False)
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    rubric: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     due_time: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
     # 旧前端提交的是中国本地 naive 时间；新协议提交带 offset 并存 UTC naive。
     due_time_is_utc: Mapped[bool] = mapped_column(

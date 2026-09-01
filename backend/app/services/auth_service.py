@@ -105,6 +105,12 @@ class AuthService:
                 user_id=user.id,
                 purpose=purpose,
                 token_hash=self._token_hash(raw_token),
+                # MySQL may run with a non-UTC session timezone while the
+                # application consistently uses UTC-naive datetimes.  Set
+                # this explicitly instead of relying on ``server_default``
+                # (which would otherwise make created_at appear 8 hours in
+                # the future and trigger the reset rate limiter forever).
+                created_at=now,
                 expires_at=now + timedelta(minutes=settings.password_reset_token_expire_minutes),
                 request_ip=request_ip,
             )
@@ -184,13 +190,24 @@ class AuthService:
         latest = self.db.scalar(select(PasswordResetToken).where(
             PasswordResetToken.user_id == user.id,
             PasswordResetToken.purpose == "password_reset",
-        ).order_by(PasswordResetToken.created_at.desc()).limit(1))
-        if latest and (now - latest.created_at).total_seconds() < settings.password_reset_rate_limit_seconds:
+        ).order_by(PasswordResetToken.expires_at.desc()).limit(1))
+        # ``expires_at`` is assigned by the application in UTC and is
+        # therefore safe for both SQLite and MySQL.  Derive the creation time
+        # from it so legacy MySQL rows written with a local-time server
+        # default do not look like future tokens.
+        latest_created_at = (
+            latest.expires_at - timedelta(minutes=settings.password_reset_token_expire_minutes)
+            if latest else None
+        )
+        if latest_created_at and (now - latest_created_at).total_seconds() < settings.password_reset_rate_limit_seconds:
             return "email"
+        hourly_cutoff = (
+            now - timedelta(hours=1) + timedelta(minutes=settings.password_reset_token_expire_minutes)
+        )
         hourly_count = self.db.scalar(select(func.count(PasswordResetToken.id)).where(
             PasswordResetToken.user_id == user.id,
             PasswordResetToken.purpose == "password_reset",
-            PasswordResetToken.created_at >= now - timedelta(hours=1),
+            PasswordResetToken.expires_at >= hourly_cutoff,
         )) or 0
         if hourly_count >= settings.password_reset_hourly_limit:
             return "email"
@@ -198,7 +215,7 @@ class AuthService:
             ip_count = self.db.scalar(select(func.count(PasswordResetToken.id)).where(
                 PasswordResetToken.request_ip == request_ip,
                 PasswordResetToken.purpose == "password_reset",
-                PasswordResetToken.created_at >= now - timedelta(hours=1),
+                PasswordResetToken.expires_at >= hourly_cutoff,
             )) or 0
             if ip_count >= settings.password_reset_hourly_limit * 3:
                 return "email"

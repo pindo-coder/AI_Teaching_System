@@ -23,6 +23,7 @@ JWT_SECRET_KEY=足够长的随机字符串
 BOOTSTRAP_ADMIN_PASSWORD=强管理员密码
 DATABASE_URL=mysql+pymysql://用户名:密码@外部MySQL主机:3306/数据库名?charset=utf8mb4
 APP_SITE_ADDRESS=teaching.example.edu.cn
+CORS_ORIGINS=["https://teaching.example.edu.cn"]
 
 # 密码找回邮件（生产不能使用 console）
 MAIL_BACKEND=smtp

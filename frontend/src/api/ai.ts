@@ -112,7 +112,8 @@ export interface AiWorkspaceContextPayload {
 export interface AiAgentPlan {
   intent: string
   title: string
-  steps: Array<{ key: string; title: string; status: 'completed' | 'pending' | 'running' | 'ready' | 'needs_input' | 'blocked' }>
+  iteration?: number
+  steps: Array<{ key: string; title: string; status: 'completed' | 'pending' | 'running' | 'ready' | 'needs_input' | 'blocked' | 'advice_ready' | 'waiting_user_action' }>
 }
 
 export interface AiAgentAction {
@@ -123,12 +124,14 @@ export interface AiAgentAction {
   requires_confirmation: boolean
   output_types?: Array<'ppt' | 'lesson_plan' | 'classroom_activities'>
   status?: 'ready' | 'running' | 'completed' | 'failed'
+  draft?: Record<string, unknown>
+  rubric?: { items: Array<{ label: string; weight: number; description: string }>; feedback_template: string }
 }
 
 export interface AiAgentToolResult {
   tool: string
   title: string
-  status: 'completed' | 'failed' | 'running'
+  status: 'completed' | 'failed' | 'running' | 'needs_input' | 'waiting_confirmation' | 'advice_ready' | 'waiting_user_action'
   summary: string
   data: Record<string, unknown>
   action: AiAgentAction | Record<string, never>
@@ -140,7 +143,7 @@ export interface AiAgentToolResult {
 export interface AiAgentExecution {
   id: number
   role: AiWorkspaceRole
-  status: 'planning' | 'running' | 'waiting_confirmation' | 'completed' | 'failed' | 'cancelled'
+  status: 'planning' | 'running' | 'waiting_input' | 'waiting_confirmation' | 'waiting_user_action' | 'advice_ready' | 'completed' | 'failed' | 'cancelled'
   intent: string
   question: string
   course_id: number | null
@@ -291,6 +294,8 @@ export const aiApi = {
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/retry`),
   resolveWorkspaceAgentExecution: (executionId: number, resolution: 'confirmed' | 'cancelled', note?: string) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/resolve`, { resolution, note }),
+  cancelWorkspaceAgentExecution: (executionId: number) =>
+    http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/cancel`),
   async workspaceAgentStream(payload: AiWorkspaceAgentPayload, handlers: {
     onContext: (context: AiWorkspaceContext) => void
     onMeta: (data: { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole; execution_id?: number }) => void

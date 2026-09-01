@@ -48,6 +48,14 @@ def test_production_database_requires_external_mysql_host() -> None:
     assert "mysql.example.internal" in database_url
 
 
+def test_compose_allows_production_cors_origin_override() -> None:
+    compose = _read("docker-compose.yml")
+    production_environment = _read(".env.production.example")
+
+    assert "CORS_ORIGINS: '${CORS_ORIGINS:-[\"http://localhost\"]}'" in compose
+    assert "CORS_ORIGINS=[\"https://teaching.example.edu.cn\"]" in production_environment
+
+
 def test_compose_has_configurable_persistent_https_gateway() -> None:
     compose = _read("docker-compose.yml")
     caddyfile = _read("deploy/Caddyfile")

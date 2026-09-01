@@ -20,6 +20,7 @@ export interface StudentAssignment {
   task_kind: AssignmentTaskKind
   title: string
   description: string
+  rubric: { items: Array<{ label: string; weight: number; description: string }>; feedback_template: string }
   due_time: string
   status: 'not_started' | 'in_progress' | 'completed' | 'overdue'
   progress_value: number
@@ -39,6 +40,7 @@ export interface TeacherAssignment {
   task_kind: AssignmentTaskKind
   title: string
   description: string
+  rubric: { items: Array<{ label: string; weight: number; description: string }>; feedback_template: string }
   due_time: string
   status: 'published' | 'cancelled'
   target_scope: 'all_students' | 'selected_students' | 'selected_groups'
@@ -72,6 +74,7 @@ export const assignmentApi = {
     task_kind: AssignmentTaskKind
     title: string
     description: string
+    rubric: { items: Array<{ label: string; weight: number; description: string }>; feedback_template: string }
     due_time: string
     target_scope: 'all_students' | 'selected_students' | 'selected_groups'
     student_ids: number[]
@@ -79,4 +82,6 @@ export const assignmentApi = {
   }) => http.post<ApiResponse<TeacherAssignment>>('/assignments', payload),
   recipients: (id: number) => http.get<ApiResponse<AssignmentRecipientDetail[]>>(`/assignments/${id}/recipients`),
   cancel: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/assignments/${id}`),
+  confirmRubric: (id: number, rubric: TeacherAssignment['rubric']) =>
+    http.post<ApiResponse<TeacherAssignment>>(`/assignments/${id}/rubric/confirm`, { rubric }),
 }

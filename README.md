@@ -204,10 +204,10 @@ PYTHONPATH=. python -m scripts.rebuild_study_note_index
 
 ## 切换 MySQL
 
-本地开发默认使用 SQLite；服务器可以在 `backend/.env` 中切换：
+本地开发默认使用 SQLite；服务器可以在 `backend/.env` 中切换。容器部署请使用外部 MySQL 主机名，`127.0.0.1` 仅适用于后端直接运行在数据库所在宿主机：
 
 ```env
-DATABASE_URL=mysql+pymysql://ai_teaching:密码@127.0.0.1:3306/ai_teaching?charset=utf8mb4
+DATABASE_URL=mysql+pymysql://ai_teaching:密码@mysql.example.internal:3306/ai_teaching?charset=utf8mb4
 ```
 
 先创建数据库和用户，再执行初始化：

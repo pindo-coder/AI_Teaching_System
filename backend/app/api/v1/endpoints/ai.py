@@ -29,6 +29,8 @@ from app.services.planning_agent import PlanningAgent, ToolCall, ToolResult
 from app.services.agent_execution_service import AgentExecutionService, execution_data
 from app.services.agent_template_service import templates_for_role
 from app.services.agent_verifier import AgentVerifier
+from app.services.agent_runtime import AgentRuntime
+from app.services.agent_context_policy import AgentContextPolicy
 from app.services.task_service import TaskService
 
 
@@ -284,6 +286,7 @@ def resolve_workspace_context(
         learning_stage=payload.learning_stage,
         page_name=payload.page_name,
     )
+    AgentContextPolicy(db, user).validate(context)
     return ApiResponse(message="已识别当前教学范围", data=context)
 
 
@@ -359,7 +362,7 @@ def retry_workspace_agent_execution(
     source = service.get(execution_id)
     if source is None:
         raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
-    if source.status not in {"failed", "completed"}:
+    if source.status not in {"failed", "completed", "advice_ready", "waiting_user_action"}:
         raise HTTPException(status_code=409, detail="当前任务仍在执行，无需重复重试")
     retried = service.retry(source)
     return ApiResponse(message="已创建可恢复的 Agent 重试任务", data=execution_data(retried))
@@ -376,8 +379,10 @@ def resolve_workspace_agent_execution(
     execution = service.get(execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
-    if execution.status != "waiting_confirmation":
+    if execution.status not in {"waiting_confirmation", "waiting_user_action", "advice_ready"}:
         raise HTTPException(status_code=409, detail="当前任务没有等待确认的操作")
+    if payload.resolution == "confirmed" and execution.status != "waiting_confirmation":
+        raise HTTPException(status_code=409, detail="该任务已生成建议，需在业务页面完成编辑保存")
     blocking_actions = (execution.result or {}).get("blocking_actions") or []
     blocking_action = blocking_actions[0] if blocking_actions else {}
     if blocking_action.get("kind") == "approve_evidence" and blocking_action.get("run_id"):
@@ -394,6 +399,22 @@ def resolve_workspace_agent_execution(
         message="已取消 Agent 任务" if payload.resolution == "cancelled" else "已确认 Agent 后续操作",
         data=execution_data(resolved),
     )
+
+
+@router.post("/workspace/agent/executions/{execution_id}/cancel")
+def cancel_workspace_agent_execution(
+    execution_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    service = AgentExecutionService(db, user)
+    execution = service.get(execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
+    if execution.status in {"completed", "advice_ready", "waiting_user_action", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="当前任务已经结束")
+    cancelled = service.request_cancel(execution)
+    return ApiResponse(message="已请求停止 Agent 任务", data=execution_data(cancelled))
 
 
 @router.post("/workspace/agent/stream")
@@ -414,6 +435,8 @@ def workspace_agent_stream(
         raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
     if existing_execution and existing_execution.role != effective_role:
         raise HTTPException(status_code=403, detail="无权继续该 Agent 任务")
+    if existing_execution and existing_execution.status in {"completed", "advice_ready", "waiting_user_action", "failed", "cancelled"}:
+        raise HTTPException(status_code=409, detail="该 Agent 任务已经结束，请使用重试接口创建新任务")
 
     resolved_context = AgentContextService(db, user).resolve(
         course_id=payload.course_id,
@@ -428,6 +451,7 @@ def workspace_agent_stream(
         context = AiWorkspaceContextData.model_validate(existing_execution.context_snapshot or {})
     else:
         context = resolved_context
+    AgentContextPolicy(db, user).validate(context)
     intent = _agent_intent(payload.question, effective_role)
     execution = existing_execution or execution_service.create(
         role=effective_role,
@@ -440,7 +464,7 @@ def workspace_agent_stream(
         yield _sse("context", context.model_dump(mode="json"))
         yield _sse("meta", {
             "grounded": bool(context.course_id and context.chapter_id),
-            "model": "agent-workflow-v1",
+            "model": "agent-workflow-runtime",
             "mode": "agent",
             "role": effective_role,
             "execution_id": execution.id,
@@ -452,6 +476,18 @@ def workspace_agent_stream(
             else "已读取当前页面、教学班与近期任务"
         )
         yield _sse("progress", {"title": initial_progress, "status": "completed"})
+
+        # Agent 统一走 Runtime：V1/V2 开关仅用于兼容配置展示，不再分叉实际执行。
+        runtime = AgentRuntime(db, user)
+        for event, data in runtime.stream(
+            question=payload.question.strip(),
+            role=effective_role,
+            context=context,
+            execution=execution,
+            execution_service=execution_service,
+        ):
+            yield _sse(event, data)
+        return
 
         # 规划型 Agent：先生成受限工具计划，再逐个调用工具。旧的固定工作流
         # 仍保留在下方作为关闭规划器后的兼容回退路径。
@@ -717,6 +753,14 @@ def workspace_agent_stream(
             else:
                 yield _sse("chunk", {"text": f"已锁定“{context.course_name} · {context.chapter_title}”。我会先把问题拆成学习目标、教材依据和下一步行动；如需纯教材问答，可切换到 Chat 模式。"})
                 yield _sse("action", {"kind": "open_learning", "label": "进入当前专题学习", "href": f"/courses/{context.course_id}/chapters/{context.chapter_id}/{context.learning_stage}", "requires_confirmation": False})
+        # 兼容旧固定分支时也必须收敛持久化 execution，避免任务中心永久停留在 planning。
+        if execution.status in {"planning", "running"}:
+            legacy_result = {"summary": "旧版 Agent 工作流已完成", "warnings": []}
+            if intent == "lesson_prep" and effective_role == "teacher" and context.course_id and context.chapter_id:
+                execution_service.wait_for_confirmation(execution, legacy_result)
+            else:
+                execution_service.complete(execution, legacy_result)
+        yield _sse("execution", execution_data(execution))
         yield _sse("sources", [])
         yield _sse("done", {})
 

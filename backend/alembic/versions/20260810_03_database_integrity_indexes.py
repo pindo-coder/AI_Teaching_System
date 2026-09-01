@@ -274,6 +274,13 @@ def _canonical_url_indexes_to_drop(bind: sa.Connection) -> list[str]:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    # 早期通过 create_all 建立的开发库可能没有 identity_no；该字段可空，
+    # 先补列再执行唯一性校验，避免整条迁移链被旧库阻断。
+    inspector = sa.inspect(bind)
+    if inspector.has_table(USERS_TABLE):
+        user_columns = {str(column["name"]).casefold() for column in inspector.get_columns(USERS_TABLE)}
+        if "identity_no" not in user_columns:
+            op.add_column(USERS_TABLE, sa.Column("identity_no", sa.String(32), nullable=True))
     # Complete every structural/data validation before the first DDL statement.
     # This avoids a canonical-index error leaving MySQL after an unrelated partial
     # identity-index repair.

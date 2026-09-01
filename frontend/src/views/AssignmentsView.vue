@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Calendar, Download, Plus, Promotion, Refresh, Search, UserFilled } from '@element-plus/icons-vue'
 import {
@@ -20,6 +20,7 @@ import { beijingDateTimeLocalValue, beijingLocalToUtcIso, beijingTimestamp, form
 
 const auth = useAuthStore()
 const router = useRouter()
+const route = useRoute()
 const loading = ref(true)
 const studentTasks = ref<StudentAssignment[]>([])
 const teacherTasks = ref<TeacherAssignment[]>([])
@@ -48,6 +49,7 @@ const form = reactive({
   target_scope: 'all_students' as 'all_students' | 'selected_students' | 'selected_groups',
   student_ids: [] as number[],
   group_ids: [] as number[],
+  rubric: { items: [] as Array<{ label: string; weight: number; description: string }>, feedback_template: '' },
 })
 const stageLabels: Record<LearningStage, string> = { preview: '课前预习', review: '课后巩固', exam: '考前冲刺' }
 const kindLabels: Record<AssignmentTaskKind, string> = { reading: '教材阅读', ai_assist: 'AI 学习辅助', note: '章节笔记' }
@@ -130,11 +132,28 @@ async function publish() {
   try {
     await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: dueTime })
     dialogVisible.value = false
-    form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []
+    form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []; form.rubric = { items: [], feedback_template: '' }
     await load()
     ElMessage.success('学习任务已发布')
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '任务发布失败')) }
   finally { publishing.value = false }
+}
+function applyAgentDraft() {
+  const encoded = route.query.agent_draft
+  if (!encoded || typeof encoded !== 'string' || !auth.isTeacher) return
+  try {
+    const payload = JSON.parse(decodeURIComponent(encoded)) as {
+      draft?: Partial<typeof form> | null
+      rubric?: typeof form.rubric | null
+    }
+    if (payload.draft) Object.assign(form, payload.draft)
+    if (payload.rubric) form.rubric = payload.rubric
+    dialogVisible.value = true
+    ElMessage.success(payload.rubric ? '已带入 Agent 量规草案，请确认后发布' : '已带入 Agent 任务草案，请确认后发布')
+    void router.replace({ path: '/assignments', query: {} })
+  } catch {
+    ElMessage.warning('Agent 草案读取失败，请重新生成')
+  }
 }
 async function cancelTask(task: TeacherAssignment) {
   await ElMessageBox.confirm(`撤回“${task.title}”后，学生端将不再显示该任务。`, '撤回任务', { type: 'warning' })
@@ -198,7 +217,7 @@ watch(detailVisible, (visible) => {
   stopDetailRefresh()
   if (visible) detailRefreshTimer = window.setInterval(() => void loadRecipientDetails(true), 30_000)
 })
-onMounted(load)
+onMounted(async () => { await load(); applyAgentDraft() })
 onBeforeUnmount(stopDetailRefresh)
 </script>
 
@@ -242,6 +261,15 @@ onBeforeUnmount(stopDetailRefresh)
         <div class="assignment-form-grid"><el-form-item label="学习阶段"><el-select v-model="form.learning_stage" style="width:100%"><el-option label="课前预习" value="preview" /><el-option label="课后巩固" value="review" /><el-option label="考前冲刺" value="exam" /></el-select></el-form-item><el-form-item label="完成条件"><el-select v-model="form.task_kind" style="width:100%"><el-option v-for="(label, value) in kindLabels" :key="value" :label="label" :value="value" :disabled="value === 'note' && form.learning_stage !== 'review'" /></el-select></el-form-item></div>
         <el-form-item label="任务名称"><el-input v-model="form.title" maxlength="160" show-word-limit placeholder="例如：完成第十七章课后巩固" /></el-form-item>
         <el-form-item label="任务要求"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="3000" show-word-limit placeholder="说明学习重点和具体要求" /></el-form-item>
+        <section v-if="form.rubric.items.length" class="assignment-rubric-editor">
+          <div class="assignment-rubric-heading"><strong>Agent 生成的批改量规（发布前确认）</strong><span>总权重：{{ form.rubric.items.reduce((sum, item) => sum + Number(item.weight || 0), 0) }}%</span></div>
+          <div v-for="(item, index) in form.rubric.items" :key="index" class="assignment-rubric-row">
+            <el-input v-model="item.label" placeholder="评分维度" />
+            <el-input-number v-model="item.weight" :min="0" :max="100" controls-position="right" />
+            <el-input v-model="item.description" placeholder="评分说明" />
+          </div>
+          <el-form-item label="反馈模板"><el-input v-model="form.rubric.feedback_template" type="textarea" :rows="2" /></el-form-item>
+        </section>
         <div class="assignment-form-grid"><el-form-item label="截止时间"><el-date-picker v-model="form.due_time" type="datetime" value-format="YYYY-MM-DDTHH:mm" style="width:100%" /></el-form-item><el-form-item label="发布对象"><el-radio-group v-model="form.target_scope"><el-radio-button value="all_students">全班</el-radio-button><el-radio-button value="selected_groups">指定小组</el-radio-button><el-radio-button value="selected_students">指定学生</el-radio-button></el-radio-group></el-form-item></div>
         <el-form-item v-if="form.target_scope === 'selected_students'" label="选择学生"><el-select v-model="form.student_ids" multiple filterable collapse-tags style="width:100%"><el-option v-for="student in students" :key="student.id" :label="`${student.username}${student.identity_no ? ` · ${student.identity_no}` : ''}`" :value="student.id" /></el-select></el-form-item>
         <el-form-item v-if="form.target_scope === 'selected_groups'" label="选择学习小组"><el-select v-model="form.group_ids" multiple collapse-tags style="width:100%"><el-option v-for="group in groups" :key="group.id" :label="`${group.name}（${group.user_ids.length}人）`" :value="group.id" /></el-select></el-form-item>

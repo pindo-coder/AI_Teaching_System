@@ -6,10 +6,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import logging
 from typing import Any, Iterator
+
+from pydantic import BaseModel, Field
 
 from langchain_core.prompts import ChatPromptTemplate
 from sqlalchemy import func, select
@@ -38,11 +40,25 @@ from app.services.llm_compat import clean_model_text
 logger = logging.getLogger(__name__)
 
 
+class PlannedTool(BaseModel):
+    """模型规划输出的单个工具选择，服务端仍会做角色白名单过滤。"""
+
+    name: str
+    reason: str = Field(default="完成当前目标")
+    requires_confirmation: bool = False
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class PlannedToolSet(BaseModel):
+    tools: list[PlannedTool] = Field(default_factory=list, max_length=5)
+
+
 @dataclass(frozen=True)
 class ToolCall:
     name: str
     reason: str
     requires_confirmation: bool = False
+    arguments: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -66,6 +82,7 @@ class ToolResult:
             "warnings": self.warnings or [],
             "retryable": self.retryable,
             "requires_confirmation": call.requires_confirmation,
+            "arguments": call.arguments,
         }
 
 
@@ -76,8 +93,9 @@ class PlanningAgent:
         "inspect_context": "读取当前课程、教材专题、教学班和学习阶段",
         "inspect_tasks": "读取当前用户可见的待完成或已发布任务状态",
         "inspect_learning_state": "读取学生任务点、学习进度和个人笔记状态",
+        "draft_note_improvement": "根据当前专题和已有笔记生成具体完善步骤",
         "summarize_recent_learning": "汇总当前学生近 7 天的网站学习行为、任务、练习和薄弱点",
-        "search_materials": "在当前教材专题范围内检索可引用的教材与权威资料",
+        "search_materials": "在当前教材专题范围内检索可引用的教材与权威资料；arguments 可选 query/keyword（检索词）和 max_results（1-10）",
         "check_lesson_readiness": "检查当前专题是否已有证据、课纲和可继续生成的成果",
         "create_lesson_draft": "根据当前专题创建待确认的备课草稿和教材证据快照",
         "draft_assignment": "根据当前专题生成不自动发布的课后任务草案",
@@ -100,7 +118,7 @@ class PlanningAgent:
     ROLE_TOOL_ALLOWLIST = {
         "student": {
             "inspect_context", "inspect_tasks", "inspect_learning_state",
-            "search_materials", "draft_study_plan", "summarize_recent_learning",
+            "search_materials", "draft_study_plan", "draft_note_improvement", "summarize_recent_learning",
         },
         "teacher": {
             "inspect_context", "inspect_tasks", "inspect_learning_state", "search_materials",
@@ -164,6 +182,12 @@ class PlanningAgent:
             "最近完成", "近期完成", "最近做完", "近期做完", "完成了哪些任务", "完成过哪些任务",
         )):
             return [ToolCall("summarize_recent_learning", "汇总近 7 天个人学习情况")]
+        if role == "student" and any(term in text for term in ("完善笔记", "补充笔记", "修改笔记", "笔记情况", "笔记内容")):
+            return [
+                ToolCall("inspect_context", "确认当前学习专题"),
+                ToolCall("inspect_learning_state", "读取任务点、进度和个人笔记状态"),
+                ToolCall("draft_note_improvement", "生成当前专题的具体笔记完善步骤"),
+            ]
         if role == "student" and any(term in text for term in ("我的进度", "学习状态", "笔记情况", "完成了什么", "还要做什么")):
             return [
                 ToolCall("inspect_context", "确认当前学习专题"),
@@ -245,7 +269,7 @@ class PlanningAgent:
                 "system",
                 "你是高校思政课工作流规划器。只能从给定工具中选择，不能编造工具。"
                 "返回 JSON：{{\"tools\":[{{\"name\":\"工具名\",\"reason\":\"原因\","
-                "\"requires_confirmation\":false}}]}}。最多选择 5 个工具；"
+                "\"requires_confirmation\":false,\"arguments\":{{}}}}]}}。最多选择 5 个工具；"
                 "发布、删除、通知永远不能自主调用。",
             ),
             ("human", "角色：{role}\n问题：{question}\n当前范围：{context}\n可用工具：{tools}"),
@@ -267,26 +291,48 @@ class PlanningAgent:
             streaming=False,
         )
         try:
-            response = (prompt | model).invoke({
+            allowed = self._allowed_tools(role)
+            variables = {
                 "role": role,
                 "question": question,
                 "context": context.model_dump_json(ensure_ascii=False),
                 "tools": json.dumps(
-                    {name: self.TOOL_DESCRIPTIONS[name] for name in self._allowed_tools(role)},
+                    {name: self.TOOL_DESCRIPTIONS[name] for name in allowed},
                     ensure_ascii=False,
                 ),
-            })
-            parsed = self._extract_json(response)
-            if not parsed or not isinstance(parsed.get("tools"), list):
-                return None
-            allowed = self._allowed_tools(role)
+            }
+            structured = getattr(model, "with_structured_output", None)
+            response: Any
+            if callable(structured):
+                try:
+                    response = (prompt | structured(PlannedToolSet)).invoke(variables)
+                except Exception:
+                    # 兼容不支持 structured output 的 OpenAI-compatible 模型。
+                    response = (prompt | model).invoke(variables)
+            else:
+                response = (prompt | model).invoke(variables)
+            if isinstance(response, PlannedToolSet):
+                parsed_tools = [item.model_dump() for item in response.tools]
+            else:
+                parsed = self._extract_json(response)
+                if not parsed or not isinstance(parsed.get("tools"), list):
+                    return None
+                parsed_tools = parsed["tools"]
             result: list[ToolCall] = []
-            for item in parsed["tools"][: settings.agent_planner_max_steps]:
+            for item in parsed_tools[: settings.agent_planner_max_steps]:
                 if not isinstance(item, dict) or item.get("name") not in allowed:
                     continue
                 name = str(item["name"])
                 needs_confirmation = bool(item.get("requires_confirmation")) or name == "create_lesson_draft"
-                result.append(ToolCall(name, str(item.get("reason") or "完成当前目标"), needs_confirmation))
+                raw_arguments = item.get("arguments") or {}
+                if not isinstance(raw_arguments, dict):
+                    raw_arguments = {}
+                result.append(ToolCall(
+                    name,
+                    str(item.get("reason") or "完成当前目标"),
+                    needs_confirmation,
+                    raw_arguments,
+                ))
             return result or None
         except Exception as exc:
             logger.warning("agent_planner_llm_fallback reason=%s", str(exc) or type(exc).__name__)
@@ -739,6 +785,58 @@ class PlanningAgent:
                 "可进入任务页查看具体学生并决定是否提醒。",
                 data={"assignment_count": len(active), "completed_count": completed, "total_count": total},
             )
+        if call.name == "draft_note_improvement":
+            if not context.course_id or not context.chapter_id:
+                return ToolResult(
+                    "还没有锁定具体专题，暂时不能生成有针对性的笔记完善步骤。",
+                    action={"kind": "select_context", "label": "选择教材专题", "href": "/courses", "requires_confirmation": False},
+                    data={"grounded": False},
+                )
+            title = context.chapter_title or "当前教材专题"
+            note = StudyService(self.db).get_note(self.user.id, context.chapter_id)
+            note_text = StudyService.plain_note_content(note.content) if note else ""
+            has_note = bool(note_text)
+            note_length = len(note_text)
+            first_step = (
+                "逐段检查现有笔记：给每个观点补上‘概念定义—自己的理解—教材依据’三部分。"
+                if has_note else
+                "先创建本专题笔记，写下你对主题的初步理解，不要直接复制教材原文。"
+            )
+            state_line = (
+                f"当前已有笔记（约 {note_length} 字），下面的步骤以补强和校对为主。"
+                if has_note else
+                "当前还没有可用的个人笔记，下面的步骤从建立笔记骨架开始。"
+            )
+            steps = [
+                first_step,
+                "从教材中挑出 2—3 个核心概念，分别记录定义、概念之间的关系和一个关键词。",
+                "为每个核心概念补充至少 1 处教材依据，写明章节/页码或原文位置，便于之后核对。",
+                "增加一段‘我的理解’，用自己的话说明本专题解决了什么问题，并联系一个课堂或现实例子。",
+                "写下 1 个仍然困惑的问题，回到 Chat 追问概念边界或容易混淆的观点。",
+                "保存后对照本专题任务点复查：删除无依据表述，确认每个任务点都能在笔记中找到对应内容。",
+            ]
+            plan_text = (
+                f"## 《{title}》笔记完善步骤\n\n"
+                f"{state_line}\n\n"
+                + "\n".join(f"{index}. {step}" for index, step in enumerate(steps, start=1))
+                + "\n\n建议笔记结构：核心概念 → 教材依据 → 我的理解 → 例子/联系 → 待解决问题。"
+            )
+            return ToolResult(
+                plan_text,
+                status="advice_ready",
+                action={
+                    "kind": "open_notes",
+                    "label": "打开专题笔记开始完善",
+                    "href": f"/notes?chapter_id={context.chapter_id}",
+                    "requires_confirmation": False,
+                },
+                data={
+                    "chapter_id": context.chapter_id,
+                    "has_note": has_note,
+                    "note_length": note_length,
+                    "suggested_steps": steps,
+                },
+            )
         if call.name == "search_materials":
             if not context.course_id:
                 return ToolResult(
@@ -747,11 +845,17 @@ class PlanningAgent:
                     data={"grounded": False},
                 )
             try:
+                search_query = str(
+                    call.arguments.get("query")
+                    or call.arguments.get("keyword")
+                    or question
+                ).strip()
+                search_limit = int(call.arguments.get("max_results") or 5)
                 chunks = retrieve(
-                    question,
+                    search_query,
                     course_id=context.course_id,
                     chapter_id=context.chapter_id,
-                    top_k=5,
+                    top_k=max(1, min(search_limit, 10)),
                     fallback_to_course=True,
                 )
             except Exception as exc:
@@ -848,7 +952,12 @@ class PlanningAgent:
                 input=LessonPrepInput(lesson_hours=2, student_level="本科生", teaching_goal=question, output_types=["outline"]),
             ))
             if run.status == "failed":
-                return ToolResult(f"备课草稿创建失败：{run.error_message or '证据包构建失败'}")
+                return ToolResult(
+                    f"备课草稿创建失败：{run.error_message or '证据包构建失败'}",
+                    status="failed",
+                    warnings=[run.error_message or "证据包构建失败"],
+                    retryable=True,
+                )
             return ToolResult(
                 f"已创建备课草稿并生成 {len(run.evidence_snapshot)} 条证据快照，等待教师确认后生成课纲。",
                 action={"kind": "approve_evidence", "label": "确认资料并生成课纲", "href": "", "run_id": run.id, "requires_confirmation": True},
@@ -861,13 +970,24 @@ class PlanningAgent:
                     action={"kind": "select_context", "label": "选择教材专题", "href": "/courses", "requires_confirmation": False},
                 )
             class_hint = f"，面向“{context.teaching_class_name}”" if context.teaching_class_name else ""
+            draft = {
+                "course_id": context.course_id,
+                "chapter_id": context.chapter_id,
+                "teaching_class_id": context.teaching_class_id,
+                "learning_stage": "review",
+                "task_kind": "reading",
+                "title": f"《{context.chapter_title}》观点辨析与学习反思",
+                "description": "写一篇 300—500 字学习反思或观点卡，写明一个核心观点、至少一处教材依据和一条待讨论问题。完成标准：观点相关、依据可核验、表达清楚。",
+            }
             return ToolResult(
                 f"## 课后学习任务草案\n\n**任务名称：**《{context.chapter_title}》观点辨析与学习反思\n\n"
                 f"**适用范围：**当前教材专题{class_hint}\n\n"
                 "**学生提交：**300—500 字学习反思或观点卡，写明一个核心观点、至少一处教材依据和一条待讨论问题。\n\n"
                 "**完成标准：**观点相关、依据可核验、表达清楚。\n\n"
                 "**教师待确认：**发布对象、截止时间、提交形式和评分权重。",
-                action={"kind": "open_assignments", "label": "进入教学任务设置", "href": "/assignments", "requires_confirmation": True},
+                status="advice_ready",
+                action={"kind": "open_assignments", "label": "进入教学任务设置（带入草案）", "href": "/assignments", "requires_confirmation": True, "draft": draft},
+                data={"draft": draft},
             )
         if call.name == "draft_study_plan":
             title = context.chapter_title or "当前教材专题"
@@ -910,6 +1030,15 @@ class PlanningAgent:
                     "未识别到具体专题，暂不能生成有依据的批改量规。",
                     action={"kind": "select_context", "label": "选择教材专题", "href": "/courses", "requires_confirmation": False},
                 )
+            rubric = {
+                "items": [
+                    {"label": "教材理解", "weight": 40, "description": "准确表述核心概念，并说明概念之间的关系。"},
+                    {"label": "论证与依据", "weight": 35, "description": "至少引用一处可核验教材依据，观点与依据一致。"},
+                    {"label": "联系实际", "weight": 15, "description": "围绕具体问题形成有边界的分析，不泛化表态。"},
+                    {"label": "表达规范", "weight": 10, "description": "结构完整、语言准确、引用位置清楚。"},
+                ],
+                "feedback_template": "先指出学生已把握的观点，再说明需补充的教材依据，最后给出一项可执行的修改建议。",
+            }
             return ToolResult(
                 f"《{context.chapter_title}》批改量规草案：\n\n"
                 "1. 教材理解（40%）：能准确表述核心概念，并说明概念之间的关系。\n"
@@ -918,8 +1047,9 @@ class PlanningAgent:
                 "4. 表达规范（10%）：结构完整、语言准确、引用位置清楚。\n\n"
                 "反馈模板：先指出学生已把握的观点，再说明需补充的教材依据，最后给出一项可执行的修改建议。"
                 "该草案不会自动评分或发布。",
-                action={"kind": "open_assignments", "label": "在教学任务中确认量规", "href": "/assignments", "requires_confirmation": True},
-                data={"rubric_ready": True, "chapter_id": context.chapter_id},
+                status="advice_ready",
+                action={"kind": "open_assignments", "label": "进入教学任务设置（确认量规）", "href": "/assignments", "requires_confirmation": True, "rubric": rubric},
+                data={"rubric_ready": True, "chapter_id": context.chapter_id, "rubric": rubric},
             )
         if call.name == "prepare_follow_up":
             if not context.course_id:
@@ -977,7 +1107,11 @@ class PlanningAgent:
             "generate_all_artifacts",
         }:
             if not context.course_id or not context.chapter_id:
-                return ToolResult("未识别到具体教材专题，暂不能启动备考工作流。")
+                return ToolResult(
+                    "未识别到具体教材专题，暂不能启动备课工作流。",
+                    status="needs_input",
+                    action={"kind": "select_context", "label": "选择教材专题", "href": "/courses", "requires_confirmation": False},
+                )
             latest = self.db.scalars(
                 select(AgentRun)
                 .where(
@@ -1010,11 +1144,17 @@ class PlanningAgent:
             output_types = output_map[call.name]
             if not output_types:
                 return ToolResult("当前课纲已经生成，可继续选择 PPT、教案或课堂互动。", data={"run_id": latest.id})
+            output_labels = {
+                "ppt": "教学 PPT",
+                "lesson_plan": "完整教案",
+                "classroom_activities": "课堂活动",
+            }
+            output_label = "、".join(output_labels.get(item, item) for item in output_types)
             return ToolResult(
-                f"已找到当前专题的已确认课纲，准备生成：{'、'.join(output_types)}。",
+                f"已找到当前专题的已确认课纲，准备生成：{output_label}。",
                 action={
                     "kind": "generate_artifacts",
-                    "label": f"开始生成{'全部教学成果' if len(output_types) > 1 else output_types[0]}",
+                    "label": f"开始生成{'全部教学成果' if len(output_types) > 1 else output_label}",
                     "href": "",
                     "run_id": latest.id,
                     "output_types": output_types,

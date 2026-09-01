@@ -16,7 +16,10 @@ from app.models.authority_discovery import DiscoveryJob
 from app.api.v1.endpoints.ai import _agent_intent, _chat_question_with_history
 from app.schemas.ai import AiWorkspaceAssistRequest
 from app.services.agent_context_service import AgentContextService
+from app.services.agent_runtime import AgentRuntime
+from app.services.agent_execution_service import AgentExecutionService
 from app.services.planning_agent import PlanningAgent, ToolCall
+from app.services.agent_tool_registry import invoke_registered_tool
 from app.services.ai_service import LangChainGenerator
 from app.services.llm_compat import clean_model_text
 
@@ -471,8 +474,10 @@ def test_workspace_agent_persists_execution_and_supports_retry(client: TestClien
     assert execution is not None
     assert execution.status == "completed"
     assert execution.plan["tools"]
+    assert execution.plan["iteration"] >= 1
     assert execution.tool_results
     assert execution.result["summary"]
+    assert '"status": "replanning"' in response.text
 
     history = client.get("/api/v1/ai/workspace/agent/executions", headers=headers)
     assert history.status_code == 200
@@ -481,6 +486,72 @@ def test_workspace_agent_persists_execution_and_supports_retry(client: TestClien
     retried = client.post(f"/api/v1/ai/workspace/agent/executions/{execution.id}/retry", headers=headers)
     assert retried.status_code == 200
     assert retried.json()["data"]["retry_of_execution_id"] == execution.id
+
+
+def test_runtime_replan_keeps_unexecuted_original_steps() -> None:
+    previous = [
+        ToolCall("inspect_context", "确认上下文"),
+        ToolCall("inspect_tasks", "读取任务"),
+        ToolCall("draft_study_plan", "制定学习计划"),
+    ]
+    replanned = [ToolCall("draft_study_plan", "根据结果制定学习计划")]
+
+    merged = AgentRuntime._merge_replanned_candidates(
+        previous,
+        replanned,
+        completed={"inspect_context"},
+        permitted={"inspect_context", "inspect_tasks", "draft_study_plan"},
+    )
+
+    assert [call.name for call in merged] == ["draft_study_plan", "inspect_tasks"]
+
+
+def test_registered_tool_rejects_unknown_arguments(db: Session) -> None:
+    user = User(username="agent_schema_user", password_hash=hash_password("secure-pass-123"), role="student")
+    db.add(user)
+    db.commit()
+    context = AgentContextService(db, user).resolve()
+    result = invoke_registered_tool(
+        PlanningAgent(db, user),
+        name="inspect_context",
+        reason="校验工具参数",
+        arguments={"unexpected": True},
+        question="检查上下文",
+        role="student",
+        context=context,
+    )
+    assert result.status == "failed"
+    assert any("参数格式不正确" in warning for warning in (result.warnings or []))
+
+
+def test_search_materials_accepts_planner_query(db: Session, monkeypatch) -> None:
+    user = User(username="agent_search_schema_user", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="检索测试课程", description="测试课程")
+    db.add_all([user, course])
+    db.flush()
+    chapter = Chapter(course_id=course.id, title="检索测试专题", content="测试教材内容", sort_order=1)
+    db.add(chapter)
+    db.commit()
+    context = AgentContextService(db, user).resolve(course_id=course.id, chapter_id=chapter.id)
+    captured: list[tuple[str, int]] = []
+
+    def fake_retrieve(query: str, **kwargs):
+        captured.append((query, kwargs["top_k"]))
+        return []
+
+    monkeypatch.setattr("app.services.planning_agent.retrieve", fake_retrieve)
+    result = invoke_registered_tool(
+        PlanningAgent(db, user),
+        name="search_materials",
+        reason="检索教材",
+        arguments={"chapter_id": chapter.id, "keyword": "新时代理论课题", "max_results": 7},
+        question="请生成预习问题",
+        role="student",
+        context=context,
+    )
+
+    assert result.status == "completed"
+    assert captured == [("新时代理论课题", 7)]
 
 
 def test_workspace_agent_execution_can_be_deleted_or_cleared_per_user(
@@ -825,6 +896,44 @@ def test_planning_agent_reads_student_state_and_returns_next_step(client: TestCl
     assert '"name": "inspect_learning_state"' in response.text
     assert "任务点" in response.text
     assert "计划执行完成" in response.text
+
+
+def test_planning_agent_returns_concrete_note_improvement_steps(client: TestClient, db: Session) -> None:
+    headers, course_id, chapter_id = prepare_context(db)
+    response = client.post(
+        "/api/v1/ai/workspace/agent/stream",
+        headers=headers,
+        json={
+            "role": "student",
+            "course_id": course_id,
+            "chapter_id": chapter_id,
+            "learning_stage": "preview",
+            "question": "请检查当前专题的个人笔记状态，并给出完善笔记的具体步骤。",
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"name": "draft_note_improvement"' in response.text
+    assert "笔记完善步骤" in response.text
+    assert "教材依据" in response.text
+    assert '"kind": "open_notes"' in response.text
+    execution = db.scalar(select(AgentExecution).order_by(AgentExecution.id.desc()))
+    assert execution is not None
+    assert execution.status == "waiting_user_action"
+
+
+def test_workspace_agent_cancel_endpoint_marks_running_execution(client: TestClient, db: Session) -> None:
+    headers, course_id, chapter_id = prepare_context(db)
+    user = db.scalar(select(User).where(User.username == "ai_student"))
+    assert user is not None
+    context = AgentContextService(db, user).resolve(course_id=course_id, chapter_id=chapter_id)
+    execution = AgentExecutionService(db, user).create(
+        role="student", intent="guided_question", question="测试取消", context=context,
+    )
+    AgentExecutionService(db, user).set_plan(execution, {"steps": []})
+    response = client.post(f"/api/v1/ai/workspace/agent/executions/{execution.id}/cancel", headers=headers)
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "cancelled"
 
 
 def test_planning_agent_without_context_offers_context_selection(client: TestClient, db: Session) -> None:

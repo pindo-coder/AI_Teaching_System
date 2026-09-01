@@ -20,7 +20,7 @@ services:
       MAIL_USE_SSL: ${MAIL_USE_SSL:-true}
       PASSWORD_RESET_URL: ${PASSWORD_RESET_URL:-http://localhost/reset-password}
       EMAIL_VERIFICATION_URL: ${EMAIL_VERIFICATION_URL:-http://localhost/verify-email}
-      CORS_ORIGINS: '["http://localhost"]'
+      CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost"]}'
       JWT_SECRET_KEY: ${JWT_SECRET_KEY:?请在 .env.production 中配置 JWT_SECRET_KEY}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:?请配置初始管理员密码}

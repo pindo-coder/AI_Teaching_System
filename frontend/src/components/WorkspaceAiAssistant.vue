@@ -33,7 +33,7 @@ interface AssistantMessage {
   model?: string
   sources?: AiSource[]
   plan?: AiAgentPlan
-  progress?: Array<{ title: string; status: string }>
+  progress?: Array<{ title: string; status: string; iteration?: number }>
   actions?: AiAgentAction[]
   toolCalls?: Array<{ name: string; title: string; status: string; error?: string; requires_confirmation?: boolean }>
   execution?: AiAgentExecution
@@ -87,6 +87,7 @@ const executions = ref<AiAgentExecution[]>([])
 const serverTemplates = ref<AiAgentTemplate[]>([])
 const executionLoading = ref(false)
 const deletingExecutionId = ref<number | null>(null)
+const expandedActivityIds = ref<Set<number>>(new Set())
 const mediaAssets = ref<AiMediaAsset[]>([])
 const mediaBusy = ref(false)
 const messageList = ref<HTMLElement | null>(null)
@@ -178,8 +179,19 @@ const chatQuickActions = computed<QuickAction[]>(() => {
 
 const renderedMessages = computed(() => messages.value.map((message) => ({
   ...message,
-  rendered: message.role === 'assistant' ? renderTeachingDocument(message.content) : '',
+  rendered: message.role === 'assistant' ? renderTeachingDocument(localizeAgentTerms(message.content)) : '',
 })))
+
+function localizeAgentTerms(content: string) {
+  return content
+    .replace(/invalid arguments for [\w-]+:[^\n]*/g, '工具参数校验未通过，请重试。')
+    .replace(/extra_forbidden/g, '字段不支持')
+    .replace(/classroom_activities/g, '课堂活动')
+    .replace(/lesson_plan/g, '完整教案')
+    .replace(/generate_classroom_activity/g, '生成课堂活动')
+    .replace(/generate_lesson_plan/g, '生成教案')
+    .replace(/generate_ppt/g, '生成教学 PPT')
+}
 
 function loadHistory() {
   try {
@@ -333,7 +345,7 @@ function openTaskCenter() {
   if (taskCenterVisible.value) void loadExecutions()
 }
 function executionStatusLabel(status: AiAgentExecution['status']) {
-  return ({ planning: '正在规划', running: '正在执行', waiting_confirmation: '等待确认', completed: '已完成', failed: '执行异常', cancelled: '已取消' } as Record<AiAgentExecution['status'], string>)[status]
+  return ({ planning: '正在规划', running: '正在执行', waiting_input: '等待补充信息', waiting_confirmation: '等待确认', waiting_user_action: '等待你处理', advice_ready: '建议已生成', completed: '已完成', failed: '执行异常', cancelled: '已取消' } as Record<AiAgentExecution['status'], string>)[status]
 }
 async function retryExecution(execution: AiAgentExecution) {
   if (loadingByMode.value.agent) return
@@ -373,6 +385,15 @@ async function cancelPendingExecution(execution: AiAgentExecution) {
     ElMessage.error(error instanceof Error ? error.message : '取消失败，请稍后重试')
   }
 }
+async function cancelRunningExecution(execution: AiAgentExecution) {
+  try {
+    await aiApi.cancelWorkspaceAgentExecution(execution.id)
+    ElMessage.success('已请求停止本次 Agent 任务')
+    await loadExecutions()
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '停止失败，请稍后重试')
+  }
+}
 async function deleteExecution(execution: AiAgentExecution) {
   if (deletingExecutionId.value !== null) return
   try {
@@ -410,6 +431,64 @@ function generationLabel(message: AssistantMessage) {
   return message.mode === 'agent'
     ? message.progress?.at(-1)?.title || '正在连接 Agent 并准备执行任务'
     : '正在检索教材并生成回答'
+}
+function progressMarker(status: string) {
+  return status === 'completed' ? '✓' : status === 'replanning' ? '↻' : status === 'failed' || status === 'needs_input' ? '!' : '·'
+}
+function progressLabel(progress: { title: string; status: string; iteration?: number }) {
+  return progress.status === 'replanning' && progress.iteration
+    ? `${progress.title}（第 ${progress.iteration} 轮）`
+    : progress.title
+}
+function completedPlanStepCount(plan: AiAgentPlan) {
+  return plan.steps.filter((step) => step.status === 'completed').length
+}
+function toggleActivitySteps(messageId: number) {
+  const next = new Set(expandedActivityIds.value)
+  if (next.has(messageId)) next.delete(messageId)
+  else next.add(messageId)
+  expandedActivityIds.value = next
+}
+function activityExpanded(messageId: number) {
+  return expandedActivityIds.value.has(messageId)
+}
+function stepStatusLabel(status: AiAgentPlan['steps'][number]['status']) {
+  return ({ completed: '已完成', pending: '待执行', running: '执行中', ready: '待开始', needs_input: '待补充', blocked: '已阻塞', advice_ready: '建议已生成', waiting_user_action: '等待你处理' } as Record<AiAgentPlan['steps'][number]['status'], string>)[status]
+}
+function hasFailedVerification(message: AssistantMessage) {
+  return Boolean(message.execution?.result?.verification?.checks?.some((check) => !check.passed))
+}
+function verificationChecks(message: AssistantMessage) {
+  return message.execution?.result?.verification?.checks || []
+}
+function activityCount(message: AssistantMessage) {
+  if (message.plan?.steps?.length) return completedPlanStepCount(message.plan)
+  if (message.execution?.tool_results?.length) return message.execution.tool_results.length
+  if (message.run?.steps?.length) return message.run.steps.filter((step) => step.status === 'completed').length
+  return message.toolCalls?.filter((tool) => tool.status === 'completed').length || 0
+}
+function agentActivityStatus(message: AssistantMessage) {
+  if (message.execution?.status === 'waiting_user_action' || message.execution?.status === 'advice_ready') return 'needs_input'
+  if (message.execution?.status === 'failed' || message.run?.status === 'failed' || message.failed) return 'failed'
+  if (message.execution?.status === 'waiting_input' || message.execution?.status === 'waiting_confirmation' || message.run?.status === 'waiting_confirmation') return 'needs_input'
+  if (message.execution?.status === 'completed' || message.run?.status === 'completed') return 'completed'
+  if (message.progress?.at(-1)?.status) return message.progress.at(-1)!.status
+  if (loading.value) return 'running'
+  return message.plan ? (message.plan.steps.some((step) => step.status === 'pending' || step.status === 'running') ? 'running' : 'completed') : ''
+}
+function agentActivityLabel(message: AssistantMessage) {
+  const status = agentActivityStatus(message)
+  const count = activityCount(message)
+  if (status === 'failed') return message.execution?.error_message || message.run?.error_message || '执行异常，请查看提示'
+  if (status === 'needs_input') {
+    if (message.execution?.status === 'waiting_user_action' || message.execution?.status === 'advice_ready') return '建议已生成 · 等待你编辑保存'
+    return message.execution?.status === 'waiting_confirmation' || message.run?.status === 'waiting_confirmation' ? '等待确认后继续' : '等待补充信息'
+  }
+  if (status === 'completed') return `已完成 · 共执行 ${count} 步`
+  const latest = message.progress?.at(-1)
+  if (latest) return progressLabel(latest)
+  const activeTool = message.toolCalls?.find((tool) => tool.status === 'running')
+  return activeTool ? `正在${activeTool.title}` : generationLabel(message)
 }
 function navigateAction(action: AiAgentAction) {
   if (!action.href) return
@@ -508,6 +587,11 @@ async function watchRun(messageId: number, runId: number) {
 }
 async function executeAction(messageId: number, action: AiAgentAction) {
   if (action.kind !== 'approve_evidence' || !action.run_id) {
+    if (action.kind === 'open_assignments' && (action.draft || action.rubric)) {
+      const payload = encodeURIComponent(JSON.stringify({ draft: action.draft || null, rubric: action.rubric || null }))
+      void router.push({ path: '/assignments', query: { agent_draft: payload } })
+      return
+    }
     navigateAction(action)
     return
   }
@@ -727,7 +811,10 @@ onMounted(() => { void loadTemplates() })
             <el-button size="small" type="primary" @click="confirmPendingExecution(execution)">确认并继续</el-button>
             <el-button size="small" @click="cancelPendingExecution(execution)">取消</el-button>
           </template>
-          <el-button v-else-if="execution.status === 'failed' || execution.status === 'completed'" size="small" type="primary" plain @click="retryExecution(execution)">基于此任务重试</el-button>
+          <template v-else-if="execution.status === 'planning' || execution.status === 'running'">
+            <el-button size="small" type="danger" plain @click="cancelRunningExecution(execution)">停止</el-button>
+          </template>
+          <el-button v-else-if="execution.status === 'failed' || execution.status === 'completed' || execution.status === 'waiting_user_action' || execution.status === 'advice_ready'" size="small" type="primary" plain @click="retryExecution(execution)">基于此任务重试</el-button>
           <el-button
             size="small"
             text
@@ -769,33 +856,28 @@ onMounted(() => { void loadTemplates() })
             </div>
             <div v-else v-html="message.rendered"></div>
           </article>
-          <section v-if="message.role === 'assistant' && message.plan" class="workspace-ai-plan">
-            <strong>{{ message.plan.title }}</strong>
-            <ol>
-              <li v-for="step in message.plan.steps" :key="step.key" :class="`is-${step.status}`"><span></span>{{ step.title }}</li>
+          <section v-if="message.role === 'assistant' && (message.plan || message.execution || message.run || message.progress?.length || (loading && message.id === messages[messages.length - 1]?.id))" class="workspace-ai-activity" :class="`is-${agentActivityStatus(message) || 'running'}`" role="status" aria-live="polite">
+            <button v-if="message.plan?.steps?.length" type="button" class="workspace-ai-activity-toggle" :aria-expanded="activityExpanded(message.id)" @click="toggleActivitySteps(message.id)">
+              <span class="workspace-ai-activity-marker">{{ progressMarker(agentActivityStatus(message)) }}</span>
+              <span class="workspace-ai-activity-label">{{ agentActivityLabel(message) }}</span>
+              <span class="workspace-ai-activity-chevron" aria-hidden="true">{{ activityExpanded(message.id) ? '⌃' : '⌄' }}</span>
+            </button>
+            <template v-else>
+              <span class="workspace-ai-activity-marker">{{ progressMarker(agentActivityStatus(message)) }}</span>
+              <span class="workspace-ai-activity-label">{{ agentActivityLabel(message) }}</span>
+            </template>
+            <ol v-if="message.plan?.steps?.length && activityExpanded(message.id)" class="workspace-ai-activity-details">
+              <li v-for="step in message.plan.steps" :key="step.key" :class="`is-${step.status}`">
+                <span class="workspace-ai-step-dot"></span><span>{{ step.title }}</span><small>{{ stepStatusLabel(step.status) }}</small>
+              </li>
             </ol>
           </section>
-          <section v-if="message.role === 'assistant' && message.toolCalls?.length" class="workspace-ai-tools">
-            <strong>工具调用记录</strong>
-            <span v-for="tool in message.toolCalls" :key="tool.name" :class="`is-${tool.status}`">
-              {{ tool.status === 'completed' ? '✓' : tool.status === 'failed' ? '!' : '·' }} {{ tool.title }}
-            </span>
-          </section>
-          <section v-if="message.role === 'assistant' && message.execution" class="workspace-ai-execution-status">
-            <span>任务 #{{ message.execution.id }}</span>
-            <strong>{{ executionStatusLabel(message.execution.status) }}</strong>
-            <small v-if="message.execution.result?.verified === false">存在可重试工具，已保留其余可用结果</small>
-            <small v-else-if="message.execution.status === 'waiting_confirmation'">Agent 已暂停，等待你确认后才会继续生成</small>
-          </section>
-          <section v-if="message.role === 'assistant' && message.execution?.result?.verification?.checks?.length" class="workspace-ai-verification">
+          <section v-if="message.role === 'assistant' && hasFailedVerification(message)" class="workspace-ai-verification">
             <strong>执行校验</strong>
-            <span v-for="check in message.execution.result.verification.checks" :key="check.key" :class="{ failed: !check.passed }">{{ check.passed ? '✓' : '!' }} {{ check.label }}<small v-if="check.detail">{{ check.detail }}</small></span>
+            <span v-for="check in verificationChecks(message)" :key="check.key" :class="{ failed: !check.passed }">{{ check.passed ? '✓' : '!' }} {{ check.label }}<small v-if="check.detail">{{ check.detail }}</small></span>
           </section>
           <section v-if="message.role === 'assistant' && message.execution?.result?.warnings?.length" class="workspace-ai-warning-list">
             <strong>需要留意</strong><span v-for="warning in message.execution.result.warnings" :key="warning">{{ warning }}</span>
-          </section>
-          <section v-if="message.role === 'assistant' && message.progress?.length" class="workspace-ai-progress">
-            <span v-for="progress in message.progress.slice(-2)" :key="`${progress.title}-${progress.status}`">{{ progress.status === 'completed' ? '✓' : '·' }} {{ progress.title }}</span>
           </section>
           <div v-if="message.role === 'assistant' && message.actions?.length" class="workspace-ai-actions">
             <el-button v-for="action in message.actions" :key="`${action.kind}-${action.href || action.run_id || ''}`" size="small" type="primary" plain :loading="action.status === 'running'" :disabled="action.status === 'completed'" @click="executeAction(message.id, action)">{{ action.label }}</el-button>
@@ -907,7 +989,7 @@ onMounted(() => { void loadTemplates() })
 .is-user .workspace-ai-bubble { color: #fff; background: linear-gradient(135deg, #3164d8, #4a55d5); border-color: transparent; border-bottom-right-radius: 5px; }
 .is-assistant .workspace-ai-bubble { border-bottom-left-radius: 5px; }
 .workspace-ai-bubble > p { margin: 0; font-size: 13px; line-height: 1.75; white-space: pre-wrap; }
-.workspace-ai-bubble :deep(.teaching-document) { color: #33415b; font-size: 15px; line-height: 1.85; }
+.workspace-ai-bubble :deep(.teaching-document) { color: #33415b; font-size: 13px; line-height: 1.7; }
 .workspace-ai-bubble :deep(.teaching-document h3), .workspace-ai-bubble :deep(.teaching-document h4) { margin: 0 0 10px; color: #213b69; font-size: 17px; }
 .workspace-ai-bubble :deep(.teaching-document p) { margin: 0 0 10px; }
 .workspace-ai-bubble :deep(.teaching-document strong) { color: #2e54c4; font-weight: 750; }
@@ -915,21 +997,29 @@ onMounted(() => { void loadTemplates() })
 .workspace-ai-sources span { padding: 3px 6px; color: #5572a7; background: #f1f5fc; border-radius: 5px; }
 .workspace-ai-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .workspace-ai-attachments span { max-width: 220px; overflow: hidden; padding: 3px 7px; color: #315ed5; background: rgba(255,255,255,.9); border-radius: 6px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.workspace-ai-plan { margin-top: 10px; padding: 10px; background: #f6f8ff; border: 1px solid #dde5fb; border-radius: 10px; }
-.workspace-ai-plan > strong { display: block; color: #3853b4; font-size: 12px; }
-.workspace-ai-plan ol { display: grid; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
-.workspace-ai-plan li { display: flex; align-items: center; gap: 6px; color: #6b7890; font-size: 11px; }
-.workspace-ai-plan li span { width: 7px; height: 7px; background: #b6c0d2; border-radius: 50%; }
-.workspace-ai-plan li.is-completed { color: #276949; }.workspace-ai-plan li.is-completed span { background: #40a777; }.workspace-ai-plan li.is-needs_input, .workspace-ai-plan li.is-blocked { color: #a46b14; }.workspace-ai-plan li.is-needs_input span, .workspace-ai-plan li.is-blocked span { background: #e8ad45; }
-.workspace-ai-plan li.is-running { color: #2859ce; }.workspace-ai-plan li.is-running span { background: #3d7cff; box-shadow: 0 0 0 4px rgba(61, 124, 255, .14); animation: workspace-ai-pulse 1s ease-in-out infinite; }
-.workspace-ai-generating { display: flex; align-items: center; gap: 12px; min-height: 72px; padding: 14px 16px; color: #31518a; background: linear-gradient(120deg, #f3f7ff, #ffffff); border: 1px solid #d8e4fb; border-radius: 12px; }
+.workspace-ai-generating { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 7px 0; color: #31518a; }
 .workspace-ai-generating-spinner { display: inline-grid; flex: 0 0 auto; width: 32px; height: 32px; place-items: center; color: #3d70e8; background: #e8f0ff; border-radius: 50%; font-size: 18px; }
 .workspace-ai-generating strong, .workspace-ai-generating small { display: block; }.workspace-ai-generating strong { font-size: 13px; }.workspace-ai-generating small { margin-top: 3px; color: #8290a9; font-size: 11px; }
-.workspace-ai-progress { display: grid; gap: 3px; margin-top: 9px; color: #75839a; font-size: 10px; }.workspace-ai-progress span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.workspace-ai-activity { display: flex; min-width: 0; align-items: center; gap: 7px; margin-top: 10px; color: #71809a; font-size: 11px; line-height: 1.4; }
+.workspace-ai-activity-toggle { display: flex; width: 100%; min-width: 0; align-items: center; gap: 7px; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
+.workspace-ai-activity-marker { display: inline-grid; width: 17px; height: 17px; flex: 0 0 auto; place-items: center; color: #fff; background: #6c82dd; border-radius: 50%; font-size: 10px; font-weight: 700; }
+.workspace-ai-activity-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-ai-activity-chevron { flex: 0 0 auto; margin-left: auto; color: #8b99ad; font-size: 13px; }
+.workspace-ai-activity-details { display: grid; width: 100%; gap: 6px; margin: 5px 0 0 24px; padding: 7px 0 1px; border-top: 1px solid #edf1f7; list-style: none; }
+.workspace-ai-activity-details li { display: flex; min-width: 0; align-items: center; gap: 6px; color: #728098; font-size: 10px; }
+.workspace-ai-activity-details li > span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-ai-activity-details small { margin-left: auto; color: #9aa6b8; font-size: 9px; }
+.workspace-ai-step-dot { width: 6px; height: 6px; flex: 0 0 auto; background: #b9c3d2; border-radius: 50%; }
+.workspace-ai-activity-details li.is-completed { color: #438263; }.workspace-ai-activity-details li.is-completed .workspace-ai-step-dot { background: #4eaf80; }
+.workspace-ai-activity-details li.is-running { color: #3968c9; }.workspace-ai-activity-details li.is-running .workspace-ai-step-dot { background: #4f73df; box-shadow: 0 0 0 3px rgba(79, 115, 223, .13); }
+.workspace-ai-activity-details li.is-blocked, .workspace-ai-activity-details li.is-needs_input { color: #a4661c; }.workspace-ai-activity-details li.is-blocked .workspace-ai-step-dot, .workspace-ai-activity-details li.is-needs_input .workspace-ai-step-dot { background: #d29132; }
+.workspace-ai-activity.is-running .workspace-ai-activity-marker, .workspace-ai-activity.is-replanning .workspace-ai-activity-marker { background: #4f73df; animation: workspace-ai-pulse 1.2s ease-in-out infinite; }
+.workspace-ai-activity.is-completed { color: #2f7a5c; }.workspace-ai-activity.is-completed .workspace-ai-activity-marker { background: #43a878; }
+.workspace-ai-activity.is-failed, .workspace-ai-activity.is-needs_input { color: #a4661c; }.workspace-ai-activity.is-failed .workspace-ai-activity-marker { background: #c45656; }.workspace-ai-activity.is-needs_input .workspace-ai-activity-marker { background: #d29132; }
 @keyframes workspace-ai-pulse { 50% { opacity: .55; transform: scale(.82); } }
 .workspace-ai-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .workspace-ai-run { display: grid; gap: 10px; margin-top: 12px; padding: 12px; background: linear-gradient(145deg, #f5f8ff, #fff); border: 1px solid #dce6fa; border-radius: 12px; }.workspace-ai-run.is-running, .workspace-ai-run.is-queued { border-color: #aebffc; }.workspace-ai-run.is-completed { border-color: #b8e6ce; }.workspace-ai-run.is-failed { border-color: #f2c3c7; }.workspace-ai-run-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.workspace-ai-run-header div { display: grid; gap: 2px; }.workspace-ai-run-header span, .workspace-ai-run-eyebrow { color: #8191aa; font-size: 10px; }.workspace-ai-run-header strong { color: #29466e; font-size: 12px; }.workspace-ai-evidence { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; background: #fbfcff; border: 1px dashed #d7e2f5; border-radius: 8px; }.workspace-ai-evidence strong { width: 100%; color: #52709e; font-size: 10px; }.workspace-ai-evidence span { max-width: 100%; overflow: hidden; padding: 3px 5px; color: #687995; text-overflow: ellipsis; white-space: nowrap; background: #eef4ff; border-radius: 5px; font-size: 10px; }.workspace-ai-run-error { margin: 0; color: #b33c49; font-size: 11px; line-height: 1.55; }.workspace-ai-outline { padding: 11px; background: #fff; border: 1px solid #e5ebf4; border-radius: 10px; }.workspace-ai-outline h4 { margin: 3px 0 5px; color: #263f67; font-size: 14px; }.workspace-ai-outline > p:not(.workspace-ai-run-eyebrow) { margin: 0; color: #65748b; font-size: 11px; line-height: 1.55; }.workspace-ai-outline-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }.workspace-ai-outline-grid > div, .workspace-ai-flow { padding: 8px; background: #f8faff; border-radius: 8px; }.workspace-ai-outline-grid strong, .workspace-ai-flow strong, .workspace-ai-artifacts > strong { display: block; color: #4564a4; font-size: 11px; }.workspace-ai-outline-grid ul { display: grid; gap: 3px; margin: 5px 0 0; padding-left: 16px; color: #66758d; font-size: 10px; line-height: 1.45; }.workspace-ai-flow { display: flex; flex-wrap: wrap; gap: 5px 7px; margin-top: 8px; }.workspace-ai-flow strong { width: 100%; }.workspace-ai-flow span { padding: 3px 5px; color: #677790; background: #fff; border: 1px solid #e4eaf4; border-radius: 5px; font-size: 10px; }.workspace-ai-artifact-actions { display: grid; gap: 7px; }.workspace-ai-artifact-actions p { margin: 0; color: #55677f; font-size: 11px; }.workspace-ai-artifact-actions > div { display: flex; flex-wrap: wrap; gap: 6px; }.workspace-ai-artifacts { display: grid; gap: 6px; padding-top: 2px; }.workspace-ai-artifacts article { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; color: #50627b; background: #fff; border: 1px solid #e3eaf5; border-radius: 8px; font-size: 11px; }
-.workspace-ai-artifacts-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.workspace-ai-tools { display: grid; gap: 4px; margin-top: 8px; padding: 8px 10px; background: #f8faff; border: 1px solid #e5ebf7; border-radius: 8px; }.workspace-ai-tools strong { color: #4564a4; font-size: 11px; }.workspace-ai-tools span { color: #75839a; font-size: 10px; }.workspace-ai-tools span.is-completed { color: #2e8b62; }.workspace-ai-tools span.is-failed { color: #b33c49; }
+.workspace-ai-artifacts-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .workspace-ai-history { min-height: 230px; max-height: min(540px, 52vh); overflow-y: auto; padding: 16px 18px; }
 .workspace-ai-history-heading { display: flex; justify-content: space-between; margin-bottom: 10px; color: #425573; font-size: 12px; }
@@ -943,7 +1033,6 @@ onMounted(() => { void loadTemplates() })
 .workspace-ai-task-item { display: grid; gap: 6px; padding: 11px; background: #fff; border: 1px solid #e2e9f5; border-radius: 10px; }
 .workspace-ai-task-item > div:first-child { display: flex; align-items: center; gap: 6px; color: #8090a9; font-size: 10px; }.workspace-ai-task-item strong { overflow: hidden; color: #30425f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.workspace-ai-task-item small { display: -webkit-box; overflow: hidden; color: #78879c; font-size: 10px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .workspace-ai-task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.workspace-ai-execution-status { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 9px; padding: 7px 9px; color: #6e7d95; background: #f4f7ff; border: 1px solid #dce6fb; border-radius: 8px; font-size: 10px; }.workspace-ai-execution-status strong { color: #3860c2; }.workspace-ai-execution-status small { width: 100%; color: #a06d21; }
 .workspace-ai-verification, .workspace-ai-warning-list { display: grid; gap: 4px; margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 10px; }.workspace-ai-verification { color: #397758; background: #f2fbf6; border: 1px solid #d6efdf; }.workspace-ai-verification > strong, .workspace-ai-warning-list > strong { font-size: 11px; }.workspace-ai-verification span { display: flex; flex-wrap: wrap; gap: 4px; }.workspace-ai-verification span.failed { color: #a46b14; }.workspace-ai-verification small { color: #7e8ca2; }.workspace-ai-warning-list { color: #94631d; background: #fff9ed; border: 1px solid #f2dfb9; }
 
 .workspace-ai-composer { padding: 12px 18px 9px; background: rgba(255,255,255,.95); border-top: 1px solid #e5ebf5; }

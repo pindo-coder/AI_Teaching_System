@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.assignment import (
     AssignmentCreate,
+    AssignmentRubricConfirm,
     AssignmentRecipientRead,
     AssignmentStudentItem,
     StudentAssignmentRead,
@@ -58,3 +59,15 @@ def assignment_recipients(
 def cancel_assignment(assignment_id: int, user: User = Depends(manager), db: Session = Depends(get_db)) -> ApiResponse[dict[str, int]]:
     AssignmentService(db).cancel(assignment_id, user.id, user.role == "admin")
     return ApiResponse(message="任务已撤回", data={"id": assignment_id})
+
+
+@router.post("/{assignment_id}/rubric/confirm", response_model=ApiResponse[TeacherAssignmentRead])
+def confirm_assignment_rubric(
+    assignment_id: int,
+    payload: AssignmentRubricConfirm,
+    user: User = Depends(manager),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TeacherAssignmentRead]:
+    assignment = AssignmentService(db).confirm_rubric(assignment_id, user, payload.rubric)
+    item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
+    return ApiResponse(message="批改量规已确认", data=TeacherAssignmentRead(**item))
