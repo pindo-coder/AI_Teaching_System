@@ -23,7 +23,8 @@ const news = ref<NewsItem[]>([])
 const availableSources = ref<string[]>([])
 const searchKeyword = ref('')
 const selectedSources = ref<string[]>([])
-const timeDays = ref<number | null>(null)
+// 默认只看近 90 天，避免旧 RSS 快照占满“时政要点”；需要历史材料时可手动放宽。
+const timeDays = ref<number | null>(90)
 const sortBy = ref<'latest' | 'relevance'>('latest')
 const currentPage = ref(1)
 const pageSize = ref(10)
@@ -109,7 +110,7 @@ function clearSources() {
 function resetSearch() {
   searchKeyword.value = ''
   selectedSources.value = []
-  timeDays.value = null
+  timeDays.value = 90
   sortBy.value = 'latest'
   void loadNews(true)
 }

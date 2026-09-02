@@ -27,6 +27,11 @@ def test_parse_rss_published_time() -> None:
         assert parsed.tzinfo is None
 
 
+def test_parse_iso_and_chinese_published_time() -> None:
+    assert _parse_time("2026-07-15T08:30:00+08:00") == datetime(2026, 7, 15, 0, 30)
+    assert _parse_time("2026年7月15日 08:30") == datetime(2026, 7, 15, 0, 30)
+
+
 def test_news_note_source_time_uses_business_timezone() -> None:
     html = NewsService._draft_html(
         "测试时政",

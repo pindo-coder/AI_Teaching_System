@@ -7,6 +7,7 @@ from app.models.user import User
 from app.schemas.common import ApiResponse
 from app.schemas.news import NewsItemRead, NewsSearchData, NewsStudyNoteSave, NewsStudyNoteSaveResult, TextbookRelationItem
 from app.services.news_service import NewsService
+from app.core.config import settings
 
 
 router = APIRouter(prefix="/current-affairs", tags=["current-affairs"])
@@ -16,21 +17,26 @@ router = APIRouter(prefix="/current-affairs", tags=["current-affairs"])
 def list_news(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[NewsItemRead]]:
     service = NewsService(db)
     service.refresh_if_stale()
-    return ApiResponse(data=[NewsItemRead.model_validate(item) for item in service.list()])
+    result = service.search(days=settings.news_default_days, page=1, page_size=20)
+    return ApiResponse(data=[NewsItemRead.model_validate(item) for item in result["items"]])
 
 
 @router.post("/refresh", response_model=ApiResponse[list[NewsItemRead]])
 def refresh_news(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[NewsItemRead]]:
     service = NewsService(db)
     service.refresh()
-    return ApiResponse(message="时政要点已更新", data=[NewsItemRead.model_validate(item) for item in service.list()])
+    result = service.search(days=settings.news_default_days, page=1, page_size=20)
+    return ApiResponse(
+        message="时政要点已更新",
+        data=[NewsItemRead.model_validate(item) for item in result["items"]],
+    )
 
 
 @router.get("/search", response_model=ApiResponse[NewsSearchData])
 def search_news(
     q: str = Query(default="", max_length=100),
     source: list[str] | None = Query(default=None),
-    days: int | None = Query(default=None, ge=1, le=365),
+    days: int = Query(default=settings.news_default_days, ge=1, le=365),
     sort: str = Query(default="latest", pattern="^(latest|relevance)$"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=5, le=50),

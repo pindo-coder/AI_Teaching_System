@@ -105,6 +105,12 @@ class Settings(BaseSettings):
     text_chunk_size: int = 800
     text_chunk_overlap: int = 120
     max_upload_size_mb: int = 100
+    # 时政订阅没有统一的推送频率；这些参数控制缓存刷新和默认展示窗口。
+    news_refresh_interval_minutes: int = Field(default=30, ge=1, le=1440)
+    news_default_days: int = Field(default=90, ge=1, le=365)
+    news_max_stale_days: int = Field(default=14, ge=1, le=3650)
+    news_feed_item_limit: int = Field(default=50, ge=1, le=200)
+    news_request_timeout_seconds: int = Field(default=10, ge=2, le=60)
     material_batch_max_items: int = 500
     material_batch_worker_concurrency: int = 2
     # 权威资料发现调度器默认关闭，管理员确认来源白名单后可在 .env 开启。

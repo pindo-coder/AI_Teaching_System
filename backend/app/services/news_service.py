@@ -14,6 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.time import BUSINESS_TIMEZONE, to_business_time, to_utc_naive, utc_now
+from app.core.config import settings
 from app.models.news_item import NewsItem
 from app.models.news_study_note import NewsStudyNote
 from app.models.chapter import Chapter
@@ -81,6 +82,7 @@ def _clean(value: str | None) -> str:
 def _parse_time(value: str | None) -> datetime | None:
     if not value:
         return None
+    value = value.strip()
     try:
         # 中国来源常把 China Standard Time 简写为 CST，而 email.utils
         # 会将 CST 按北美中部时间解释。仅改写末尾的时区 token，避免影响
@@ -89,7 +91,30 @@ def _parse_time(value: str | None) -> datetime | None:
         parsed = parsedate_to_datetime(normalized)
         return to_utc_naive(parsed, naive_timezone=BUSINESS_TIMEZONE)
     except (TypeError, ValueError, OverflowError):
-        return None
+        pass
+    # Atom and newer RSS feeds commonly use ISO-8601 instead of RFC-822.
+    try:
+        iso_value = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+        parsed = datetime.fromisoformat(iso_value)
+        return to_utc_naive(parsed, naive_timezone=BUSINESS_TIMEZONE)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    # 部分中文站点直接返回“2026年9月2日 10:30”。
+    match = re.search(
+        r"(20\d{2})[年./-](\d{1,2})[月./-](\d{1,2})日?\s*"
+        r"(\d{1,2})?:?(\d{2})?(?::(\d{2}))?",
+        value,
+    )
+    if match:
+        try:
+            year, month, day, hour, minute, second = (int(part or 0) for part in match.groups())
+            return to_utc_naive(
+                datetime(year, month, day, hour, minute, second),
+                naive_timezone=BUSINESS_TIMEZONE,
+            )
+        except (TypeError, ValueError, OverflowError):
+            return None
+    return None
 
 
 def _published_time_utc(item: NewsItem) -> datetime | None:
@@ -117,6 +142,24 @@ def _parse_feed(payload: bytes) -> ET.Element:
 class NewsService:
     def __init__(self, db: Session) -> None:
         self.db = db
+
+    @staticmethod
+    def _feed_items(root: ET.Element) -> list[ET.Element]:
+        """Return RSS items and Atom entries using one normalized iteration path."""
+        items = root.findall(".//item") or root.findall(".//{*}item")
+        return items or root.findall(".//{*}entry")
+
+    @staticmethod
+    def _feed_value(item: ET.Element, *names: str) -> str | None:
+        for name in names:
+            value = item.findtext(name) or item.findtext(f"{{*}}{name}")
+            if value:
+                return value
+        if "link" in names:
+            link = item.find("{*}link")
+            if link is not None:
+                return link.attrib.get("href") or link.text
+        return None
 
     def list(self, limit: int = 20) -> list[NewsItem]:
         items = list(self.db.scalars(select(NewsItem)).all())
@@ -295,31 +338,46 @@ class NewsService:
     def refresh(self) -> int:
         created = 0
         # 同一篇稿件可能同时出现在“时政”和“要闻”流中；本轮内也必须去重。
-        known_urls = set(self.db.scalars(select(NewsItem.article_url)).all())
+        existing_by_url = {
+            item.article_url: item for item in self.db.scalars(select(NewsItem)).all()
+        }
         for source_name, source_url in FEEDS:
             try:
-                request = Request(source_url, headers={"User-Agent": "AI-Teaching-System/0.1"})
-                with urlopen(request, timeout=8) as response:
+                # 给 RSS 地址增加时间戳，避免 CDN/反向代理重复返回历史快照。
+                separator = "&" if "?" in source_url else "?"
+                request = Request(
+                    f"{source_url}{separator}_ts={int(utc_now().timestamp())}",
+                    headers={"User-Agent": "AI-Teaching-System/0.1", "Cache-Control": "no-cache"},
+                )
+                with urlopen(request, timeout=settings.news_request_timeout_seconds) as response:
                     root = _parse_feed(response.read())
-                for item in root.findall(".//item")[:20]:
-                    title = _clean(item.findtext("title"))
-                    article_url = _clean(item.findtext("link"))
-                    if not title or not article_url or article_url in known_urls:
+                for item in self._feed_items(root)[:settings.news_feed_item_limit]:
+                    title = _clean(self._feed_value(item, "title"))
+                    article_url = _clean(self._feed_value(item, "link"))
+                    if not title or not article_url:
                         continue
-                    summary = _clean(item.findtext("description"))[:1000] or None
-                    published_time = _parse_time(item.findtext("pubDate"))
-                    self.db.add(NewsItem(
-                        title=title,
-                        summary=summary,
-                        source_name=source_name,
-                        source_url=source_url,
-                        article_url=article_url,
-                        published_time=published_time,
-                        published_time_is_utc=True,
-                        fetched_time=utc_now(),
-                    ))
-                    known_urls.add(article_url)
-                    created += 1
+                    summary = _clean(self._feed_value(item, "description", "summary", "content"))[:1000] or None
+                    published_time = _parse_time(
+                        self._feed_value(item, "pubDate", "published", "updated", "date")
+                    )
+                    existing = existing_by_url.get(article_url)
+                    if existing is None:
+                        existing = NewsItem(
+                            article_url=article_url,
+                            source_name=source_name,
+                            title=title,
+                        )
+                        self.db.add(existing)
+                        existing_by_url[article_url] = existing
+                        created += 1
+                    # 同一链接的稿件可能被媒体补发或修订，不能永久保留首次抓取的旧日期。
+                    existing.title = title
+                    existing.summary = summary
+                    existing.source_name = source_name
+                    existing.source_url = source_url
+                    existing.published_time = published_time
+                    existing.published_time_is_utc = True
+                    existing.fetched_time = utc_now()
             except (OSError, ET.ParseError, ValueError) as exc:
                 logger.warning("news_feed_failed source=%s error=%s", source_name, exc)
         self.db.commit()
@@ -328,7 +386,19 @@ class NewsService:
 
     def refresh_if_stale(self) -> int:
         latest = self.db.scalar(select(NewsItem).order_by(NewsItem.fetched_time.desc()))
-        if latest and latest.fetched_time > utc_now() - timedelta(minutes=30):
+        now = utc_now()
+        recently_fetched = latest and latest.fetched_time > now - timedelta(
+            minutes=settings.news_refresh_interval_minutes
+        )
+        # 不能只看 fetched_time：上游可能返回了“刚抓取但多年未更新”的缓存快照。
+        newest_published = max(
+            (_effective_news_time(item) for item in self.db.scalars(select(NewsItem)).all()),
+            default=None,
+        )
+        feed_is_stale = newest_published is None or newest_published < now - timedelta(
+            days=settings.news_max_stale_days
+        )
+        if recently_fetched and not feed_is_stale:
             return 0
         return self.refresh()
 
