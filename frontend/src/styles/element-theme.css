@@ -1,11 +1,11 @@
 :root {
-  --el-color-primary: var(--blue-600);
-  --el-color-primary-light-3: var(--blue-400);
+  --el-color-primary: var(--brand-primary);
+  --el-color-primary-light-3: var(--brand-primary-hover);
   --el-color-primary-light-5: var(--blue-200);
   --el-color-primary-light-7: var(--blue-100);
-  --el-color-primary-light-8: var(--blue-50);
-  --el-color-primary-light-9: #f4f8fe;
-  --el-color-primary-dark-2: var(--blue-800);
+  --el-color-primary-light-8: var(--brand-primary-soft);
+  --el-color-primary-light-9: var(--brand-primary-soft);
+  --el-color-primary-dark-2: var(--brand-primary-deep);
   --el-color-success: var(--color-success);
   --el-color-warning: var(--color-warning);
   --el-color-danger: var(--color-danger);
@@ -19,8 +19,11 @@
   --el-border-color: var(--line);
   --el-border-color-light: var(--line);
   --el-border-color-lighter: #eef1f6;
-  --el-fill-color-light: var(--blue-50);
+  --el-fill-color-light: var(--brand-primary-soft);
   --el-bg-color-page: var(--bg-page);
+  --el-bg-color: var(--surface-card);
+  --el-text-color-placeholder: var(--ink-400);
+  --el-fill-color-blank: var(--surface-card);
 }
 
 .el-button {

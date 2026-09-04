@@ -13,6 +13,37 @@ export interface StudyNote {
   chapter_title?: string
 }
 
+export type TextbookAnnotationType = 'key_point' | 'concept' | 'question'
+
+export interface TextbookAnnotation {
+  id: number
+  user_id: number
+  course_id: number
+  chapter_id: number
+  block_index: number
+  start_offset: number
+  end_offset: number
+  selected_text: string
+  prefix_text: string
+  suffix_text: string
+  annotation_type: TextbookAnnotationType
+  comment: string
+  chapter_content_hash: string
+  created_time: string
+  updated_time: string
+}
+
+export interface TextbookAnnotationCreate {
+  block_index: number
+  start_offset: number
+  end_offset: number
+  selected_text: string
+  prefix_text: string
+  suffix_text: string
+  annotation_type: TextbookAnnotationType
+  comment?: string
+}
+
 export interface ReviewItem {
   id: number
   course_id: number
@@ -85,5 +116,17 @@ export const studyApi = {
   saveReviewToNotes: (chapterId: number, practiceIds: number[]) => http.post<ApiResponse<StudyNote>>(
     `/study/reviews/${chapterId}/save-to-notes`,
     { practice_ids: practiceIds },
+  ),
+  textbookAnnotations: (chapterId: number) => http.get<ApiResponse<TextbookAnnotation[]>>(
+    `/study/textbook-annotations/chapters/${chapterId}`,
+  ),
+  createTextbookAnnotation: (chapterId: number, payload: TextbookAnnotationCreate) => http.post<ApiResponse<TextbookAnnotation>>(
+    `/study/textbook-annotations/chapters/${chapterId}`,
+    payload,
+  ),
+  updateTextbookAnnotation: (annotationId: number, payload: { annotation_type?: TextbookAnnotationType; comment?: string }) =>
+    http.patch<ApiResponse<TextbookAnnotation>>(`/study/textbook-annotations/${annotationId}`, payload),
+  deleteTextbookAnnotation: (annotationId: number) => http.delete<ApiResponse<{ id: number }>>(
+    `/study/textbook-annotations/${annotationId}`,
   ),
 }

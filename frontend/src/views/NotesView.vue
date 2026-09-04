@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Collection, EditPen, MagicStick, Promotion, Reading, Search, RefreshRight, Notebook, ArrowLeftBold, ArrowRightBold, MoreFilled } from '@element-plus/icons-vue'
+import { MagicStick, Promotion, Search, RefreshRight, Notebook, ArrowDown, Document, Close } from '@element-plus/icons-vue'
 import { studyApi, type NoteRelatedData, type NoteSearchItem, type StudyChatMessage, type StudyNote } from '@/api/study'
 import { renderTeachingDocument } from '@/utils/richText'
 import { aiApi, type AiSource } from '@/api/ai'
@@ -24,6 +24,12 @@ const selectedId = ref<number | null>(null)
 const editorContent = ref('')
 const mode = ref<'edit' | 'preview'>('edit')
 type QuickActionTask = 'note_polish' | 'note_expand' | 'note_outline' | 'note_knowledge_structure' | 'note_real_significance' | 'note_concept_compare'
+const directoryDropdownVisible = ref(false)
+const topicPrompt = ref('')
+const modificationPrompt = ref('')
+const wordLength = ref(1000)
+const noteStyle = ref('通俗易懂')
+const contentDepth = ref('适中')
 type ChatMessage = StudyChatMessage & { pending?: boolean; quickAction?: QuickActionTask; quickLabel?: string; quickSource?: string }
 const chatMessages = ref<ChatMessage[]>([])
 const chatQuestion = ref('')
@@ -36,10 +42,6 @@ const semanticResults = ref<NoteSearchItem[]>([])
 const related = ref<NoteRelatedData>({ related_notes: [], textbook_chunks: [], status: 'ready', message: '' })
 const relatedLoading = ref(false)
 const relatedVisible = ref(false)
-const splitWorkspace = ref<HTMLElement | null>(null)
-const editorRatio = ref(Math.min(72, Math.max(48, Number(localStorage.getItem('notes_editor_ratio')) || 64)))
-const aiCollapsed = ref(localStorage.getItem('notes_ai_collapsed') === 'true')
-const notesDirectoryCollapsed = ref(localStorage.getItem('notes_directory_collapsed') === 'true')
 const richEditor = ref<InstanceType<typeof NoteRichEditor> | null>(null)
 const previewContent = ref<HTMLElement | null>(null)
 const viewFontScale = ref(Number(localStorage.getItem('notes_font_scale')) || 1)
@@ -53,10 +55,33 @@ const createChapterId = ref<number | null>(null)
 const createLoading = ref(false)
 const citationVisible = ref(false)
 const selectedSource = ref<AiSource | null>(null)
-const heroCompact = ref(localStorage.getItem('notes_hero_compact') !== 'false')
 const saveStatus = ref<'saved' | 'unsaved' | 'saving' | 'error'>('saved')
 const lastSavedContent = ref('')
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined
+
+const replaceTasks: QuickActionTask[] = ['note_polish']
+type DiffRow = { type: 'same' | 'remove' | 'add' | 'change'; original?: string; result?: string }
+function cleanGeneratedText(value: string) {
+  return value.replace(/```[\s\S]*?```/g, (block) => block.replace(/```[^\n]*\n?/g, '')).replace(/^#{1,6}\s*/gm, '').replace(/\*\*(.*?)\*\*/g, '$1').trim()
+}
+function splitChineseUnits(value: string) {
+  return cleanGeneratedText(value).split(/(?<=[。！？；!?;])\s*|\n+/).map((item) => item.trim()).filter(Boolean)
+}
+function buildDiffRows(source: string, result: string): DiffRow[] {
+  const left = splitChineseUnits(source)
+  const right = splitChineseUnits(result)
+  const rows: DiffRow[] = []
+  let i = 0; let j = 0
+  while (i < left.length || j < right.length) {
+    if (left[i] === right[j]) { rows.push({ type: 'same', original: left[i] }); i++; j++; continue }
+    const nextLeft = right[j] ? left.indexOf(right[j], i + 1) : -1
+    const nextRight = left[i] ? right.indexOf(left[i], j + 1) : -1
+    if (nextLeft < 0 && nextRight < 0) { rows.push({ type: 'change', original: left[i], result: right[j] }); i++; j++; continue }
+    if (nextLeft >= 0 && (nextRight < 0 || nextLeft - i <= nextRight - j)) { rows.push({ type: 'remove', original: left[i] }); i++; continue }
+    rows.push({ type: 'add', result: right[j] }); j++
+  }
+  return rows
+}
 
 function openCitation(source: AiSource) {
   if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true }
@@ -82,9 +107,7 @@ const noteOutline = computed(() => {
     title: item.textContent?.trim() || `未命名标题 ${index + 1}`,
   }))
 })
-const workspaceStyle = computed(() => aiCollapsed.value
-  ? { gridTemplateColumns: 'minmax(0, 1fr)' }
-  : { gridTemplateColumns: `minmax(420px, ${editorRatio.value}fr) 8px minmax(320px, ${100 - editorRatio.value}fr)` })
+const workspaceStyle = computed(() => ({ gridTemplateColumns: 'minmax(0, 1fr)' }))
 
 async function load() {
   loading.value = true
@@ -107,12 +130,15 @@ function selectNote(note: StudyNote) {
   const content = sanitizeNoteHtml(note.content)
   lastSavedContent.value = content
   editorContent.value = content
+  topicPrompt.value = note.chapter_title || ''
   saveStatus.value = 'saved'
   mode.value = 'edit'
   relatedVisible.value = false
   void loadChatHistory(note.chapter_id)
   void loadRelated(note.chapter_id)
 }
+function toggleDirectory() { directoryDropdownVisible.value = !directoryDropdownVisible.value }
+function closeDirectory() { directoryDropdownVisible.value = false }
 async function loadChatHistory(chapterId: number) {
   chatMessages.value = []
   try { chatMessages.value = (await studyApi.chatHistory(chapterId)).data.data } catch { ElMessage.warning('AI 对话历史暂时无法加载') }
@@ -194,42 +220,11 @@ async function createOrOpenNote() {
     ElMessage.success('章节笔记已创建，可以开始整理')
   } finally { createLoading.value = false }
 }
-function setAiCollapsed(value: boolean) {
-  aiCollapsed.value = value
-  localStorage.setItem('notes_ai_collapsed', String(value))
-}
-function setNotesDirectoryCollapsed(value: boolean) {
-  notesDirectoryCollapsed.value = value
-  localStorage.setItem('notes_directory_collapsed', String(value))
-}
-function setHeroCompact(value: boolean) {
-  heroCompact.value = value
-  localStorage.setItem('notes_hero_compact', String(value))
-}
 async function scrollToOutline(index: number) {
   await nextTick()
   if (mode.value === 'edit') richEditor.value?.scrollToHeading(index)
   else previewContent.value?.querySelectorAll<HTMLElement>('h2, h3')[index]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
-function startResize(event: PointerEvent) {
-  if (aiCollapsed.value || !splitWorkspace.value) return
-  event.preventDefault()
-  const move = (pointer: PointerEvent) => {
-    const rect = splitWorkspace.value!.getBoundingClientRect()
-    const minEditor = Math.min(520, rect.width * .48)
-    const minAi = Math.min(360, rect.width * .34)
-    const editorWidth = Math.min(rect.width - minAi, Math.max(minEditor, pointer.clientX - rect.left))
-    editorRatio.value = Math.round(editorWidth / rect.width * 1000) / 10
-  }
-  const stop = () => {
-    localStorage.setItem('notes_editor_ratio', String(editorRatio.value))
-    window.removeEventListener('pointermove', move)
-    window.removeEventListener('pointerup', stop)
-  }
-  window.addEventListener('pointermove', move)
-  window.addEventListener('pointerup', stop)
-}
-function resetSplit() { editorRatio.value = 64; localStorage.setItem('notes_editor_ratio', '64') }
 function setViewPreference(kind: 'font' | 'line', value: number) {
   if (kind === 'font') { viewFontScale.value = value; localStorage.setItem('notes_font_scale', String(value)) }
   else { viewLineHeight.value = value; localStorage.setItem('notes_line_height', String(value)) }
@@ -249,7 +244,6 @@ function handleEditorAction(command: string) {
     formatBarOpen.value = !formatBarOpen.value
     localStorage.setItem('notes_format_bar_open', String(formatBarOpen.value))
   }
-  else if (command === 'toggle-ai') setAiCollapsed(!aiCollapsed.value)
   else if (command === 'return' && selected.value) void router.push(`/courses/${selected.value.course_id}/chapters/${selected.value.chapter_id}/review`)
   else if (command === 'delete') void remove()
 }
@@ -275,17 +269,28 @@ function useQuickPrompt(taskType: QuickActionTask, label: string) {
     note_real_significance: '请结合本专题教材说明当前笔记涉及理论的现实意义，不延伸到教材外事实。',
     note_concept_compare: '请辨析当前笔记中容易混淆的概念，给出简明对比和记忆提示。',
   }
-  chatQuestion.value = prompts[taskType] || `请帮我完成“${label}”任务。`
+  const detail = modificationPrompt.value.trim()
+  chatQuestion.value = `${prompts[taskType] || `请帮我完成“${label}”任务。`}${detail ? `\n补充要求：${detail}` : ''}`
   const plainContent = notePlainText(editorContent.value)
   quickActionMessageId.value = null
   quickActionSource.value = plainContent
   quickActionTitle.value = label
   quickActionTask.value = taskType
 }
+async function runQuickAction(taskType: QuickActionTask, label: string) {
+  useQuickPrompt(taskType, label)
+  await askAi()
+}
 const quickActionTask = ref<QuickActionTask | null>(null)
 const quickActionTitle = ref('')
 const quickActionSource = ref('')
 const quickActionMessage = computed(() => chatMessages.value.find((message) => message.id === quickActionMessageId.value) || null)
+const canReplaceResult = computed(() => !!quickActionMessage.value?.quickAction && replaceTasks.includes(quickActionMessage.value.quickAction))
+const writingDiffRows = computed(() => {
+  const message = quickActionMessage.value
+  if (!message || !message.quickAction || !replaceTasks.includes(message.quickAction)) return []
+  return buildDiffRows(message.quickSource || '', message.content || '').filter((row) => row.type !== 'same')
+})
 function openWritingCompare(message: ChatMessage) {
   quickActionMessageId.value = message.id
   quickActionTitle.value = message.quickLabel || 'AI 操作'
@@ -293,12 +298,27 @@ function openWritingCompare(message: ChatMessage) {
   writingCompareResult.value = message.content
   writingCompareVisible.value = true
 }
+function dismissWritingResult() {
+  quickActionMessageId.value = null
+  quickActionTask.value = null
+  quickActionTitle.value = ''
+  quickActionSource.value = ''
+  writingCompareVisible.value = false
+}
 function applyWriting(message: ChatMessage, action: 'replace' | 'append') {
   if (!message.content) return
   const generated = sanitizeNoteHtml(renderTeachingDocument(message.content))
   editorContent.value = action === 'replace' ? generated : `${editorContent.value}${generated}`
   mode.value = 'edit'
   ElMessage.success(action === 'replace' ? '已替换到编辑区，请确认后保存' : '已插入笔记末尾，请确认后保存')
+  dismissWritingResult()
+}
+async function generateFromWorkbench() {
+  if (!selected.value) return ElMessage.warning('请先从顶部“我的笔记”选择一个专题')
+  const detail = modificationPrompt.value.trim()
+  if (!detail && !editorContent.value.trim()) return ElMessage.warning('请填写想要整理的内容或修改要求')
+  useQuickPrompt('note_polish', '润色表达')
+  await askAi()
 }
 async function remove() {
   if (!selected.value) return
@@ -322,7 +342,7 @@ async function askAi() {
   const temporaryUser: ChatMessage = { id: -Date.now(), user_id: 0, course_id: note.course_id, chapter_id: note.chapter_id, role: 'user', content: question, model: null, sources: [], created_time: new Date().toISOString(), pending: true }
   const temporaryAssistant: ChatMessage = { id: temporaryUser.id - 1, user_id: 0, course_id: note.course_id, chapter_id: note.chapter_id, role: 'assistant', content: '', model: null, sources: [], created_time: new Date().toISOString(), pending: true, quickAction: selectedQuickTask || undefined, quickLabel: selectedQuickLabel || undefined, quickSource: selectedQuickSource }
   chatMessages.value.push(temporaryUser, temporaryAssistant)
-  if (selectedQuickTask) quickActionMessageId.value = temporaryAssistant.id
+  quickActionMessageId.value = temporaryAssistant.id
   quickActionTask.value = null
   chatQuestion.value = ''
   chatLoading.value = true
@@ -330,8 +350,8 @@ async function askAi() {
   try {
     const noteExcerpt = notePlainText(editorContent.value).slice(0, 6000)
     const history = chatMessages.value.slice(-8, -2).map((item) => `${item.role === 'user' ? '学生' : 'AI'}：${item.content}`).join('\n')
-    const prompt = `用户正在整理“${note.chapter_title || '当前专题'}”的学习笔记。请依据当前专题教材资料，以教材化、清晰的表达回答问题；如资料不足请明确说明。\n\n用户笔记参考：\n${noteExcerpt || '暂无笔记内容'}\n\n本章最近会话（仅用于承接追问）：\n${history || '无'}\n\n用户问题：${question}`
-    await aiApi.assistStream({ course_id: note.course_id, chapter_id: note.chapter_id, learning_stage: 'review', task_type: 'question_answer', question: prompt }, {
+    const prompt = `用户正在整理“${topicPrompt.value.trim() || note.chapter_title || '当前专题'}”的学习笔记。请依据当前专题教材资料，以教材化、清晰的表达回答问题；如资料不足请明确说明。${noteStyle.value ? `\n表达风格：${noteStyle.value}` : ''}${contentDepth.value ? `\n内容深度：${contentDepth.value}` : ''}${wordLength.value ? `\n目标字数：约 ${wordLength.value} 字` : ''}\n\n用户笔记参考：\n${noteExcerpt || '暂无笔记内容'}\n\n本章最近会话（仅用于承接追问）：\n${history || '无'}\n\n用户问题：${question}`
+    await aiApi.assistStream({ course_id: note.course_id, chapter_id: note.chapter_id, learning_stage: 'review', task_type: selectedQuickTask || 'question_answer', question: prompt }, {
       onMeta: (meta) => { temporaryAssistant.model = meta.model },
       onChunk: (text) => { temporaryAssistant.content += text; void scrollChatToBottom() },
       onSources: (sources: AiSource[]) => { temporaryAssistant.sources = sources },
@@ -349,7 +369,7 @@ async function askAi() {
         ? { ...message, quickAction: selectedQuickTask, quickLabel: selectedQuickLabel, quickSource: selectedQuickSource }
         : message
     })
-    if (selectedQuickTask && savedAssistant) quickActionMessageId.value = savedAssistant.id
+    if (savedAssistant) quickActionMessageId.value = savedAssistant.id
   } catch (error: unknown) {
     temporaryAssistant.content = `生成失败：${getErrorMessage(error, 'AI 暂时无法回答，请稍后重试')}`
   } finally {
@@ -376,104 +396,87 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div v-loading="loading" class="notes-knowledge-desk">
-    <header class="notes-hero notes-command-hero" :class="{ compact: heroCompact }">
-      <div class="notes-hero-grid"></div>
-      <div class="notes-command-copy">
-        <div class="notes-value-line"><span></span>个人知识沉淀 · AI 学习书房</div>
-        <div class="notes-hero-tags"><span>教材为本</span><span>自主建构</span><span>智能关联</span></div>
-        <h1>把理论读进来<br><em>把自己的理解写下来</em></h1>
-        <p>围绕教材专题整理观点、标记疑问、关联原文，并让 AI 对话与间隔复习延续每一次思考。</p>
-        <div class="notes-hero-actions">
-          <el-button type="warning" size="large" @click="openCreateDialog">＋ 新建章节笔记</el-button>
-          <el-button size="large" plain @click="router.push('/reviews')"><el-icon><Reading /></el-icon>进入今日复习</el-button>
+  <div v-loading="loading" class="notes-page-replica">
+    <header class="notes-page-header">
+      <div class="notes-page-heading"><span class="eyebrow">NOTE REVIEW</span><h1>笔记复习</h1><p>{{ selected?.chapter_title || '整理你的教材理解，留下可复习的知识线索。' }}</p></div>
+      <el-input v-model="query" class="notes-page-search" :prefix-icon="Search" clearable placeholder="搜索任何内容" @input="semanticSearch" />
+      <div class="notes-page-actions">
+        <div class="notes-directory-menu">
+          <el-button plain @click="toggleDirectory">我的笔记 <el-icon><ArrowDown /></el-icon></el-button>
+          <div v-if="directoryDropdownVisible" class="notes-directory-dropdown">
+            <header><strong>我的笔记</strong><el-button text :icon="Close" aria-label="关闭笔记目录" @click="closeDirectory" /></header>
+            <button v-for="note in filteredNotes" :key="note.id" type="button" :class="{ active: note.id === selectedId }" @click="selectNote(note); closeDirectory()"><strong>{{ note.chapter_title }}</strong></button>
+            <el-empty v-if="!filteredNotes.length" :image-size="42" description="暂无笔记" />
+          </div>
         </div>
-        <div class="notes-live-context">
-          <div><el-icon><Collection /></el-icon><span><small>专题笔记</small><strong>{{ notes.length }} 篇</strong></span></div>
-          <div><el-icon><EditPen /></el-icon><span><small>当前状态</small><strong>{{ selected ? `${wordCount} 字` : '等待落笔' }}</strong></span></div>
-          <div><el-icon><MagicStick /></el-icon><span><small>AI 上下文</small><strong>{{ selected ? '已锁定当前专题' : '选择专题后启用' }}</strong></span></div>
-        </div>
-      </div>
-      <div class="notes-knowledge-loop" aria-label="教材、笔记、AI 对话与复习的知识沉淀回路">
-        <div class="notes-loop-heading"><span>PERSONAL KNOWLEDGE LOOP</span><strong>个人知识沉淀回路</strong></div>
-        <div class="notes-loop-orbit loop-outer"></div><div class="notes-loop-orbit loop-inner"></div>
-        <div class="notes-loop-core"><span>NOTE</span><strong>思想笔记</strong><small>理解 · 表达 · 反思</small></div>
-        <div class="notes-loop-node loop-reading"><el-icon><Reading /></el-icon><strong>教材阅读</strong><small>找到理论依据</small></div>
-        <div class="notes-loop-node loop-writing"><el-icon><EditPen /></el-icon><strong>笔记沉淀</strong><small>形成个人理解</small></div>
-        <div class="notes-loop-node loop-ai"><el-icon><MagicStick /></el-icon><strong>AI 对话</strong><small>追问与关联</small></div>
-        <div class="notes-loop-node loop-review"><el-icon><RefreshRight /></el-icon><strong>间隔复习</strong><small>巩固知识结构</small></div>
-        <span class="notes-loop-pulse pulse-a"></span><span class="notes-loop-pulse pulse-b"></span><span class="notes-loop-pulse pulse-c"></span>
-        <div class="notes-loop-caption"><span></span>{{ selected ? selected.chapter_title : '选择专题，开始建立属于自己的知识体系' }}</div>
+        <el-button class="notes-review-entry" plain @click="router.push('/reviews')"><el-icon><RefreshRight /></el-icon>今日复习</el-button>
+        <el-button type="primary" @click="openCreateDialog">＋ 新建章节笔记</el-button>
       </div>
     </header>
-    <div class="notes-studio-intro"><div><p class="eyebrow">Knowledge Workspace</p><h2>专题笔记工作台</h2></div><div class="notes-studio-intro-actions"><span>左侧查看笔记，右侧集中使用 AI 操作、教材依据和专题对话 · 拖动中线可调整编辑区与 AI 区宽度</span><el-button text type="primary" @click="setHeroCompact(!heroCompact)">{{ heroCompact ? '展开顶部导览' : '收起顶部导览' }}</el-button></div></div>
-    <section class="notes-studio" :class="{ 'notes-directory-collapsed': notesDirectoryCollapsed }">
-      <aside class="notes-notes-panel" aria-label="我的笔记">
-        <header class="notes-notes-heading"><div class="notes-directory-heading-copy"><span>个人知识库</span><h2>我的笔记</h2></div><strong>{{ notes.length }} 篇</strong><el-button text class="notes-directory-toggle" :icon="notesDirectoryCollapsed ? ArrowRightBold : ArrowLeftBold" :aria-expanded="!notesDirectoryCollapsed" :aria-label="notesDirectoryCollapsed ? '展开笔记目录' : '收起笔记目录'" :title="notesDirectoryCollapsed ? '展开笔记目录' : '收起笔记目录'" @click="setNotesDirectoryCollapsed(!notesDirectoryCollapsed)" /></header>
-        <div class="notes-notes-content">
-          <el-button class="create-note-button" type="primary" @click="openCreateDialog">＋ 新建章节笔记</el-button>
-          <el-input v-model="query" :prefix-icon="Search" clearable placeholder="搜索专题或笔记内容" @input="semanticSearch" />
-          <p class="toolbox-hint">支持标题、正文和语义搜索。</p>
-          <div v-if="semanticResults.length" class="toolbox-search-results"><strong>语义相关</strong><button v-for="item in semanticResults" :key="item.id" @click="selectNote(notes.find((note) => note.id === item.id) || notes[0])"><span>{{ item.chapter_title }}</span><small>{{ item.excerpt }}</small></button></div>
-          <div class="notes-index-list"><button v-for="note in filteredNotes" :key="note.id" :class="{ active: selectedId === note.id }" @click="selectNote(note)"><span>{{ note.course_name }}</span><strong>{{ note.chapter_title }}</strong><small>{{ formatBeijingDate(note.updated_time) }}</small></button><el-empty v-if="!filteredNotes.length" :image-size="50" description="暂无匹配笔记" /></div>
-          <div v-if="noteOutline.length" class="note-outline"><strong>当前笔记目录</strong><button v-for="item in noteOutline" :key="`${item.level}-${item.index}`" :class="item.level" @click="scrollToOutline(item.index)"><span>{{ item.index + 1 }}</span>{{ item.title }}</button></div>
+
+    <section class="notes-replica-layout">
+      <aside class="notes-generation-panel notes-generation-panel--slim" aria-label="笔记生成工作台">
+        <header class="notes-generation-heading"><div><h2>专题笔记工作台</h2></div><el-button text :icon="Document" title="查看当前依据" @click="relatedVisible = true" /></header>
+        <div class="notes-form-field"><label for="note-topic">笔记主题 <em>*</em></label><el-input id="note-topic" v-model="topicPrompt" maxlength="120" placeholder="例如：新时代坚持和发展中国特色社会主义" /></div>
+        <div class="notes-form-field"><label for="note-request">修改要求</label><el-input id="note-request" v-model="modificationPrompt" type="textarea" :rows="3" maxlength="500" show-word-limit placeholder="例如：压缩第二段，保留核心观点，语气更简洁。" /></div>
+        <div class="notes-form-grid">
+          <div class="notes-form-field"><label>目标字数</label><el-input-number v-model="wordLength" :min="200" :max="5000" :step="100" controls-position="right" /></div>
+          <div class="notes-form-field"><label>表达风格</label><el-select v-model="noteStyle"><el-option label="通俗易懂" value="通俗易懂" /><el-option label="严谨简洁" value="严谨简洁" /><el-option label="复习提纲" value="复习提纲" /></el-select></div>
         </div>
+        <el-button class="notes-generate-button" type="primary" :loading="chatLoading" @click="generateFromWorkbench">生成笔记建议</el-button>
+        <section class="notes-quick-panel"><header><strong>快捷响应</strong></header><div class="notes-quick-grid"><button v-for="[task, label] in quickActions" :key="task" type="button" :disabled="chatLoading" :class="{ active: quickActionTask === task }" @click="runQuickAction(task, label)"><el-icon><MagicStick /></el-icon><span>{{ label }}</span></button></div></section>
       </aside>
 
-      <section ref="splitWorkspace" class="notes-workspace" :class="{ 'ai-collapsed': aiCollapsed }" :style="workspaceStyle">
-        <main class="note-editor-panel">
-          <template v-if="selected">
-            <header class="note-editor-heading"><div><span>{{ selected.course_name }}</span><h2>{{ selected.chapter_title }}</h2></div><div class="note-editor-actions"><el-button-group><el-button :type="mode === 'edit' ? 'primary' : 'default'" :icon="EditPen" @click="mode = 'edit'">编辑</el-button><el-button :type="mode === 'preview' ? 'primary' : 'default'" @click="mode = 'preview'">预览</el-button></el-button-group><el-dropdown trigger="click" @command="handleEditorAction"><el-button :icon="MoreFilled">工具</el-button><template #dropdown><el-dropdown-menu><el-dropdown-item command="export-markdown">导出 Markdown</el-dropdown-item><el-dropdown-item command="export-docx">导出 Word</el-dropdown-item><el-dropdown-item divided command="toggle-format">{{ formatBarOpen ? '收起格式工具' : '打开格式工具' }}</el-dropdown-item><el-dropdown-item command="toggle-ai">{{ aiCollapsed ? '打开 AI 助手' : '收起 AI 助手' }}</el-dropdown-item><el-dropdown-item command="return">返回当前专题</el-dropdown-item><el-dropdown-item divided command="delete">删除当前笔记</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></header>
-            <div class="note-editor-scroll">
-              <section v-if="formatBarOpen" class="note-format-ribbon">
-                <div class="ribbon-group"><span>文字</span><div @mousedown.prevent><button title="加粗" @click="richEditor?.command('bold')"><strong>B</strong></button><button title="斜体" @click="richEditor?.command('italic')"><em>I</em></button><button title="下划线" @click="richEditor?.command('underline')"><u>U</u></button><button title="清除格式" @click="richEditor?.command('removeFormat')">清除</button></div></div>
-                <div class="ribbon-group"><span>段落</span><div @mousedown.prevent><button @click="richEditor?.setBlock('h2')">标题1</button><button @click="richEditor?.setBlock('h3')">标题2</button><button @click="richEditor?.setBlock('p')">正文</button><button @click="richEditor?.command('insertOrderedList')">编号</button><button @click="richEditor?.command('insertUnorderedList')">列表</button></div></div>
-                <div class="ribbon-group"><span>字号</span><div @mousedown.prevent><button v-for="size in [14, 16, 18, 20, 24]" :key="size" @click="richEditor?.setFontSize(size)">{{ size }}</button></div></div>
-                <div class="ribbon-group"><span>记号笔</span><div class="ribbon-highlights" @mousedown.prevent><button title="黄色重点" style="--highlight: #fff1a8" @click="richEditor?.highlight('#fff1a8')"></button><button title="蓝色概念" style="--highlight: #cde4ff" @click="richEditor?.highlight('#cde4ff')"></button><button title="绿色意义" style="--highlight: #d3f3dc" @click="richEditor?.highlight('#d3f3dc')"></button><button title="红色易错" style="--highlight: #ffd7d7" @click="richEditor?.highlight('#ffd7d7')"></button></div></div>
-                <div class="ribbon-preferences"><el-select :model-value="viewFontScale" size="small" @change="(value: number) => setViewPreference('font', value)"><el-option label="小字号" :value="0.9" /><el-option label="标准字号" :value="1" /><el-option label="大字号" :value="1.12" /><el-option label="特大字号" :value="1.25" /></el-select><el-select :model-value="viewLineHeight" size="small" @change="(value: number) => setViewPreference('line', value)"><el-option label="紧凑行距" :value="1.6" /><el-option label="标准行距" :value="1.9" /><el-option label="宽松行距" :value="2.2" /></el-select></div>
-              </section>
-              <NoteRichEditor v-if="mode === 'edit'" ref="richEditor" v-model="editorContent" :font-scale="viewFontScale" :line-height="viewLineHeight" />
-              <article v-else ref="previewContent" class="note-preview rich-note-content" :style="{ fontSize: `${16 * viewFontScale}px`, lineHeight: String(viewLineHeight) }" v-html="renderedContent"></article>
+      <main class="notes-editor-stage">
+        <template v-if="selected">
+          <header class="notes-editor-topbar">
+            <el-select class="notes-chapter-select" :model-value="selected.chapter_id" disabled>
+              <el-option :label="selected.chapter_title" :value="selected.chapter_id" />
+            </el-select>
+            <div class="notes-toolbar-group">
+              <button type="button" title="改写" @click="runQuickAction('note_polish', '改写')">✎ 改写</button>
+              <button type="button" title="总结" @click="runQuickAction('note_outline', '总结')">✦ 总结</button>
+              <el-dropdown trigger="click">
+                <button type="button" class="toolbar-size-button" title="字号">字号⌄</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-for="size in [14, 16, 18, 20, 24]" :key="size" @click="richEditor?.setFontSize(size)">{{ size }} px</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+              <button type="button" class="toolbar-highlight-button" title="高亮" @mousedown.prevent @click="richEditor?.highlight('#ffd7d7')"><span></span>高亮</button>
+              <button type="button" title="加粗" @mousedown.prevent @click="richEditor?.command('bold')">B</button>
+              <button type="button" title="斜体（选中文字后点击，或先点击再输入）" aria-label="斜体" @mousedown.prevent @click="richEditor?.toggleItalic()"><em>I</em></button>
+              <button type="button" title="下划线" @mousedown.prevent @click="richEditor?.command('underline')"><u>U</u></button>
+              <button type="button" title="无序列表" @mousedown.prevent @click="richEditor?.command('insertUnorderedList')">列表</button>
+              <el-dropdown trigger="click" @command="handleEditorAction">
+                <button type="button" title="更多工具">···</button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="export-docx">导出 Word</el-dropdown-item>
+                    <el-dropdown-item command="export-markdown">导出 Markdown</el-dropdown-item>
+                    <el-dropdown-item divided command="toggle-format">{{ formatBarOpen ? '收起格式工具' : '打开格式工具' }}</el-dropdown-item>
+                    <el-dropdown-item command="return">返回当前专题</el-dropdown-item>
+                    <el-dropdown-item divided command="delete">删除当前笔记</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
-            <footer class="note-editor-footer"><span :class="`save-state ${saveStatus}`">{{ wordCount }} 字 · {{ saveStatusLabel }} · 仅本人可见</span><div><el-button type="primary" :loading="saving" :disabled="saveStatus === 'saved'" @click="save()">立即保存</el-button></div></footer>
-          </template>
-          <section v-else class="notes-empty-editor">
-            <div class="empty-editor-mark"><el-icon><Notebook /></el-icon><span>01</span></div>
-            <p class="eyebrow">Start Your Knowledge Archive</p>
-            <h2>从一个教材专题开始，建立你的第一篇思想笔记</h2>
-            <p>选择专题后，可以自由编辑与标记内容，也可以调用 AI 写作、教材关联和章节对话。</p>
-            <el-button type="primary" size="large" @click="openCreateDialog">＋ 新建章节笔记</el-button>
-            <div class="empty-editor-steps"><span><strong>01</strong>选择教材专题</span><span><strong>02</strong>整理个人理解</span><span><strong>03</strong>关联 AI 与复习</span></div>
-          </section>
-        </main>
-
-        <div v-if="!aiCollapsed" class="notes-splitter" role="separator" aria-label="拖动调整笔记和 AI 区宽度" @pointerdown="startResize" @dblclick="resetSplit"><span></span></div>
-
-        <aside v-if="!aiCollapsed" class="notes-ai-panel">
-          <template v-if="selected">
-            <header class="notes-ai-heading"><div class="ai-icon"><el-icon :size="21"><MagicStick /></el-icon></div><div><h2>笔记 AI 助手</h2><p>本章会话 · 自动承接最近追问</p></div><el-tooltip content="收起 AI 区"><el-button text :icon="ArrowRightBold" @click="setAiCollapsed(true)" /></el-tooltip><el-button text class="notes-ai-context-button" @click="relatedVisible = true">依据<span v-if="related.textbook_chunks.length || related.related_notes.length" class="notes-ai-context-count">{{ related.textbook_chunks.length + related.related_notes.length }}</span></el-button><el-button text :icon="RefreshRight" @click="clearChat">清空</el-button></header>
-            <div ref="chatScroll" class="notes-chat-history"><el-empty v-if="!chatMessages.length && !chatLoading" :image-size="64" description="在这里提问，历史会自动保存" /><article v-for="message in chatMessages" :key="message.id" class="notes-chat-message" :class="message.role"><span class="chat-role">{{ message.role === 'user' ? '我' : 'AI 生成内容' }}</span><div class="chat-bubble"><span v-if="message.role === 'user'">{{ message.content }}</span><template v-else><article class="teaching-document" v-html="renderTeachingDocument(message.content)"></article><span v-if="message.pending && chatLoading" class="stream-cursor" aria-label="正在生成"></span><div v-if="message.sources.length" class="answer-sources chat-sources"><div class="source-heading"><strong>资料依据</strong><span v-if="message.model">{{ message.model }}</span></div><button v-for="(source, index) in message.sources" :key="`${message.id}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (source.source_type !== 'pdf' || !source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.source_type === 'pdf' && source.document_id && source.pdf_page_start" class="source-open">核对原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div><div v-if="message.quickAction && message.content" class="chat-writing-actions"><el-button size="small" :disabled="message.pending || chatLoading" @click="openWritingCompare(message)">对比原文</el-button><el-button size="small" :disabled="message.pending || chatLoading" @click="applyWriting(message, 'append')">插入文末</el-button><el-button size="small" type="primary" :disabled="message.pending || chatLoading" @click="applyWriting(message, 'replace')">替换正文</el-button></div></template></div></article></div>
-            <div class="notes-chat-input-wrap">
-              <div class="notes-ai-quick-prompts" aria-label="AI 快速提问"><span>快速提问</span><button v-for="[task, label] in quickActions" :key="task" type="button" :disabled="chatLoading" @click="useQuickPrompt(task, label)">{{ label }}</button></div>
-              <div class="notes-chat-input"><el-input v-model="chatQuestion" type="textarea" :rows="3" maxlength="2000" show-word-limit placeholder="结合当前笔记向 AI 提问……" @keydown.ctrl.enter="askAi" /><el-button type="primary" :icon="Promotion" :loading="chatLoading" @click="askAi">发送</el-button></div>
-            </div>
-          </template>
-          <section v-else class="notes-empty-ai">
-            <div class="empty-ai-core"><el-icon><MagicStick /></el-icon><span>AI</span></div>
-            <small>CHAPTER AI CONTEXT</small>
-            <h3>选择笔记后开启专题对话</h3>
-            <p>AI 将围绕当前专题教材、你的笔记和最近会话回答，不会混入其他章节内容。</p>
-            <div><span>教材依据</span><span>连续追问</span><span>历史保存</span></div>
-          </section>
-        </aside>
-      </section>
+          </header>
+          <section v-if="formatBarOpen" class="note-format-ribbon notes-format-ribbon-replica"><div class="ribbon-group"><span>文字</span><div @mousedown.prevent><button @click="richEditor?.command('removeFormat')">清除格式</button><button @click="richEditor?.setBlock('h2')">标题</button><button @click="richEditor?.setBlock('p')">正文</button></div></div><div class="ribbon-preferences"><el-select :model-value="viewFontScale" size="small" @change="(value: number) => setViewPreference('font', value)"><el-option label="标准字号" :value="1" /><el-option label="大字号" :value="1.12" /></el-select><el-select :model-value="viewLineHeight" size="small" @change="(value: number) => setViewPreference('line', value)"><el-option label="标准行距" :value="1.9" /><el-option label="宽松行距" :value="2.2" /></el-select></div></section>
+          <div class="notes-editor-canvas"><NoteRichEditor v-if="mode === 'edit'" ref="richEditor" v-model="editorContent" :font-scale="viewFontScale" :line-height="viewLineHeight" /><article v-else ref="previewContent" class="note-preview rich-note-content" :style="{ fontSize: `${16 * viewFontScale}px`, lineHeight: String(viewLineHeight) }" v-html="renderedContent"></article></div>
+          <section v-if="quickActionMessage || chatLoading" class="notes-result-card"><header><div><span>生成结果</span><strong>{{ quickActionMessage?.quickLabel || quickActionTitle || '当前专题建议' }}</strong></div><span v-if="chatLoading" class="notes-result-status">正在生成</span><span v-else>请核对教材依据</span></header><div v-if="chatLoading && !quickActionMessage?.content" class="result-loading"><i></i><i></i><i></i></div><template v-else-if="quickActionMessage"><div v-if="canReplaceResult" class="notes-diff-view"><p class="notes-diff-hint">仅显示发生变化的句子，未变化内容已隐藏</p><div v-for="(row, index) in writingDiffRows" :key="`${row.type}-${index}`" class="notes-diff-row" :class="`is-${row.type}`"><span class="notes-diff-badge">{{ row.type === 'remove' ? '原文' : row.type === 'add' ? '新增' : '修改前' }}</span><p v-if="row.original">{{ row.original }}</p><span v-if="row.type === 'change'" class="notes-diff-arrow">→</span><p v-if="row.result" class="notes-diff-new">{{ row.result }}</p></div><el-empty v-if="!writingDiffRows.length" :image-size="42" description="未检测到明显变化" /></div><article v-else class="teaching-document notes-result-document" v-html="renderTeachingDocument(quickActionMessage.content)"></article><footer><el-button size="small" @click="openWritingCompare(quickActionMessage)">查看完整对比</el-button><el-button v-if="canReplaceResult" size="small" type="primary" @click="applyWriting(quickActionMessage, 'replace')">接受修改</el-button><el-button size="small" @click="applyWriting(quickActionMessage, 'append')">插入文末</el-button><el-button text size="small" @click="dismissWritingResult">放弃</el-button></footer></template></section>
+          <footer class="notes-editor-footer"><span :class="`save-state ${saveStatus}`">{{ wordCount }} 字 · {{ saveStatusLabel }}</span><div><el-button text @click="mode = mode === 'edit' ? 'preview' : 'edit'">{{ mode === 'edit' ? '预览' : '继续编辑' }}</el-button><el-button @click="exportNote('docx')"><el-icon><Document /></el-icon> 导出 Word</el-button><el-button type="primary" :loading="saving" :disabled="saveStatus === 'saved'" @click="save()">保存</el-button></div></footer>
+        </template>
+        <section v-else class="notes-empty-editor"><el-icon :size="38"><Notebook /></el-icon><h2>选择一个专题开始整理</h2><p>从顶部“我的笔记”打开已有笔记，或创建一篇新的章节笔记。</p><el-button type="primary" @click="openCreateDialog">新建章节笔记</el-button></section>
+      </main>
     </section>
     <el-dialog v-model="createDialogVisible" title="新建章节笔记" width="480px">
       <el-form label-position="top"><el-form-item label="选择教材"><el-select v-model="createCourseId" style="width:100%" @change="loadCreateChapters"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="选择专题章节"><el-select v-model="createChapterId" filterable style="width:100%" placeholder="请选择需要整理的章节"><el-option v-for="chapter in availableChapters" :key="chapter.id" :label="`${chapter.title}${notes.some((note) => note.chapter_id === chapter.id) ? '（已有笔记）' : ''}`" :value="chapter.id" /></el-select></el-form-item></el-form><p class="create-note-hint">每个专题保留一篇个人主笔记；如果已经创建，系统会直接打开原笔记。</p><template #footer><el-button @click="createDialogVisible = false">取消</el-button><el-button type="primary" :loading="createLoading" @click="createOrOpenNote">创建并编辑</el-button></template>
     </el-dialog>
     <el-dialog v-model="writingCompareVisible" :title="`${quickActionTitle || 'AI 操作'} · 修改前后对比`" width="min(94vw, 1180px)" top="6vh">
       <div class="writing-compare-grid"><section><header><strong>原始笔记</strong><span>{{ writingCompareSource.length }} 字</span></header><article>{{ writingCompareSource }}</article></section><section><header><strong>AI 建议结果</strong><span>{{ writingCompareResult.length }} 字</span></header><article class="teaching-document" v-html="renderTeachingDocument(writingCompareResult)"></article></section></div>
-      <template #footer><el-button @click="writingCompareVisible = false">继续修改</el-button><el-button v-if="quickActionMessage" @click="applyWriting(quickActionMessage, 'append'); writingCompareVisible = false">插入文末</el-button><el-button v-if="quickActionMessage" type="primary" @click="applyWriting(quickActionMessage, 'replace'); writingCompareVisible = false">采用建议结果</el-button></template>
+      <template #footer><el-button @click="writingCompareVisible = false">继续修改</el-button><el-button v-if="quickActionMessage" @click="applyWriting(quickActionMessage, 'append'); writingCompareVisible = false">插入文末</el-button><el-button v-if="quickActionMessage && canReplaceResult" type="primary" @click="applyWriting(quickActionMessage, 'replace'); writingCompareVisible = false">接受修改</el-button></template>
     </el-dialog>
     <el-drawer v-model="relatedVisible" title="当前依据" direction="rtl" size="380px">
       <div class="related-panel notes-related-drawer-body" v-loading="relatedLoading">

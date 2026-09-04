@@ -64,6 +64,111 @@ def test_long_note_save_is_not_blocked_by_learning_event_payload(client: TestCli
     assert event.event_data == {"content_length": len(content)}
 
 
+def test_textbook_annotations_are_private_and_support_crud(client: TestClient, db: Session) -> None:
+    first_user = User(username="annotation_student", password_hash=hash_password("secure-pass-123"), role="student")
+    second_user = User(username="annotation_outsider", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="习概", description="测试")
+    db.add_all([first_user, second_user, course]); db.flush()
+    chapter = Chapter(
+        course_id=course.id,
+        title="第一章",
+        content="本专题教材正文用于说明核心概念、主要观点和实践要求。",
+        sort_order=1,
+    )
+    db.add(chapter); db.commit()
+    first_headers = {"Authorization": f"Bearer {create_access_token(str(first_user.id))}"}
+    second_headers = {"Authorization": f"Bearer {create_access_token(str(second_user.id))}"}
+
+    created = client.post(
+        f"/api/v1/study/textbook-annotations/chapters/{chapter.id}",
+        headers=first_headers,
+        json={
+            "block_index": 0,
+            "start_offset": 10,
+            "end_offset": 14,
+            "selected_text": "核心概念",
+            "prefix_text": "教材正文用于说明",
+            "suffix_text": "、主要观点和实践要求。",
+            "annotation_type": "concept",
+            "comment": "注意概念之间的关系",
+        },
+    )
+    assert created.status_code == 201
+    annotation = created.json()["data"]
+    assert annotation["course_id"] == course.id
+    assert annotation["annotation_type"] == "concept"
+    assert len(annotation["chapter_content_hash"]) == 64
+
+    listed = client.get(
+        f"/api/v1/study/textbook-annotations/chapters/{chapter.id}",
+        headers=first_headers,
+    )
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["data"]] == [annotation["id"]]
+    assert client.get(
+        f"/api/v1/study/textbook-annotations/chapters/{chapter.id}",
+        headers=second_headers,
+    ).json()["data"] == []
+
+    overlapping = client.post(
+        f"/api/v1/study/textbook-annotations/chapters/{chapter.id}",
+        headers=first_headers,
+        json={
+            "block_index": 0,
+            "start_offset": 11,
+            "end_offset": 15,
+            "selected_text": "核心概念",
+            "annotation_type": "key_point",
+        },
+    )
+    assert overlapping.status_code == 409
+
+    updated = client.patch(
+        f"/api/v1/study/textbook-annotations/{annotation['id']}",
+        headers=first_headers,
+        json={"annotation_type": "question", "comment": "为什么这是核心概念？"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["data"]["annotation_type"] == "question"
+    assert updated.json()["data"]["comment"] == "为什么这是核心概念？"
+    assert client.patch(
+        f"/api/v1/study/textbook-annotations/{annotation['id']}",
+        headers=second_headers,
+        json={"comment": "越权修改"},
+    ).status_code == 404
+
+    assert client.delete(
+        f"/api/v1/study/textbook-annotations/{annotation['id']}",
+        headers=second_headers,
+    ).status_code == 404
+    assert client.delete(
+        f"/api/v1/study/textbook-annotations/{annotation['id']}",
+        headers=first_headers,
+    ).status_code == 200
+
+
+def test_textbook_annotation_rejects_text_outside_chapter(client: TestClient, db: Session) -> None:
+    user = User(username="invalid_annotation", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="习概", description="测试")
+    db.add_all([user, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="第一章", content="真实教材正文。", sort_order=1)
+    db.add(chapter); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+
+    response = client.post(
+        f"/api/v1/study/textbook-annotations/chapters/{chapter.id}",
+        headers=headers,
+        json={
+            "block_index": 0,
+            "start_offset": 0,
+            "end_offset": 4,
+            "selected_text": "伪造的文字",
+            "annotation_type": "key_point",
+        },
+    )
+    assert response.status_code == 400
+
+
 def test_review_question_loop(client: TestClient, db: Session, monkeypatch) -> None:
     user = User(username="review_student", password_hash=hash_password("secure-pass-123"), role="student")
     course = Course(name="习概", description="测试")

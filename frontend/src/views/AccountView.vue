@@ -178,4 +178,20 @@ async function copyIdentity() {
 .profile-form :deep(.el-input__prefix .el-icon), .security-icon .el-icon, .device-icon .el-icon { font-size: 19px; filter: drop-shadow(0 1px 0 rgb(255 255 255 / 85%)); }
 @media (max-width: 800px) { .settings-layout { grid-template-columns: 1fr; gap: 16px; }.settings-nav { position: static; display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; padding: 0 0 10px; border-right: 0; border-bottom: 1px solid #eae7ee; }.settings-nav__profile, .settings-nav__footer { grid-column: 1 / -1; }.settings-nav__profile { padding: 0 0 12px; }.settings-nav__footer { display: none; }.settings-nav > button { width: 100%; justify-content: center; padding: 10px 8px; }.settings-nav > button > span { margin-left: 6px; }.settings-nav .nav-arrow { display: none; } }
 @media (max-width: 560px) { .account-heading { align-items: flex-start; flex-direction: column; gap: 10px; }.section-card { padding: 18px 16px; }.info-grid, .email-form-grid, .profile-form-grid { grid-template-columns: 1fr; gap: 12px; }.card-heading { margin-bottom: 16px; }.settings-nav > button { font-size: 12px; }.avatar-editor { align-items: flex-start; gap: 14px; }.avatar-preview { width: 72px; height: 72px; font-size: 24px; }.profile-form-footer { align-items: flex-start; flex-direction: column; }.profile-form-footer .el-button { width: 100%; }.security-row, .preference-row { align-items: flex-start; }.security-row .el-button { flex: none; }.device-current { align-self: center; } }
+
+/* 红色阶覆盖：账号设置页同步使用参考图 Color 10–50。 */
+.account-kicker,
+.settings-nav > button:hover,
+.settings-nav > button.active,
+.settings-nav__footer .el-icon,
+.settings-nav__footer a,
+.settings-exit,
+.info-item .el-button { color: var(--brand-primary); }
+.profile-avatar { background: var(--brand-primary); }
+.card-heading h3, .avatar-copy strong, .profile-summary strong, .info-item strong, .security-row strong, .preference-row strong, .device-row strong { color: var(--ink-900); }
+.settings-nav > button:hover { background: var(--brand-primary-soft); }
+.settings-nav > button.active { background: var(--brand-primary-soft); }
+.security-icon { color: var(--brand-primary); background: var(--brand-primary-soft); }
+.device-icon { color: var(--brand-primary); background: var(--brand-primary-soft); }
+.profile-form :deep(.el-input__wrapper.is-focus), .profile-form :deep(.el-input__wrapper:focus-within), .profile-form :deep(.el-textarea__inner:focus) { border-color: var(--blue-400); box-shadow: 0 0 0 2px rgb(255 167 167 / 24%), inset 0 1px 0 rgb(255 255 255 / 90%), 0 3px 8px rgb(210 75 75 / 12%); }
 </style>

@@ -4,11 +4,8 @@ import { useRouter } from 'vue-router'
 import { Bell, ChatDotRound, Collection, Connection, Document, Reading, TrendCharts } from '@element-plus/icons-vue'
 import { assignmentApi, type StudentAssignment, type TeacherAssignment } from '@/api/assignments'
 import { learningApi } from '@/api/learning'
-import AiLearningPet from '@/components/AiLearningPet.vue'
-import UiHero from '@/components/ui/UiHero.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { DashboardData, LearningStage } from '@/types'
-import type { AiPetAction, AiPetContext } from '@/types/aiPet'
 import { beijingTimestamp, formatBeijingTime } from '@/utils/time'
 
 const auth = useAuthStore()
@@ -38,21 +35,6 @@ const continuePath = computed(() => {
   const chapterId = dashboard.value?.current_chapter?.id
   return courseId && chapterId ? `/courses/${courseId}/chapters/${chapterId}/${currentLearningStage.value || 'preview'}` : '/courses'
 })
-const petContext = computed<AiPetContext>(() => {
-  const nextTask = allPendingAssignments.value[0]
-  const role = auth.user?.role || 'student'
-  return {
-    role,
-    username: auth.user?.username || '',
-    chapterTitle: dashboard.value?.current_chapter?.title || null,
-    learningStage: currentLearningStage.value,
-    learningStatus: learningStatusLabel.value,
-    pendingCount: auth.isTeacher ? activeTeacherAssignments.value.length : allPendingAssignments.value.length,
-    overdueCount: auth.isTeacher ? 0 : allPendingAssignments.value.filter((item) => item.status === 'overdue').length,
-    continuePath: continuePath.value,
-    nextTask: nextTask ? { title: nextTask.title, dueTime: nextTask.due_time, path: taskPath(nextTask) } : null,
-  }
-})
 const quickLinks = computed(() => auth.isTeacher ? [
   { title: '任务管理', description: '发布并查看学生完成情况', path: '/assignments', icon: Bell },
   { title: '教材专题', description: '管理教材与专题内容', path: '/courses', icon: Collection },
@@ -77,7 +59,6 @@ function stageFootprint(stage: LearningStage) {
 function stageStatusClass(stage: LearningStage) {
   return stageFootprint(stage)?.status.replace('_', '-') || 'not-started'
 }
-function handlePetAction(action: AiPetAction) { router.push(action.path) }
 function deadlineClass(task: StudentAssignment) {
   if (task.status === 'overdue') return 'overdue'
   return beijingTimestamp(task.due_time) - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
@@ -96,23 +77,23 @@ onMounted(async () => {
 
 <template>
   <div v-loading="loading" class="dashboard-command-center">
-    <UiHero variant="dashboard">
-      <div class="dashboard-hero-copy">
-        <div class="dashboard-value-line"><span></span>新时代思想 · AI {{ auth.isTeacher ? '教学' : '学习' }}驾驶舱</div>
-        <h1>{{ auth.isTeacher ? '以教材为主线，让每一次教学有迹可循' : `你好，${auth.user?.username}` }}</h1>
-        <p>{{ auth.isTeacher ? '围绕教材专题布置任务、组织课堂互动，并通过真实学习行为掌握教学进展。' : '从教材出发，在真实问题中理解新时代中国，让专题、任务、笔记和时政形成一条学习路径。' }}</p>
-        <div class="dashboard-hero-actions">
+    <section class="dashboard-welcome">
+      <div class="dashboard-welcome-copy">
+        <p class="eyebrow">{{ auth.isTeacher ? '教学概览' : '今日学习' }}</p>
+        <h1>{{ auth.isTeacher ? '把教学安排在清晰的节奏里' : `你好，${auth.user?.username}` }}</h1>
+        <p>{{ auth.isTeacher ? '围绕教材专题安排任务与课堂互动，随时掌握教学进展。' : '从教材出发，沿着专题、任务和笔记继续今天的学习。' }}</p>
+        <div class="dashboard-welcome-actions">
           <el-button type="primary" size="large" @click="router.push(auth.isTeacher ? '/assignments' : continuePath)">{{ auth.isTeacher ? '布置学习任务' : latestProgress ? '继续当前专题' : '开始专题学习' }}</el-button>
-          <el-button v-if="auth.isTeacher" class="dashboard-secondary-action" size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>教材知识图谱</el-button>
-        </div>
-        <div class="dashboard-live-context">
-          <span><small>{{ auth.isTeacher ? '当前教学内容' : '当前学习专题' }}</small><strong>{{ dashboard?.current_chapter?.title || '尚未选择专题' }}</strong></span>
-          <span><small>{{ auth.isTeacher ? '进行中任务' : '待完成任务' }}</small><strong>{{ auth.isTeacher ? activeTeacherAssignments.length : allPendingAssignments.length }} 项</strong></span>
-          <span><small>{{ auth.isTeacher ? '教学工作台' : '学习状态' }}</small><strong>{{ auth.isTeacher ? '任务与专题协同' : learningStatusLabel }}</strong></span>
+          <el-button v-if="auth.isTeacher" size="large" plain @click="router.push('/courses')"><el-icon><Connection /></el-icon>查看教材专题</el-button>
         </div>
       </div>
-      <template #visual><AiLearningPet :context="petContext" :loading="loading" @action="handlePetAction" /></template>
-    </UiHero>
+      <aside class="dashboard-welcome-context">
+        <span class="dashboard-card-kicker">{{ auth.isTeacher ? '当前教学内容' : '当前学习专题' }}</span>
+        <strong>{{ dashboard?.current_chapter?.title || '尚未选择专题' }}</strong>
+        <span class="dashboard-welcome-meta">{{ auth.isTeacher ? `${activeTeacherAssignments.length} 项任务进行中` : `${allPendingAssignments.length} 项任务待完成` }}</span>
+        <el-button text type="primary" @click="router.push(auth.isTeacher ? '/courses' : continuePath)">{{ auth.isTeacher ? '进入专题' : '继续学习' }} →</el-button>
+      </aside>
+    </section>
 
     <section v-if="!auth.isTeacher" class="dashboard-assignment-window" :class="{ empty: !pendingAssignments.length }">
       <div class="assignment-window-heading"><div><p class="eyebrow">教师布置 · 优先处理</p><h2><el-icon><Bell /></el-icon> 待完成任务 <span>{{ allPendingAssignments.length }}</span></h2><p>完成情况由实际学习行为自动统计，无需手动勾选。</p></div><el-button text type="primary" @click="router.push('/assignments')">查看全部任务 →</el-button></div>
@@ -162,6 +143,83 @@ onMounted(async () => {
   width: 100%;
   max-width: var(--page-max-width);
   margin: 0 auto;
+}
+
+.dashboard-welcome {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.42fr);
+  gap: var(--space-8);
+  align-items: stretch;
+  padding: 36px 40px;
+  background: var(--bg-card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-1);
+}
+
+.dashboard-welcome-copy {
+  max-width: 680px;
+}
+
+.dashboard-welcome-copy h1 {
+  max-width: 620px;
+  margin: var(--space-2) 0 var(--space-3);
+  color: var(--ink-900);
+  font-size: clamp(30px, 3vw, 42px);
+  line-height: 1.25;
+}
+
+.dashboard-welcome-copy > p:not(.eyebrow) {
+  max-width: 620px;
+  margin: 0;
+  color: var(--ink-600);
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.dashboard-welcome-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-6);
+}
+
+.dashboard-welcome-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+.dashboard-welcome-context {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-6);
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-input);
+}
+
+.dashboard-welcome-context strong {
+  overflow: hidden;
+  color: var(--ink-900);
+  font-size: var(--fs-card-title);
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.dashboard-welcome-meta {
+  color: var(--ink-500);
+  font-size: var(--fs-meta);
+}
+
+.dashboard-welcome-context .el-button {
+  align-self: flex-start;
+  margin: var(--space-2) 0 0;
+  padding: 0;
 }
 
 .dashboard-hero-copy {
@@ -615,6 +673,10 @@ onMounted(async () => {
 }
 
 @media (max-width: 1023px) {
+  .dashboard-welcome {
+    grid-template-columns: 1fr;
+  }
+
   .dashboard-assignment-list,
   .dashboard-quick-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -641,6 +703,15 @@ onMounted(async () => {
 
   .dashboard-hero-copy h1 {
     font-size: 24px;
+  }
+
+  .dashboard-welcome {
+    gap: var(--space-6);
+    padding: var(--space-6);
+  }
+
+  .dashboard-welcome-copy h1 {
+    font-size: 26px;
   }
 
   .dashboard-hero-copy > p {

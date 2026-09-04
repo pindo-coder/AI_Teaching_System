@@ -9,6 +9,13 @@ import { studyApi } from '@/api/study'
 import type { ReviewAnswerResult, ReviewQuestion, ReviewReferenceItem, StudyNote } from '@/api/study'
 import { notePlainText, sanitizeNoteHtml } from '@/utils/noteContent'
 import { ElMessage } from 'element-plus'
+import { MagicStick } from '@element-plus/icons-vue'
+import NoteRichEditor from '@/components/NoteRichEditor.vue'
+import TextbookAnnotationReader from '@/components/TextbookAnnotationReader.vue'
+import logoUrl from '@/assets/logo1.svg'
+import learningHeroBackground from '@/assets/learning-hero-reference.png'
+import type { AiTaskType } from '@/api/ai'
+import { requestWorkspaceAi } from '@/utils/workspaceAiEvents'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +26,9 @@ const course = ref<CourseDetail | null>(null)
 const chapter = ref<Chapter | null>(null)
 const loading = ref(true)
 const savedNote = ref<StudyNote | null>(null)
+const noteEditing = ref(false)
+const noteDraft = ref('')
+const noteSaving = ref(false)
 const footprint = ref<LearningFootprint | null>(null)
 const practiceDialogVisible = ref(false)
 const practiceLoading = ref(false)
@@ -37,7 +47,7 @@ const practiceReferenceLoading = ref(false)
 const practiceReferenceError = ref('')
 const practiceSavingToNotes = ref(false)
 const practiceSavedToNotes = ref(false)
-const readingContainer = ref<HTMLElement | null>(null)
+const annotationReader = ref<InstanceType<typeof TextbookAnnotationReader> | null>(null)
 let lastReadingPercent = 0
 const contentBlocks = computed(() => formatTextbookParagraphs(chapter.value?.content))
 const savedNoteText = computed(() => notePlainText(savedNote.value?.content || ''))
@@ -71,6 +81,25 @@ const configs: Record<LearningStage, {
   },
 }
 const config = computed(() => configs[stage.value])
+const previewGuideActions: Array<{ label: string; description: string; taskType: AiTaskType; prompt: string }> = [
+  { label: '梳理本章重点', description: '概括专题主旨与学习线索', taskType: 'chapter_summary', prompt: '请用简洁的层级结构梳理当前专题的核心观点。' },
+  { label: '解释核心概念', description: '结合教材原文说明', taskType: 'question_answer', prompt: '请依据当前专题教材解释最重要的核心概念。' },
+  { label: '生成预习问题', description: '带着问题进入课堂', taskType: 'preview_questions', prompt: '请严格依据当前专题教材生成 5 个预习问题。' },
+]
+const chapterHeading = computed(() => {
+  const title = chapter.value?.title?.trim() || ''
+  const match = title.match(/^(专题\s*[0-9一二三四五六七八九十百]+)\s*[—\-:：、]?\s*(.*)$/)
+  if (match) {
+    return {
+      label: match[1].replace(/\s+/g, ''),
+      title: match[2].trim() || title,
+    }
+  }
+  return {
+    label: `专题 ${String(chapter.value?.sort_order || chapter.value?.id || 1).padStart(2, '0')}`,
+    title: title || '当前专题',
+  }
+})
 const stageStatus = computed(() => footprint.value?.status_label || '未开始')
 const orderedChapters = computed(() => [...(course.value?.chapters || [])].sort((left, right) => (
   left.sort_order - right.sort_order || left.id - right.id
@@ -109,8 +138,9 @@ async function loadFootprint() {
   footprint.value = (await learningApi.footprint(courseId.value, chapterId.value, stage.value)).data.data
 }
 
-function trackReading() {
-  const element = readingContainer.value
+function trackReading(event?: Event) {
+  const eventTarget = event?.currentTarget
+  const element = eventTarget instanceof HTMLElement ? eventTarget : annotationReader.value?.getElement()
   if (!element) return
   const hasInternalScroll = element.scrollHeight > element.clientHeight + 1
   let percent: number
@@ -135,6 +165,8 @@ async function load() {
     chapter.value = course.value.chapters.find((item) => item.id === chapterId.value) || null
     if (!chapter.value) return router.replace(`/courses/${courseId.value}`)
     savedNote.value = (await studyApi.note(chapterId.value)).data.data
+    noteEditing.value = false
+    noteDraft.value = sanitizeNoteHtml(savedNote.value?.content || '')
     lastReadingPercent = 0
     await recordEvent('chapter_opened')
     await loadFootprint()
@@ -150,8 +182,43 @@ function finishPracticeAndContinue() {
 function goToStageDirect(target: LearningStage) {
   router.push(`/courses/${courseId.value}/chapters/${chapterId.value}/${target}`)
 }
+function askPreviewGuideAi(action: typeof previewGuideActions[number]) {
+  if (!course.value || !chapter.value) return
+  requestWorkspaceAi({
+    courseId: courseId.value,
+    chapterId: chapterId.value,
+    learningStage: stage.value,
+    taskType: action.taskType,
+    prompt: action.prompt,
+  })
+  ElMessage.success(`已将“${action.label}”填入 AI 工作台`)
+}
 function openNoteWorkspace() {
   void router.push({ path: '/notes', query: { chapter_id: String(chapterId.value) } })
+}
+function startNoteEditing() {
+  noteDraft.value = sanitizeNoteHtml(savedNote.value?.content || '<p><br></p>')
+  noteEditing.value = true
+}
+function cancelNoteEditing() {
+  noteDraft.value = sanitizeNoteHtml(savedNote.value?.content || '')
+  noteEditing.value = false
+}
+async function saveChapterNote() {
+  if (!chapter.value || noteSaving.value) return
+  noteSaving.value = true
+  try {
+    const content = sanitizeNoteHtml(noteDraft.value || '<p><br></p>')
+    savedNote.value = (await studyApi.saveNote(chapterId.value, content)).data.data
+    noteDraft.value = sanitizeNoteHtml(savedNote.value.content)
+    noteEditing.value = false
+    ElMessage.success('章节笔记已保存')
+    void loadFootprint()
+  } catch {
+    ElMessage.error('章节笔记保存失败，请稍后重试')
+  } finally {
+    noteSaving.value = false
+  }
 }
 async function beginPractice() {
   practiceDialogVisible.value = true
@@ -250,31 +317,72 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 <template>
   <div v-loading="loading" class="learning-stage-page">
     <el-button link @click="router.push(`/courses/${courseId}`)">← 返回课程详情</el-button>
+    <header class="learning-hero" :class="`learning-hero-${stage}`" :style="{ backgroundImage: `url(${learningHeroBackground})` }">
+      <div class="learning-hero-logo-wrap">
+        <img class="learning-hero-logo" :src="logoUrl" alt="思政红芯" />
+      </div>
+      <div class="learning-hero-copy">
+        <p class="learning-hero-textbook">{{ course?.name || '习近平新时代中国特色社会主义思想概论' }}</p>
+        <p class="learning-hero-topic"><span>{{ chapterHeading.label }}</span><span aria-hidden="true">—</span>{{ chapterHeading.title }}</p>
+        <div class="learning-hero-meta"><span class="learning-hero-stage">{{ config.title }}</span><span>{{ config.subtitle }}</span></div>
+      </div>
+    </header>
     <nav class="stage-switcher" aria-label="学习阶段">
       <button v-for="item in (['preview', 'review', 'exam'] as LearningStage[])" :key="item" :class="{ active: stage === item }" @click="goToStageDirect(item)">{{ configs[item].title }}</button>
     </nav>
-    <header class="learning-hero" :class="`learning-hero-${stage}`">
-      <div><p class="eyebrow">{{ course?.name }} · {{ chapter?.title }}</p><h1>{{ config.title }}</h1><p>{{ config.subtitle }}</p></div>
-      <div class="stage-progress"><strong>{{ stageStatus }}</strong><span>本阶段学习状态</span></div>
-    </header>
-    <section class="stage-goal-grid"><div v-for="(goal, index) in config.goals" :key="goal" class="stage-goal-card"><span>0{{ index + 1 }}</span><p>{{ goal }}</p></div></section>
+    <section v-if="stage !== 'preview'" class="stage-goal-grid"><div v-for="(goal, index) in config.goals" :key="goal" class="stage-goal-card"><span>0{{ index + 1 }}</span><p>{{ goal }}</p></div></section>
 
-    <section v-if="stage === 'preview'" class="stage-workspace">
-      <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template><div class="guide-grid"><div><strong>本专题</strong><p>{{ chapter?.title }}</p></div><div><strong>阅读方法</strong><p>先找章节主旨，再标记核心概念和重要论述。</p></div><div><strong>预习产出</strong><p>形成至少 3 个问题，带着问题进入课堂。</p></div></div></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材原文预读</span><span class="muted">完整正文可滚动查看 · 阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材原文预读滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+    <section v-if="stage === 'preview'" class="stage-workspace preview-workspace">
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文预读滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <aside class="preview-side" aria-label="专题导览与活动记录">
+        <el-card shadow="never" class="workspace-card preview-guide-card">
+          <template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template>
+          <div class="preview-goal-list"><div v-for="(goal, index) in config.goals" :key="goal" class="preview-goal-item"><span class="preview-goal-index">0{{ index + 1 }}</span><div class="preview-goal-copy"><strong>{{ goal }}</strong><small>{{ previewGuideActions[index].description }}</small></div><button type="button" class="preview-goal-ai" :aria-label="`向 AI ${previewGuideActions[index].label}`" @click="askPreviewGuideAi(previewGuideActions[index])"><el-icon><MagicStick /></el-icon><span>问 AI</span></button></div></div>
+        </el-card>
+        <el-card shadow="never" class="workspace-card preview-activity-card">
+          <template #header><div class="content-heading"><span>活动记录</span><span class="muted">自动记录</span></div></template>
+          <div class="preview-activity-status"><strong>{{ stageStatus }}</strong><span>本阶段学习状态</span></div>
+          <div v-if="footprint?.activities.length" class="preview-activity-list"><div v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`"><span class="preview-activity-dot"></span><span>{{ activity.label }}</span></div></div>
+          <p v-else class="preview-activity-empty">开始阅读教材后，最近活动会显示在这里。</p>
+          <p class="preview-activity-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p>
+        </el-card>
+      </aside>
     </section>
 
     <section v-else-if="stage === 'review'" class="stage-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>教材重点回看</span><span class="muted">阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="教材重点回看滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
-      <el-card shadow="never" class="workspace-card note-workspace"><template #header><div class="content-heading"><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div></template><p class="note-guide">笔记统一在笔记空间编辑，保存后会自动同步到这里并加入间隔复习计划。</p><article v-if="savedNoteText" class="learning-note-preview rich-note-content" v-html="savedNoteHtml"></article><el-empty v-else :image-size="64" description="本章还没有保存笔记" /><div class="learning-note-actions"><el-button type="primary" @click="openNoteWorkspace">进入笔记空间编辑</el-button></div></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材重点回看" reader-hint="选中文字即可添加标注" reader-label="教材重点回看滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card note-workspace">
+        <template #header>
+          <div class="content-heading note-card-heading">
+            <div><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div>
+            <el-button v-if="!noteEditing" text type="primary" @click="startNoteEditing">编辑本章笔记</el-button>
+          </div>
+        </template>
+        <p class="note-guide">巩固阶段可以直接整理笔记；保存后会同步到笔记空间，并加入间隔复习计划。</p>
+        <template v-if="noteEditing">
+          <NoteRichEditor v-model="noteDraft" class="learning-note-editor" />
+          <div class="learning-note-edit-actions">
+            <span>{{ notePlainText(noteDraft).replace(/\s/g, '').length }} 字 · 编辑完成后保存</span>
+            <div><el-button @click="cancelNoteEditing">取消</el-button><el-button type="primary" :loading="noteSaving" @click="saveChapterNote">保存笔记</el-button></div>
+          </div>
+        </template>
+        <template v-else>
+          <article v-if="savedNoteText" class="learning-note-preview rich-note-content" v-html="savedNoteHtml"></article>
+          <el-empty v-else :image-size="64" description="本章还没有保存笔记" />
+          <div class="learning-note-actions">
+            <el-button plain @click="openNoteWorkspace">进入笔记空间</el-button>
+            <el-button type="primary" @click="startNoteEditing">编辑本章笔记</el-button>
+          </div>
+        </template>
+      </el-card>
     </section>
 
     <section v-else class="stage-workspace exam-workspace">
       <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template><div class="exam-task-grid"><div><strong>考点提炼</strong><p>识别章节主旨、核心概念和重要论述。</p></div><div><strong>答题训练</strong><p>按照“概念—观点—依据—意义”组织答案。</p></div><div><strong>薄弱点检查</strong><p>通过错题定位未掌握的知识点。</p></div></div><el-button class="practice-launch-button" type="primary" @click="beginPractice">开始本章练习</el-button></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><template #header><div class="content-heading"><span>核心原文速览</span><span class="muted">完整正文可滚动查看 · 阅读记录会用于生成学习建议</span></div></template><article ref="readingContainer" v-if="contentBlocks.length" class="chapter-text textbook-document textbook-scroll-window" tabindex="0" aria-label="核心原文速览滚动区" @scroll.passive="trackReading"><p v-for="(block, index) in contentBlocks" :key="index">{{ block }}</p></article><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="核心原文速览" reader-hint="选中文字即可添加标注" reader-label="核心原文速览滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
     </section>
 
-    <section class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>
+    <section v-if="stage !== 'preview'" class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>
     <footer class="learning-footer">
       <div class="learning-footer-copy"><span>系统会记录学习足迹，用于生成更合适的下一步建议。</span><small>{{ navigationHint }}</small></div>
       <div class="learning-footer-actions">
@@ -313,3 +421,363 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.learning-stage-page {
+  display: grid;
+  gap: 18px;
+}
+
+.learning-stage-page > .el-button {
+  justify-self: start;
+  height: 20px;
+  margin-bottom: -8px;
+  color: #7b6f73;
+  font-size: 12px;
+}
+
+.learning-hero {
+  position: relative;
+  display: grid;
+  grid-template-columns: 94px minmax(0, 1fr);
+  align-items: center;
+  gap: 26px;
+  min-height: 164px;
+  margin: 0;
+  padding: 20px 32px;
+  overflow: hidden;
+  color: #251c20;
+  background-color: #fff7f2;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  border: 1px solid #f3d5d0;
+  border-radius: 20px;
+  box-shadow: 0 12px 26px rgba(98, 46, 48, .14);
+}
+
+.learning-hero::before {
+  display: none;
+}
+
+.learning-hero-logo-wrap,
+.learning-hero-copy,
+.stage-progress {
+  position: relative;
+  z-index: 1;
+}
+
+.learning-hero-logo-wrap {
+  display: grid;
+  place-items: center;
+  align-self: stretch;
+}
+
+.learning-hero-logo {
+  display: block;
+  width: 86px;
+  height: 98px;
+  object-fit: contain;
+}
+
+.learning-hero-copy {
+  min-width: 0;
+}
+
+.learning-hero-textbook {
+  margin: 0;
+  color: #ed2028;
+  font-size: clamp(22px, 2.2vw, 36px);
+  font-weight: 760;
+  letter-spacing: .01em;
+  line-height: 1.2;
+}
+
+.learning-hero-topic {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  margin: 8px 0 0;
+  color: #201b1d;
+  font-size: clamp(16px, 1.5vw, 22px);
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.learning-hero-topic span:first-child {
+  font-weight: 760;
+}
+
+.learning-hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin-top: 10px;
+  color: #725d61;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.learning-hero-stage {
+  padding: 4px 10px;
+  color: #b52329;
+  background: rgba(255, 238, 233, .86);
+  border: 1px solid rgba(224, 91, 85, .28);
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.stage-progress {
+  min-width: 146px;
+  padding: 14px 17px;
+  background: rgba(255, 250, 247, .74);
+  border: 1px solid rgba(207, 85, 78, .24);
+  border-radius: 13px;
+  box-shadow: 0 4px 12px rgba(115, 48, 50, .08);
+  text-align: center;
+}
+
+.stage-progress strong {
+  color: #a6252b;
+  font-size: 20px;
+  line-height: 1.15;
+}
+
+.stage-progress span {
+  display: block;
+  margin-top: 8px;
+  color: #856c70;
+  font-size: 13px;
+}
+
+.stage-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin: 0;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #dedede;
+  border-radius: 14px;
+  box-shadow: 0 4px 10px rgba(39, 39, 39, .14);
+}
+
+.stage-switcher button {
+  min-height: 42px;
+  padding: 6px 12px;
+  color: #2f2b2d;
+  background: transparent;
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  transition: background .18s ease, color .18s ease, transform .18s ease;
+}
+
+.stage-switcher button:hover {
+  color: #e23c3d;
+  background: #fff2f2;
+}
+
+.stage-switcher button.active {
+  color: #fff;
+  background: #ff252f;
+  box-shadow: 0 7px 14px rgba(255, 37, 47, .2);
+  transform: translateY(-1px);
+}
+
+.stage-goal-grid {
+  margin-top: -2px;
+}
+
+.preview-workspace {
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, .9fr);
+  gap: 20px;
+}
+
+.preview-textbook-card,
+.preview-guide-card,
+.preview-activity-card {
+  min-width: 0;
+}
+
+.preview-textbook-card .textbook-scroll-window {
+  max-height: min(68vh, 680px);
+}
+
+.preview-side {
+  display: grid;
+  align-content: start;
+  gap: 16px;
+  min-width: 0;
+}
+
+.preview-guide-card :deep(.el-card__header),
+.preview-activity-card :deep(.el-card__header) {
+  padding: 14px 16px;
+}
+
+.preview-guide-card :deep(.el-card__body),
+.preview-activity-card :deep(.el-card__body) {
+  padding: 14px 16px;
+}
+
+.preview-goal-list {
+  display: grid;
+  gap: 10px;
+}
+
+.preview-goal-item {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 68px;
+  padding: 9px 10px 9px 12px;
+  background: #fff0f0;
+  border-left: 4px solid #ff2535;
+  border-radius: 9px;
+}
+
+.preview-goal-index {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  color: #ff2535;
+  background: #fff;
+  border-radius: 7px;
+  font-size: 17px;
+  font-weight: 760;
+}
+
+.preview-goal-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.preview-goal-copy strong {
+  overflow: hidden;
+  color: #61517e;
+  font-size: 15px;
+  line-height: 1.45;
+}
+
+.preview-goal-copy small {
+  overflow: hidden;
+  color: #a08fa9;
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-goal-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 32px;
+  padding: 0 9px;
+  color: #d34d66;
+  background: rgba(255, 255, 255, .78);
+  border: 1px solid rgba(219, 122, 143, .42);
+  border-radius: 8px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+}
+
+.preview-goal-ai:hover {
+  background: #fff;
+  border-color: #dc6d83;
+  transform: translateY(-1px);
+}
+
+.preview-goal-ai:focus-visible {
+  outline: 2px solid #dc6d83;
+  outline-offset: 2px;
+}
+
+.preview-goal-ai .el-icon {
+  color: #eb8396;
+}
+
+.preview-activity-status {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #f0e5e5;
+}
+
+.preview-activity-status strong {
+  color: #b52329;
+  font-size: 17px;
+}
+
+.preview-activity-status span,
+.preview-activity-empty {
+  color: #89777a;
+  font-size: 12px;
+}
+
+.preview-activity-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.preview-activity-list > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #5f5559;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.preview-activity-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  background: #ff8589;
+  border-radius: 50%;
+}
+
+.preview-activity-empty {
+  margin: 12px 0;
+  line-height: 1.6;
+}
+
+.preview-activity-next {
+  margin: 12px 0 0;
+  padding-top: 10px;
+  color: #7b6468;
+  border-top: 1px solid #f0e5e5;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+@media (max-width: 767px) {
+  .learning-hero {
+    grid-template-columns: 70px minmax(0, 1fr);
+    gap: 22px;
+    padding: 22px 20px;
+  }
+
+  .learning-hero-logo { width: 66px; height: 80px; }
+  .learning-hero-textbook { font-size: 24px; white-space: normal; }
+  .learning-hero-topic { font-size: 16px; }
+  .learning-hero-meta { margin-top: 10px; }
+  .stage-switcher button { min-height: 44px; padding: 7px 8px; font-size: 14px; }
+}
+</style>

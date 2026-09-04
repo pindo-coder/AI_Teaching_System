@@ -15,10 +15,11 @@ from app.models.course import Course
 from app.models.review_schedule import ReviewSchedule
 from app.models.study_note import StudyNote
 from app.models.study_chat_message import StudyChatMessage
+from app.models.textbook_annotation import TextbookAnnotation
 from app.models.review_practice import ReviewPractice
 from app.rag.retriever import retrieve
 from app.rag.vector_store import delete_study_note_vectors, get_study_note_vector_store, upsert_study_note_vector
-from app.schemas.study import StudyChatHistorySave
+from app.schemas.study import StudyChatHistorySave, TextbookAnnotationCreate, TextbookAnnotationUpdate
 from app.schemas.ai import AiAssistRequest
 from app.services.ai_service import AiService
 
@@ -134,6 +135,87 @@ class StudyService:
         except Exception:
             logger.exception("study_note_vector_upsert_failed note_id=%s", note.id)
         return note
+
+    def list_textbook_annotations(self, user_id: int, chapter_id: int) -> list[TextbookAnnotation]:
+        self.require_chapter(chapter_id)
+        return list(self.db.scalars(select(TextbookAnnotation).where(
+            TextbookAnnotation.user_id == user_id,
+            TextbookAnnotation.chapter_id == chapter_id,
+        ).order_by(TextbookAnnotation.block_index, TextbookAnnotation.start_offset, TextbookAnnotation.id)).all())
+
+    @staticmethod
+    def _normalized_anchor_text(value: str) -> str:
+        return re.sub(r"\s+", "", value)
+
+    def create_textbook_annotation(
+        self,
+        user_id: int,
+        chapter_id: int,
+        payload: TextbookAnnotationCreate,
+    ) -> TextbookAnnotation:
+        chapter = self.require_chapter(chapter_id)
+        selected_text = payload.selected_text.strip()
+        if not selected_text or self._normalized_anchor_text(selected_text) not in self._normalized_anchor_text(chapter.content or ""):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="所选文字已不在当前专题原文中，请刷新后重试")
+        chapter_content_hash = hashlib.sha256((chapter.content or "").encode("utf-8")).hexdigest()
+        overlap = self.db.scalar(select(TextbookAnnotation.id).where(
+            TextbookAnnotation.user_id == user_id,
+            TextbookAnnotation.chapter_id == chapter_id,
+            TextbookAnnotation.block_index == payload.block_index,
+            TextbookAnnotation.chapter_content_hash == chapter_content_hash,
+            TextbookAnnotation.start_offset < payload.end_offset,
+            TextbookAnnotation.end_offset > payload.start_offset,
+        ).limit(1))
+        if overlap is not None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="该段文字已包含个人标注，请先编辑或删除原标注")
+        annotation = TextbookAnnotation(
+            user_id=user_id,
+            course_id=chapter.course_id,
+            chapter_id=chapter.id,
+            block_index=payload.block_index,
+            start_offset=payload.start_offset,
+            end_offset=payload.end_offset,
+            selected_text=selected_text,
+            prefix_text=payload.prefix_text,
+            suffix_text=payload.suffix_text,
+            annotation_type=payload.annotation_type,
+            comment=payload.comment.strip(),
+            chapter_content_hash=chapter_content_hash,
+        )
+        self.db.add(annotation)
+        self.db.commit()
+        self.db.refresh(annotation)
+        return annotation
+
+    def update_textbook_annotation(
+        self,
+        user_id: int,
+        annotation_id: int,
+        payload: TextbookAnnotationUpdate,
+    ) -> TextbookAnnotation:
+        annotation = self.db.scalar(select(TextbookAnnotation).where(
+            TextbookAnnotation.id == annotation_id,
+            TextbookAnnotation.user_id == user_id,
+        ))
+        if annotation is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="教材标注不存在")
+        if payload.annotation_type is not None:
+            annotation.annotation_type = payload.annotation_type
+        if payload.comment is not None:
+            annotation.comment = payload.comment.strip()
+        self.db.commit()
+        self.db.refresh(annotation)
+        return annotation
+
+    def delete_textbook_annotation(self, user_id: int, annotation_id: int) -> None:
+        annotation = self.db.scalar(select(TextbookAnnotation).where(
+            TextbookAnnotation.id == annotation_id,
+            TextbookAnnotation.user_id == user_id,
+        ))
+        if annotation is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="教材标注不存在")
+        self.db.delete(annotation)
+        self.db.commit()
 
     def search_notes(self, user_id: int, query: str, course_id: int | None = None) -> list[dict[str, object]]:
         query = query.strip()

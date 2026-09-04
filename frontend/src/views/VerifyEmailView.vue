@@ -59,9 +59,9 @@ async function submit() {
 </template>
 
 <style scoped>
-.simple-auth-page { display: grid; min-height: 100vh; place-items: center; padding: var(--space-4); background: var(--bg-page); }
-.simple-auth-card { width: min(100%, 440px); padding: 32px; box-shadow: var(--shadow-2); }
-h1 { margin: var(--space-1) 0 var(--space-2); font-size: var(--fs-section); }
+.simple-auth-page { display: grid; min-height: 100vh; place-items: center; padding: clamp(24px, 6vw, 64px) var(--space-4); background: var(--bg-page); }
+.simple-auth-card { width: min(100%, 440px); padding: 28px; border: 1px solid var(--line); border-radius: var(--radius-card); box-shadow: var(--shadow-1); }
+h1 { margin: var(--space-1) 0 var(--space-2); color: var(--ink-900); font-size: var(--fs-section); }
 .muted { color: var(--ink-600); line-height: 1.6; }
 .full-button { width: 100%; }
 .auth-switch { margin: var(--space-6) 0 0; color: var(--ink-600); text-align: center; }

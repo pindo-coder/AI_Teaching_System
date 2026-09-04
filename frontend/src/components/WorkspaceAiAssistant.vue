@@ -22,6 +22,7 @@ import AiMediaComposer from '@/components/AiMediaComposer.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { LearningStage } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
+import type { WorkspaceAiRequest } from '@/utils/workspaceAiEvents'
 
 interface AssistantMessage {
   id: number
@@ -91,6 +92,7 @@ const expandedActivityIds = ref<Set<number>>(new Set())
 const mediaAssets = ref<AiMediaAsset[]>([])
 const mediaBusy = ref(false)
 const messageList = ref<HTMLElement | null>(null)
+const composerInput = ref<{ focus: () => void } | null>(null)
 const role = computed<AiWorkspaceRole>(() => auth.user?.role || 'student')
 const roleLabel = computed(() => ({ student: '学生学习助手', teacher: '教师备课助手', admin: '平台治理助手' }[role.value]))
 const contextLabel = computed(() => {
@@ -784,8 +786,22 @@ async function send(executionId?: number | Event) {
   }
 }
 
+async function applyExternalRequest(request: WorkspaceAiRequest) {
+  switchMode('chat')
+  chatQuestion.value = request.prompt.slice(0, 2000)
+  chatTaskType.value = request.taskType
+  chatQuestionIsUserAuthored.value = false
+  historyVisible.value = false
+  taskCenterVisible.value = false
+  await nextTick()
+  composerInput.value?.focus()
+  if (request.autoSend) await send()
+}
+
 watch(storageScopeKey, loadHistory, { immediate: true })
 onMounted(() => { void loadTemplates() })
+
+defineExpose({ applyExternalRequest })
 </script>
 
 <template>
@@ -927,7 +943,7 @@ onMounted(() => { void loadTemplates() })
     </div>
 
     <div class="workspace-ai-composer">
-      <el-input v-model="question" type="textarea" :rows="2" resize="none" maxlength="2000" :placeholder="composerPlaceholder" @input="resetChatTaskType" @keydown.ctrl.enter.prevent="send()" @keydown.meta.enter.prevent="send()" />
+      <el-input ref="composerInput" v-model="question" type="textarea" :rows="2" resize="none" maxlength="2000" :placeholder="composerPlaceholder" @input="resetChatTaskType" @keydown.ctrl.enter.prevent="send()" @keydown.meta.enter.prevent="send()" />
       <AiMediaComposer v-if="mode === 'chat'" v-model="mediaAssets" :course-id="props.context?.course_id || props.courseId || null" :chapter-id="props.context?.chapter_id || props.chapterId || null" :disabled="loading" @transcribed="appendTranscription" @busy-changed="mediaBusy = $event" />
       <div class="workspace-ai-composer-footer"><div class="workspace-ai-mode-switch" role="tablist" aria-label="AI 工作模式"><button type="button" role="tab" :aria-selected="mode === 'chat'" :class="{ active: mode === 'chat' }" @click="switchMode('chat')"><el-icon><ChatDotRound /></el-icon>Chat<i v-if="loadingByMode.chat"></i></button><button type="button" role="tab" :aria-selected="mode === 'agent'" :class="{ active: mode === 'agent' }" @click="switchMode('agent')"><el-icon><MagicStick /></el-icon>Agent<i v-if="loadingByMode.agent"></i></button></div><span class="workspace-ai-hint">{{ modeHint }}</span><el-button type="primary" :loading="loading" :disabled="mode === 'chat' && mediaBusy" :icon="Promotion" aria-label="发送" @click="send()">发送</el-button></div>
     </div>
@@ -965,7 +981,7 @@ onMounted(() => { void loadTemplates() })
 
 .workspace-ai-scroll { min-height: 230px; max-height: min(540px, 52vh); overflow-y: auto; padding: 20px 18px 12px; scrollbar-color: #b7c6e2 transparent; }
 .workspace-ai-welcome { display: flex; align-items: center; gap: 15px; margin: 2px 0 18px; }
-.workspace-ai-welcome-icon { position: relative; display: grid; width: 58px; height: 58px; flex: 0 0 auto; place-items: center; color: #fff; background: linear-gradient(145deg, #4b58db, #8449c3); border-radius: 17px; box-shadow: 0 10px 23px rgba(75, 88, 219, .25); }
+.workspace-ai-welcome-icon { position: relative; display: grid; width: 58px; height: 58px; flex: 0 0 auto; place-items: center; color: #fff; background: linear-gradient(145deg, #ff8787, #ffa8a8); border-radius: 17px; box-shadow: 0 10px 23px rgba(210, 75, 75, .2); }
 .workspace-ai-welcome-icon .el-icon { font-size: 28px; }
 .workspace-ai-welcome-icon span { position: absolute; right: -6px; bottom: -5px; padding: 2px 5px; color: #fff; background: #a82e4c; border: 2px solid #fff; border-radius: 7px; font-size: 8px; font-weight: 800; }
 .workspace-ai-welcome h2 { margin: 3px 0 6px; color: #1f2f4b; font-size: 22px; line-height: 1.25; }

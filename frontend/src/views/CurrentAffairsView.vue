@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AiAssistData, type AiSource } from '@/api/ai'
@@ -9,7 +9,7 @@ import { newsApi, type NewsItem, type TextbookRelationItem } from '@/api/news'
 import { studyApi } from '@/api/study'
 import type { CourseDetail } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
-import { MagicStick, Refresh, Search } from '@element-plus/icons-vue'
+import { Calendar, MagicStick, Refresh, Search } from '@element-plus/icons-vue'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatBeijingDateTime } from '@/utils/time'
@@ -57,7 +57,7 @@ let aiRequestSequence = 0
 let lastNewsLoadedAt = 0
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
-const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value))
+const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value !== 90 || sortBy.value !== 'latest'))
 function openCitation(source: AiSource) { if (source.source_type === 'pdf' && source.document_id && source.pdf_page_start) { selectedSource.value = source; citationVisible.value = true } else if (source.source_url) window.open(source.source_url, '_blank', 'noopener,noreferrer') }
 function sourceTagType(source: AiSource) { return source.material_type === 'central' ? 'danger' : source.material_type === 'textbook' ? 'primary' : 'success' }
 function formatPublishedTime(value: string | null) {
@@ -171,7 +171,15 @@ function changeTextbook(courseId: number) {
 function refreshWhenReturning() {
   if (document.visibilityState === 'visible' && Date.now() - lastNewsLoadedAt > 30 * 60 * 1000) void loadNews()
 }
+watch(() => route.query.q, (value, previous) => {
+  const next = typeof value === 'string' ? value : ''
+  const before = typeof previous === 'string' ? previous : ''
+  if (next === before) return
+  searchKeyword.value = next
+  void loadNews(true)
+})
 onMounted(() => {
+  searchKeyword.value = typeof route.query.q === 'string' ? route.query.q : ''
   void loadNews()
   void (async () => {
     // 先尝试使用工作台的当前课程，再回退到课程中心中第一个已有章节的教材。
@@ -337,20 +345,18 @@ function openSavedNote() {
 </script>
 
 <template>
-  <div v-loading="loading">
-    <header class="page-header">
-      <div>
-        <p class="eyebrow">时政要点</p>
-        <h1>把现实议题讲回教材</h1>
-        <p>围绕《习近平新时代中国特色社会主义思想概论》做时政主题导入、教材知识关联和课堂讨论生成。</p>
-      </div>
-      <el-button type="primary" @click="router.push('/courses')">返回课程总览</el-button>
+  <div v-loading="loading" class="current-affairs-page">
+    <header class="affairs-page-title">
+      <button type="button" class="affairs-back-button" aria-label="返回课程总览" @click="router.push('/courses')">
+        <span class="affairs-back-triangle" aria-hidden="true"></span>
+      </button>
+      <h1>时政要点</h1>
     </header>
 
     <section class="affairs-layout affairs-layout-single">
       <div>
-        <div class="section-heading"><div><p class="eyebrow">实时更新 · {{ sourceNames.length }} 个来源</p><h2>权威来源时政要点</h2><div v-if="textbookOptions.length" class="affairs-textbook-picker"><span>当前教材</span><el-select v-model="selectedCourseId" size="small" placeholder="选择教材" @change="changeTextbook"><el-option v-for="option in textbookOptions" :key="option.id" :label="option.name" :value="option.id"><span>{{ option.name }}</span><small>{{ option.chapters.length }} 个专题</small></el-option></el-select><span v-if="textbook" class="affairs-textbook-status">已关联 {{ textbook.chapters.length }} 个专题</span></div></div><el-button :icon="Refresh" :loading="refreshing" plain type="primary" @click="refreshNews">刷新时政</el-button></div>
         <section class="news-search-panel">
+          <h2>你好，有什么可以帮助到你的?</h2>
           <div class="news-search-row">
             <el-input v-model="searchKeyword" :prefix-icon="Search" clearable placeholder="搜索政策、主题或关键词，例如：生态文明" @keyup.enter="loadNews(true)" @clear="loadNews(true)" />
             <el-select v-model="timeDays" placeholder="发布时间" clearable @change="loadNews(true)">
@@ -365,22 +371,59 @@ function openSavedNote() {
               <el-option label="按相关度排序" value="relevance" :disabled="!searchKeyword.trim()" />
             </el-select>
             <el-button type="primary" :icon="Search" :loading="newsLoading" @click="loadNews(true)">搜索</el-button>
-            <el-button v-if="hasFilters" @click="resetSearch">重置</el-button>
+            <el-button v-if="searchKeyword.trim() || selectedSources.length || timeDays !== 90 || sortBy !== 'latest'" class="news-reset-button" @click="resetSearch">重置</el-button>
           </div>
           <div v-if="sourceNames.length" class="news-source-filter">
-            <span>媒体来源</span>
+            <span class="news-source-label">媒体来源</span>
             <el-check-tag :checked="selectedSources.length === 0" @change="clearSources">全部</el-check-tag>
             <el-check-tag v-for="source in sourceNames" :key="source" :checked="selectedSources.includes(source)" @change="toggleSource(source)">{{ source }}</el-check-tag>
           </div>
-          <div class="news-search-summary"><span>共找到 <strong>{{ totalNews }}</strong> 条时政内容</span><span v-if="hasFilters">当前条件仅筛选已采集的权威资讯</span></div>
+          <div class="news-search-summary">
+            <span>共找到 <strong>{{ totalNews }}</strong> 条时政内容</span>
+            <span v-if="hasFilters" class="news-filter-note">当前条件仅筛选已采集的权威资讯</span>
+          </div>
+          <div v-if="textbookOptions.length" class="affairs-textbook-picker">
+            <span>关联教材</span>
+            <el-select v-model="selectedCourseId" size="small" placeholder="选择教材" @change="changeTextbook">
+              <el-option v-for="option in textbookOptions" :key="option.id" :label="option.name" :value="option.id">
+                <span>{{ option.name }}</span><small>{{ option.chapters.length }} 个专题</small>
+              </el-option>
+            </el-select>
+            <span v-if="textbook" class="affairs-textbook-status">已关联 {{ textbook.chapters.length }} 个专题</span>
+          </div>
         </section>
-        <el-card v-loading="newsLoading" shadow="never" class="news-list">
-          <article v-for="item in news" :key="item.id" class="news-item"><div class="news-item-body"><h3>{{ item.title }}</h3><p>{{ item.summary || '打开原文查看详细内容。' }}</p><small><el-tag size="small" effect="plain">{{ item.source_name }}</el-tag> {{ formatPublishedTime(item.published_time) }}</small><div class="news-actions"><el-button size="small" type="primary" plain @click="openAi(item, 'summary')">AI总结</el-button><el-button size="small" type="success" plain @click="openAi(item, 'relation')">关联课本</el-button><el-button size="small" type="warning" plain @click="openStudyNote(item)">生成研学笔记</el-button></div></div><el-link :href="item.article_url" target="_blank" type="primary" :underline="false">查看原文 →</el-link></article>
-          <el-empty v-if="!newsLoading && !news.length" description="暂未获取到时政信息，请稍后再试" />
-        </el-card>
-        <el-pagination v-if="totalNews > pageSize" class="news-pagination" background layout="prev, pager, next" :current-page="currentPage" :page-size="pageSize" :total="totalNews" @current-change="changePage" />
-      </div>
 
+        <section class="news-summary-section">
+          <div class="news-summary-heading">
+            <div>
+              <h2>时政摘要</h2>
+            </div>
+            <el-button :icon="Refresh" :loading="refreshing" plain class="news-refresh-button" @click="refreshNews">刷新时政</el-button>
+          </div>
+          <el-card v-loading="newsLoading" shadow="never" class="news-list">
+            <article v-for="item in news" :key="item.id" class="news-item">
+              <div class="news-item-body">
+                <h3>{{ item.title }}</h3>
+                <p>{{ item.summary || '打开原文查看详细内容。' }}</p>
+                <div class="news-item-source">{{ item.source_name }}</div>
+                <div class="news-actions">
+                  <el-button size="small" class="news-action news-action-ai" @click="openAi(item, 'summary')">AI总结</el-button>
+                  <el-button size="small" class="news-action news-action-relation" @click="openAi(item, 'relation')">关联课本</el-button>
+                  <el-button size="small" class="news-action news-action-note" @click="openStudyNote(item)">生成研学笔记</el-button>
+                </div>
+              </div>
+              <div class="news-item-aside">
+                <el-link :href="item.article_url" target="_blank" type="primary" :underline="false" class="news-original-link">
+                  <span>查看原文</span><strong>⟶</strong>
+                </el-link>
+                <div class="news-date"><el-icon><Calendar /></el-icon><span>{{ formatPublishedTime(item.published_time) }}</span></div>
+              </div>
+            </article>
+            <el-empty v-if="!newsLoading && !news.length" description="暂未获取到时政信息，请稍后再试" />
+          </el-card>
+          <el-pagination v-if="totalNews > pageSize" class="news-pagination" background layout="prev, pager, next" :current-page="currentPage" :page-size="pageSize" :total="totalNews" @current-change="changePage" />
+        </section>
+      </div>
     </section>
     <el-dialog v-model="dialogVisible" :title="aiMode === 'summary' ? 'AI 时政总结' : 'AI 课本关联'" width="720px" @update:model-value="handleAiDialogVisibility">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要' }}</p></div>

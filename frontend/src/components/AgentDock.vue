@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ArrowDown, Check, MagicStick, RefreshRight, Setting } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AiWorkspaceContext } from '@/api/ai'
@@ -7,6 +7,7 @@ import { useRoute } from 'vue-router'
 import type { LearningStage } from '@/types'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
+import { WORKSPACE_AI_REQUEST_EVENT, type WorkspaceAiRequest } from '@/utils/workspaceAiEvents'
 import WorkspaceAiAssistant from './WorkspaceAiAssistant.vue'
 
 const auth = useAuthStore()
@@ -18,6 +19,7 @@ const context = ref<AiWorkspaceContext | null>(null)
 const manualCourseId = ref<number | null>(null)
 const manualChapterIds = ref<number[] | null>(null)
 const manualClassId = ref<number | null>(null)
+const assistantRef = ref<{ applyExternalRequest: (request: WorkspaceAiRequest) => Promise<void> } | null>(null)
 
 function toPositiveNumber(value: unknown) {
   const parsed = Number(value)
@@ -95,12 +97,30 @@ function acceptAgentContext(nextContext: AiWorkspaceContext) {
   context.value = nextContext
 }
 
+async function handleWorkspaceAiRequest(event: Event) {
+  const request = (event as CustomEvent<WorkspaceAiRequest>).detail
+  const expectedCourseId = routeCourseId.value || workspace.currentCourse?.id || null
+  const expectedChapterId = routeChapterId.value || workspace.currentChapter?.id || null
+  if (!request || request.courseId !== expectedCourseId || request.chapterId !== expectedChapterId || request.learningStage !== stage.value) return
+  manualCourseId.value = null
+  manualChapterIds.value = null
+  manualClassId.value = null
+  await refreshContext()
+  expanded.value = true
+  await nextTick()
+  await assistantRef.value?.applyExternalRequest(request)
+}
+
 watch(
   () => [route.fullPath, workspace.currentCourse?.id, workspace.currentChapter?.id, workspace.currentClass?.id, auth.isAuthenticated],
   () => { void refreshContext() },
   { deep: false },
 )
-onMounted(() => void refreshContext())
+onMounted(() => {
+  void refreshContext()
+  window.addEventListener(WORKSPACE_AI_REQUEST_EVENT, handleWorkspaceAiRequest)
+})
+onBeforeUnmount(() => window.removeEventListener(WORKSPACE_AI_REQUEST_EVENT, handleWorkspaceAiRequest))
 </script>
 
 <template>
@@ -136,6 +156,7 @@ onMounted(() => void refreshContext())
     <transition name="agent-dock-reveal">
       <div v-if="expanded" class="agent-dock-body">
         <WorkspaceAiAssistant
+          ref="assistantRef"
           :key="`${context?.course_id || 0}-${context?.chapter_ids.join('-') || 0}-${context?.teaching_class_id || 0}-${stage}`"
           :course-id="context?.course_id"
           :chapter-id="context?.chapter_id"
@@ -155,7 +176,7 @@ onMounted(() => void refreshContext())
 .agent-dock.is-expanded { display: flex; max-height: calc(100vh - 64px); flex-direction: column; box-shadow: 0 18px 48px rgba(25, 49, 94, .18); }
 .agent-dock-bar { display: flex; min-height: 62px; align-items: center; gap: 18px; padding: 8px 16px; }
 .agent-dock-brand { display: inline-flex; min-width: 206px; align-items: center; gap: 10px; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }
-.agent-dock-orb { position: relative; display: grid; width: 37px; height: 37px; flex: 0 0 auto; place-items: center; color: #fff; background: linear-gradient(140deg, #6d3ab8, #2c6ee2 56%, #18a8c0); border-radius: 13px; box-shadow: 0 7px 17px rgba(54, 90, 202, .22); font-size: 20px; }
+.agent-dock-orb { position: relative; display: grid; width: 37px; height: 37px; flex: 0 0 auto; place-items: center; color: #fff; background: linear-gradient(140deg, #ff8787, #ffa8a8 56%, #ff8787); border-radius: 13px; box-shadow: 0 7px 17px rgba(210, 75, 75, .2); font-size: 20px; }
 .agent-dock-orb i { position: absolute; right: -5px; bottom: -5px; padding: 1px 4px; color: #fff; background: #a92d4d; border: 1px solid #fff; border-radius: 5px; font-size: 7px; font-style: normal; font-weight: 800; }
 .agent-dock-title { display: grid; gap: 2px; }.agent-dock-title small { color: #7586a6; font-size: 8px; font-weight: 800; letter-spacing: 1.2px; }.agent-dock-title strong { color: #21385e; font-size: 14px; }
 .agent-dock-context { display: flex; min-width: 0; flex: 1; align-items: center; gap: 9px; padding-left: 16px; border-left: 1px solid #e5ebf4; }.agent-dock-context > div { display: grid; min-width: 0; gap: 2px; }.agent-dock-context strong, .agent-dock-context small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.agent-dock-context strong { color: #40516e; font-size: 12px; }.agent-dock-context small { color: #8997ac; font-size: 10px; }.agent-dock-context-status { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; }.agent-dock-context-status.is-high { background: #42ad7d; box-shadow: 0 0 0 4px rgba(66,173,125,.12); }.agent-dock-context-status.is-medium { background: #dc9b2c; box-shadow: 0 0 0 4px rgba(220,155,44,.12); }.agent-dock-context-status.is-low { background: #8a9ab1; box-shadow: 0 0 0 4px rgba(138,154,177,.12); }

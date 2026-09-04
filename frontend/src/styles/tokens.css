@@ -1,34 +1,46 @@
 :root {
-  --blue-50: #eef4f8;
-  --blue-100: #dbe8ef;
-  --blue-200: #b8cfdd;
-  --blue-400: #6f97af;
-  --blue-600: #1f4d78;
-  --blue-800: #173c60;
-  --blue-900: #102c48;
+  /* 账号设置页基准：低饱和紫灰色作为品牌强调色。 */
+  /* 红色阶（采用参考图 Color 10–50，控制在 Color 60 以下）。 */
+  /* 普通界面统一使用阿里巴巴普惠体；未安装时按中文系统字体回退。 */
+  --font-ui: "Alibaba PuHuiTi 2.0", "Alibaba PuHuiTi", "阿里巴巴普惠体 2.0", "阿里巴巴普惠体", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --brand-primary: #ff8787;
+  --brand-primary-hover: #ffa8a8;
+  --brand-primary-deep: #ff8787;
+  --brand-primary-soft: #fff5f5;
 
-  --ink-900: #202124;
+  /* 保留旧色阶命名，迁移旧页面时无需一次性改完所有选择器。 */
+  --blue-50: var(--brand-primary-soft);
+  --blue-100: #ffe3e3;
+  --blue-200: #ffc9c9;
+  --blue-400: #ffa8a8;
+  --blue-600: var(--brand-primary);
+  --blue-800: var(--brand-primary-deep);
+  --blue-900: #ff8787;
+
+  --ink-900: #552b31;
+  --ink-800: #6b3b42;
   --ink-600: #5f6368;
+  --ink-500: #6d6872;
   --ink-400: #7b8188;
-  --line: #e0e3e7;
-  --line-strong: #cbd0d6;
+  --line: #eae7ee;
+  --line-strong: #ffc9c9;
   --surface-page: #f7f8fa;
   --surface-card: #fff;
   --surface-muted: #f2f4f6;
   --bg-page: var(--surface-page);
   --bg-card: var(--surface-card);
 
-  --color-primary: var(--blue-600);
-  --action-blue: #1f4d78;
-  --action-soft: #eef4f8;
-  --action-line: #b8cfdd;
+  --color-primary: var(--brand-primary);
+  --action-blue: var(--brand-primary);
+  --action-soft: var(--brand-primary-soft);
+  --action-line: var(--blue-200);
   --authority-red: #b71c1c;
   --authority-soft: #fdf0f0;
   --authority-line: #edb9b9;
   --highlight-gold: #8a5a13;
   --highlight-soft: #fff7e5;
   --highlight-line: #ead39f;
-  --color-success: #137333;
+  --color-success: #207343;
   --color-success-bg: #e9f5ec;
   --color-warning: var(--highlight-gold);
   --color-warning-bg: var(--highlight-soft);
@@ -48,7 +60,7 @@
 
   --radius-control: 8px;
   --radius-input: 8px;
-  --radius-card: 12px;
+  --radius-card: 10px;
   --radius-overlay: 16px;
 
   --space-1: 4px;
@@ -60,12 +72,13 @@
   --page-padding: clamp(16px, 4vw, 40px);
   --page-max-width: 1200px;
 
-  --shadow-1: 0 2px 8px rgb(32 33 36 / 8%);
-  --shadow-2: 0 12px 28px rgb(32 33 36 / 12%);
-  --hero-gradient: linear-gradient(120deg, #173c60, #1f4d78);
+  --shadow-1: 0 1px 3px rgb(43 15 73 / 4%);
+  --shadow-2: 0 8px 24px rgb(43 15 73 / 8%);
+  /* Hero 先使用纯色，避免全站继续累积科技感渐变。 */
+  --hero-gradient: var(--brand-primary);
 
   /* 旧页面兼容别名，在所有页面迁移完成前保留。 */
-  --primary: var(--color-primary);
+  --primary: var(--brand-primary);
   --muted: var(--ink-400);
   --border: var(--line);
   --danger: var(--color-danger);

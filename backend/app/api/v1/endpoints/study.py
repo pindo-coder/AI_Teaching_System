@@ -14,6 +14,7 @@ from app.schemas.common import ApiResponse
 from app.schemas.study import (
     NoteRelatedData, NoteSearchItem, ReviewAnswerResult, ReviewAnswerSubmit, ReviewQuestionRead, ReviewReferenceItem, ReviewReferencesRequest, ReviewSaveToNotesRequest, ReviewResultItem,
     ReviewRead, StudyChatHistorySave, StudyChatMessageRead, StudyNoteListItem, StudyNoteRead, StudyNoteUpdate,
+    TextbookAnnotationCreate, TextbookAnnotationRead, TextbookAnnotationUpdate,
 )
 from app.services.study_service import StudyService
 from app.services.task_service import TaskService
@@ -109,6 +110,57 @@ def save_note(chapter_id: int, payload: StudyNoteUpdate, user: User = Depends(ge
 def delete_note(note_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[dict[str, int]]:
     StudyService(db).delete_note(user.id, note_id)
     return ApiResponse(message="学习笔记已删除", data={"id": note_id})
+
+
+@router.get(
+    "/textbook-annotations/chapters/{chapter_id}",
+    response_model=ApiResponse[list[TextbookAnnotationRead]],
+)
+def list_textbook_annotations(
+    chapter_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[list[TextbookAnnotationRead]]:
+    return ApiResponse(data=StudyService(db).list_textbook_annotations(user.id, chapter_id))
+
+
+@router.post(
+    "/textbook-annotations/chapters/{chapter_id}",
+    response_model=ApiResponse[TextbookAnnotationRead],
+    status_code=201,
+)
+def create_textbook_annotation(
+    chapter_id: int,
+    payload: TextbookAnnotationCreate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TextbookAnnotationRead]:
+    annotation = StudyService(db).create_textbook_annotation(user.id, chapter_id, payload)
+    return ApiResponse(message="教材标注已保存", data=annotation)
+
+
+@router.patch(
+    "/textbook-annotations/{annotation_id}",
+    response_model=ApiResponse[TextbookAnnotationRead],
+)
+def update_textbook_annotation(
+    annotation_id: int,
+    payload: TextbookAnnotationUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TextbookAnnotationRead]:
+    annotation = StudyService(db).update_textbook_annotation(user.id, annotation_id, payload)
+    return ApiResponse(message="教材标注已更新", data=annotation)
+
+
+@router.delete("/textbook-annotations/{annotation_id}", response_model=ApiResponse[dict[str, int]])
+def delete_textbook_annotation(
+    annotation_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    StudyService(db).delete_textbook_annotation(user.id, annotation_id)
+    return ApiResponse(message="教材标注已删除", data={"id": annotation_id})
 
 
 @router.get("/reviews/today", response_model=ApiResponse[list[ReviewRead]])

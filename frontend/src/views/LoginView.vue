@@ -2,10 +2,12 @@
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Lock, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { getErrorMessage } from '@/utils/error'
-import UiCard from '@/components/ui/UiCard.vue'
-import UiHero from '@/components/ui/UiHero.vue'
+import BrandLockup from '@/components/ui/BrandLockup.vue'
+import loginVisualImage from '@/assets/login-visual.jpg'
+import loginRobotImage from '@/assets/login-robot.png'
 
 const formRef = ref<FormInstance>()
 const loading = ref(false)
@@ -32,175 +34,257 @@ async function submit() {
 </script>
 
 <template>
-  <main class="auth-page">
-    <UiHero variant="auth" class="auth-intro-panel">
-      <div class="auth-brand"><span>思政智教</span><small>AI TEACHING</small></div>
-      <p class="auth-kicker">高校思政课 · 智能教学辅助平台</p>
-      <h1>让教材学习<br />更聚焦、更可信</h1>
-      <p class="auth-description">围绕教材专题、知识点和学习阶段提供 AI 辅助，并通过权威资料与原文引用保证回答有据可查。</p>
-      <div class="auth-trust-list"><span>教材约束</span><span>权威资料</span><span>原文引用</span></div>
-    </UiHero>
-    <UiCard class="auth-card" :padded="false">
-      <div class="auth-card-heading"><p class="eyebrow">欢迎回来</p><h2>登录学习空间</h2><p>继续你的专题学习、任务与个人笔记</p></div>
-      <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
-        <el-form-item label="用户名" prop="username"><el-input v-model="form.username" autocomplete="username" size="large" placeholder="请输入用户名" /></el-form-item>
-        <el-form-item label="密码" prop="password"><el-input v-model="form.password" autocomplete="current-password" type="password" show-password size="large" placeholder="请输入密码" /></el-form-item>
-        <el-button type="primary" size="large" :loading="loading" class="full-button" @click="submit">登录</el-button>
+  <main class="auth-page login-page">
+    <section class="login-visual" aria-label="思政智教品牌介绍">
+      <img class="login-visual-art" :src="loginVisualImage" alt="" aria-hidden="true" />
+      <BrandLockup class="auth-branding" title="思政红芯" subtitle="思政智教 · 思政教学平台" tone="light" />
+    </section>
+    <section class="login-form-panel" aria-labelledby="login-title">
+      <img class="login-robot" :src="loginRobotImage" alt="" aria-hidden="true" />
+      <div class="login-form-heading">
+        <h2 id="login-title">欢迎回来，思政红芯教育平台</h2>
+        <p>欢迎回来，请填写您的详细信息</p>
+      </div>
+      <el-form ref="formRef" class="login-form" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
+        <el-form-item label="用户名" prop="username">
+          <el-input v-model="form.username" autocomplete="username" placeholder="请输入用户名" :prefix-icon="User" />
+        </el-form-item>
+        <el-form-item label="密码" prop="password">
+          <el-input v-model="form.password" autocomplete="current-password" type="password" show-password placeholder="请输入密码" :prefix-icon="Lock" />
+        </el-form-item>
+        <router-link class="login-forgot" to="/forgot-password">忘记密码</router-link>
+        <el-button type="primary" :loading="loading" class="login-submit" @click="submit">登录账户</el-button>
       </el-form>
-      <p class="forgot-link"><router-link to="/forgot-password">忘记密码？</router-link></p>
-      <p class="auth-switch">还没有账号？<router-link to="/register">立即注册</router-link></p>
-    </UiCard>
+      <p class="login-register">还没有账号？<router-link to="/register">免费注册</router-link></p>
+      <div class="login-underline" aria-hidden="true"><i></i><i></i></div>
+    </section>
   </main>
 </template>
 
 <style scoped>
 .auth-page {
   display: grid;
-  width: min(100%, 1120px);
-  min-height: 100vh;
-  grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
-  align-items: center;
-  gap: clamp(32px, 7vw, 88px);
-  margin: 0 auto;
-  padding: clamp(24px, 5vw, 64px);
-  background: var(--bg-page);
-}
-
-.auth-intro-panel {
-  min-height: 520px;
-}
-
-.auth-brand {
-  display: grid;
-  width: max-content;
-  margin-bottom: 52px;
-}
-
-.auth-brand span {
-  color: #fff;
-  font-size: 22px;
-  font-weight: var(--fw-bold);
-}
-
-.auth-brand small {
-  margin-top: var(--space-1);
-  color: rgb(255 255 255 / 72%);
-  font-size: var(--fs-meta);
-  letter-spacing: 0.18em;
-}
-
-.auth-kicker {
-  margin: 0;
-  color: rgb(255 255 255 / 78%);
-  font-size: var(--fs-meta);
-  font-weight: var(--fw-bold);
-  letter-spacing: 0.1em;
-}
-
-.auth-intro-panel h1 {
-  margin: var(--space-3) 0 var(--space-4);
-  font-size: clamp(34px, 4vw, 46px);
-  line-height: 1.25;
-}
-
-.auth-description {
-  max-width: 560px;
-  margin: 0;
-  color: rgb(255 255 255 / 82%);
-  font-size: 16px;
-  line-height: 1.8;
-}
-
-.auth-trust-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-8);
-}
-
-.auth-trust-list span {
-  padding: 7px 11px;
-  color: rgb(255 255 255 / 86%);
-  background: rgb(255 255 255 / 10%);
-  border: 1px solid rgb(255 255 255 / 24%);
-  border-radius: 999px;
-  font-size: var(--fs-meta);
-}
-
-.auth-card {
-  width: min(100%, 380px);
-  justify-self: end;
-  padding: 32px;
-  box-shadow: var(--shadow-2);
-}
-
-.auth-card-heading {
-  margin-bottom: var(--space-6);
-}
-
-.auth-card-heading p {
-  margin: 0;
-}
-
-.auth-card-heading > p:last-child {
-  color: var(--ink-600);
-  line-height: 1.6;
-}
-
-.auth-card-heading h2 {
-  margin: var(--space-1) 0 var(--space-2);
-  font-size: var(--fs-section);
-}
-
-.full-button {
   width: 100%;
+  min-height: 100dvh;
+  grid-template-columns: minmax(520px, 59.6%) minmax(400px, 1fr);
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #fff;
 }
 
-.auth-switch {
-  margin: var(--space-6) 0 0;
-  color: var(--ink-600);
+.login-visual {
+  position: relative;
+  display: flex;
+  min-height: 100dvh;
+  align-items: center;
+  overflow: hidden;
+  isolation: isolate;
+  color: #fff;
+  background: #f24a51;
+}
+
+.auth-branding {
+  position: absolute;
+  z-index: 2;
+  top: clamp(24px, 5vh, 56px);
+  left: clamp(24px, 5vw, 64px);
+}
+
+.login-visual-art {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.login-form-panel {
+  display: flex;
+  width: min(440px, calc(100% - 80px));
+  flex-direction: column;
+  justify-content: center;
+  justify-self: center;
+  align-items: stretch;
+  padding: 24px 0;
+}
+
+.login-robot {
+  display: block;
+  width: 132px;
+  height: 176px;
+  flex: none;
+  align-self: center;
+  margin: 0 auto 18px;
+  object-fit: contain;
+}
+
+.login-form-heading {
+  margin-bottom: 32px;
   text-align: center;
 }
 
-.forgot-link { margin: var(--space-3) 0 0; text-align: right; }
+.login-form-heading h2 {
+  margin: 0 0 12px;
+  color: #140722;
+  font-size: clamp(23px, 2vw, 28px);
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.3;
+  white-space: nowrap;
+}
 
-@media (max-width: 767px) {
+.login-form-heading p {
+  margin: 0;
+  color: #7b7186;
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.login-form :deep(.el-form-item) {
+  margin-bottom: 24px;
+}
+
+.login-form :deep(.el-form-item__label) {
+  padding-bottom: 8px;
+  color: #3f1e61;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.login-form :deep(.el-form-item__label::before) {
+  color: #ff4a64;
+}
+
+.login-form :deep(.el-input__wrapper) {
+  min-height: 40px;
+  padding: 1px 12px;
+  border: 1px solid #eae7ee;
+  border-radius: 8px;
+  box-shadow: none;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+
+.login-form :deep(.el-input__wrapper:hover) {
+  border-color: #c8bdcf;
+}
+
+.login-form :deep(.el-input__wrapper.is-focus) {
+  border-color: #988ea6;
+  box-shadow: 0 0 0 3px rgb(242 74 81 / 12%);
+}
+
+.login-form :deep(.el-input__inner) {
+  color: #2b0f49;
+  font-size: 14px;
+}
+
+.login-form :deep(.el-input__inner::placeholder) {
+  color: #aaa2b1;
+}
+
+.login-submit {
+  width: 100%;
+  height: 40px;
+  margin-top: 4px;
+  color: #fff;
+  background: #f24a51;
+  border-color: #f24a51;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.login-submit:hover,
+.login-submit:focus {
+  color: #fff;
+  background: #e83e47;
+  border-color: #e83e47;
+}
+
+.login-submit:active {
+  background: #d9343d;
+  border-color: #d9343d;
+}
+
+.login-forgot {
+  display: block;
+  margin: -7px 0 24px;
+  color: #ff4a51;
+  font-size: 13px;
+}
+
+.login-forgot:hover {
+  color: #e83e47;
+}
+
+.login-register {
+  margin: 46px 0 0;
+  color: #7b7186;
+  font-size: 15px;
+  text-align: center;
+}
+
+.login-register a {
+  margin-left: 4px;
+  color: #ff4a51;
+  font-weight: 600;
+}
+
+.login-register a:hover {
+  color: #e83e47;
+}
+
+.login-underline {
+  position: relative;
+  width: 284px;
+  height: 18px;
+  align-self: center;
+  margin-top: auto;
+}
+
+.login-underline i {
+  position: absolute;
+  right: 0;
+  display: block;
+  width: 284px;
+  height: 1px;
+  background: #ff4a51;
+  transform: rotate(-5deg);
+}
+
+.login-underline i:first-child {
+  top: 8px;
+}
+
+.login-underline i:last-child {
+  top: 12px;
+  right: 30px;
+  width: 220px;
+  transform: rotate(-7deg);
+}
+
+@media (max-width: 900px) {
   .auth-page {
-    width: 100%;
-    min-height: 100vh;
     grid-template-columns: minmax(0, 1fr);
-    align-content: center;
-    gap: var(--space-4);
-    padding: var(--space-4);
+    overflow: auto;
   }
 
-  .auth-intro-panel {
-    min-height: 0;
+  .login-visual {
+    min-height: 380px;
   }
 
-  .auth-brand {
-    margin-bottom: var(--space-6);
+  .login-form-panel {
+    width: min(440px, calc(100% - 64px));
+    min-height: 520px;
+    padding: 56px 0;
   }
 
-  .auth-intro-panel h1 {
-    margin-block: var(--space-2);
-    font-size: 24px;
-  }
-
-  .auth-description {
-    font-size: var(--fs-body);
-    line-height: 1.65;
-  }
-
-  .auth-trust-list {
-    margin-top: var(--space-4);
-  }
-
-  .auth-card {
-    width: min(100%, 380px);
-    justify-self: center;
-    padding: var(--space-6);
-    box-shadow: none;
-  }
+  .login-form-heading h2 { font-size: 25px; white-space: normal; }
 }
 </style>

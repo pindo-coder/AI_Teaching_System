@@ -2,8 +2,10 @@
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { Lock } from '@element-plus/icons-vue'
 import { authApi } from '@/api/auth'
 import { getErrorMessage } from '@/utils/error'
+import RecoveryAuthLayout from '@/components/ui/RecoveryAuthLayout.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,7 +22,9 @@ const rules: FormRules = {
 async function submit() {
   const token = typeof route.query.token === 'string' ? route.query.token : ''
   if (!token) { ElMessage.error('重置链接无效'); return }
-  if (!(await formRef.value?.validate())) return
+  let valid = false
+  try { valid = await formRef.value?.validate() ?? false } catch { return }
+  if (!valid) return
   loading.value = true
   try {
     await authApi.confirmPasswordReset({ token, new_password: form.password })
@@ -32,32 +36,32 @@ async function submit() {
 </script>
 
 <template>
-  <main class="simple-auth-page">
-    <el-card class="simple-auth-card" shadow="never">
-      <template v-if="!completed">
-        <p class="eyebrow">账户恢复</p>
-        <h1>设置新密码</h1>
-        <p class="muted">新密码至少 8 个字符。完成后需要重新登录。</p>
-        <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
-          <el-form-item label="新密码" prop="password"><el-input v-model="form.password" type="password" show-password size="large" autocomplete="new-password" /></el-form-item>
-          <el-form-item label="确认新密码" prop="confirmPassword"><el-input v-model="form.confirmPassword" type="password" show-password size="large" autocomplete="new-password" /></el-form-item>
-          <el-button type="primary" size="large" class="full-button" :loading="loading" @click="submit">确认重置</el-button>
-        </el-form>
-      </template>
-      <template v-else>
-        <p class="eyebrow">操作完成</p>
-        <h1>密码已重置</h1>
-        <p class="muted">旧登录状态已失效，请使用新密码登录。</p>
-        <el-button type="primary" size="large" class="full-button" @click="router.push('/login')">返回登录</el-button>
-      </template>
-    </el-card>
-  </main>
+  <RecoveryAuthLayout
+    :active-step="completed ? 3 : 2"
+    :eyebrow="completed ? '操作完成' : '安全链接'"
+    :title="completed ? '密码已重置' : '创建新密码'"
+    :description="completed ? '新的密码已经生效，旧登录状态已失效。' : '请设置至少包含 8 个字符的新密码，建议同时包含字母和数字。'"
+    :visual="completed ? 'success' : 'message'"
+    rail-title="安全更新密码"
+    rail-description="使用一次性安全链接更新密码，保护你的学习资料和账号信息。"
+  >
+    <template v-if="!completed">
+      <el-form ref="formRef" class="recovery-form" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
+        <el-form-item label="新密码" prop="password">
+          <el-input v-model="form.password" type="password" show-password autocomplete="new-password" placeholder="请输入新密码" :prefix-icon="Lock" />
+        </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input v-model="form.confirmPassword" type="password" show-password autocomplete="new-password" placeholder="再次输入新密码" :prefix-icon="Lock" />
+        </el-form-item>
+        <el-button type="primary" class="recovery-submit" :loading="loading" @click="submit">重置密码</el-button>
+      </el-form>
+    </template>
+    <template v-else>
+      <div class="recovery-success">
+        <span class="recovery-success-mark" aria-hidden="true">✓</span>
+        <p>旧登录状态已失效，请使用新密码登录。</p>
+        <el-button type="primary" class="recovery-submit" @click="router.push('/login')">返回登录</el-button>
+      </div>
+    </template>
+  </RecoveryAuthLayout>
 </template>
-
-<style scoped>
-.simple-auth-page { display: grid; min-height: 100vh; place-items: center; padding: var(--space-4); background: var(--bg-page); }
-.simple-auth-card { width: min(100%, 440px); padding: 32px; box-shadow: var(--shadow-2); }
-h1 { margin: var(--space-1) 0 var(--space-2); font-size: var(--fs-section); }
-.muted { color: var(--ink-600); line-height: 1.6; }
-.full-button { width: 100%; }
-</style>

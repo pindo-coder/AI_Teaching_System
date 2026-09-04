@@ -1,6 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class StudyNoteUpdate(BaseModel):
@@ -22,6 +24,57 @@ class StudyNoteRead(BaseModel):
 class StudyNoteListItem(StudyNoteRead):
     course_name: str
     chapter_title: str
+
+
+AnnotationType = Literal["key_point", "concept", "question"]
+
+
+class TextbookAnnotationCreate(BaseModel):
+    block_index: int = Field(ge=0)
+    start_offset: int = Field(ge=0)
+    end_offset: int = Field(gt=0)
+    selected_text: str = Field(min_length=1, max_length=2000)
+    prefix_text: str = Field(default="", max_length=300)
+    suffix_text: str = Field(default="", max_length=300)
+    annotation_type: AnnotationType = "key_point"
+    comment: str = Field(default="", max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_offsets(self) -> "TextbookAnnotationCreate":
+        if self.end_offset <= self.start_offset:
+            raise ValueError("标注结束位置必须晚于开始位置")
+        return self
+
+
+class TextbookAnnotationUpdate(BaseModel):
+    annotation_type: AnnotationType | None = None
+    comment: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_changes(self) -> "TextbookAnnotationUpdate":
+        if self.annotation_type is None and self.comment is None:
+            raise ValueError("请至少修改一项标注内容")
+        return self
+
+
+class TextbookAnnotationRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    course_id: int
+    chapter_id: int
+    block_index: int
+    start_offset: int
+    end_offset: int
+    selected_text: str
+    prefix_text: str
+    suffix_text: str
+    annotation_type: AnnotationType
+    comment: str
+    chapter_content_hash: str
+    created_time: datetime
+    updated_time: datetime
 
 
 class ReviewRead(BaseModel):
