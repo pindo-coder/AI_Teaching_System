@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ArrowDown, Bell, Clock, Menu, Message, Search } from '@element-plus/icons-vue'
+import { ArrowDown, Bell, Clock, Menu, Message, School, Search } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import AgentDock from '@/components/AgentDock.vue'
 import BrandLockup from '@/components/ui/BrandLockup.vue'
@@ -16,8 +16,10 @@ import { authApi } from '@/api/auth'
 import { courseApi } from '@/api/courses'
 import { newsApi, type NewsItem } from '@/api/news'
 import { studyApi, type NoteSearchItem } from '@/api/study'
+import { teachingClassApi } from '@/api/teachingClasses'
 import type { CourseDetail, LearningStage } from '@/types'
 import { formatBeijingDateTime } from '@/utils/time'
+import { getErrorMessage } from '@/utils/error'
 import { requestWorkspaceAi } from '@/utils/workspaceAiEvents'
 import logoUrl from '@/assets/logo1.svg'
 
@@ -28,6 +30,9 @@ const router = useRouter()
 const mobileNavVisible = ref(false)
 const messageVisible = ref(false)
 const taskVisible = ref(false)
+const joinClassVisible = ref(false)
+const joinClassCode = ref('')
+const joiningClass = ref(false)
 const taskLoading = ref(false)
 const headerSearch = ref('')
 const agentRuns = ref<AgentRun[]>([])
@@ -64,6 +69,30 @@ function logout() {
   workspace.clear()
   auth.logout()
   router.push('/login')
+}
+
+function openJoinClassDrawer() {
+  joinClassCode.value = ''
+  joinClassVisible.value = true
+}
+
+async function joinClass() {
+  const code = joinClassCode.value.trim()
+  if (!code) {
+    ElMessage.warning('请输入班级码')
+    return
+  }
+  joiningClass.value = true
+  try {
+    const response = await teachingClassApi.join(code)
+    ElMessage.success(response.data.data.message)
+    joinClassCode.value = ''
+    joinClassVisible.value = false
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '加入班级失败，请检查班级码'))
+  } finally {
+    joiningClass.value = false
+  }
 }
 
 function navigate(path: string) {
@@ -438,6 +467,7 @@ watch(() => auth.user?.id, () => {
               <el-dropdown-menu>
                 <el-dropdown-item disabled>{{ auth.user?.username }} · {{ roleLabel }}</el-dropdown-item>
                 <el-dropdown-item v-if="auth.user?.role !== 'admin'" @click="router.push('/account')">账号设置</el-dropdown-item>
+                <el-dropdown-item v-if="auth.user?.role === 'student'" @click="openJoinClassDrawer">加入班级</el-dropdown-item>
                 <el-dropdown-item @click="taskVisible = true">后台任务</el-dropdown-item>
                 <el-dropdown-item divided @click="logout">退出登录</el-dropdown-item>
               </el-dropdown-menu>
@@ -543,6 +573,31 @@ watch(() => auth.user?.id, () => {
           <p v-else>从课程备课创建任务后，可以离开页面并在这里查看进度。</p>
           <el-button v-if="auth.user?.role !== 'student'" type="primary" @click="openAgentRun">开始课程备课</el-button>
         </div>
+      </div>
+    </el-drawer>
+
+    <el-drawer v-model="joinClassVisible" title="加入班级" size="min(92vw, 420px)">
+      <div class="join-class-drawer">
+        <div class="join-class-intro">
+          <span class="utility-mark"><el-icon><School /></el-icon></span>
+          <div>
+            <h3>输入班级码</h3>
+            <p>使用教师提供的班级码加入教学班。名单内学生会直接加入，其他情况将提交申请等待审核。</p>
+          </div>
+        </div>
+        <form class="join-class-form" @submit.prevent="joinClass">
+          <label for="join-class-code">班级码</label>
+          <el-input
+            id="join-class-code"
+            v-model="joinClassCode"
+            maxlength="16"
+            clearable
+            autocomplete="off"
+            placeholder="请输入教师提供的班级码"
+          />
+          <el-button type="primary" native-type="submit" :loading="joiningClass">加入班级</el-button>
+        </form>
+        <p class="join-class-tip">班级码不区分大小写；名单外申请需教师审核通过后生效。</p>
       </div>
     </el-drawer>
   </div>
@@ -690,6 +745,16 @@ watch(() => auth.user?.id, () => {
 .agent-task-item:hover { background: var(--action-soft); border-color: var(--action-line); }
 .agent-task-item > span { display: grid; min-width: 0; gap: var(--space-1); }
 .agent-task-item small { color: var(--ink-400); }
+.join-class-drawer { display: grid; gap: var(--space-5); }
+.join-class-intro { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); background: var(--action-soft); border: 1px solid var(--action-line); border-radius: var(--radius-card); }
+.join-class-intro .utility-mark { flex: 0 0 auto; width: 42px; height: 42px; font-size: 19px; }
+.join-class-intro h3 { margin: 1px 0 5px; color: var(--ink-900); font-size: 16px; }
+.join-class-intro p, .join-class-tip { margin: 0; color: var(--ink-600); font-size: var(--fs-meta); line-height: 1.65; }
+.join-class-form { display: grid; gap: var(--space-2); }
+.join-class-form label { color: var(--ink-700); font-size: var(--fs-meta); font-weight: var(--fw-semibold); }
+.join-class-form .el-input :deep(.el-input__wrapper) { min-height: 44px; }
+.join-class-form .el-button { width: 100%; min-height: 42px; margin-top: var(--space-2); }
+.join-class-tip { padding-top: var(--space-3); border-top: 1px solid var(--line); color: var(--ink-400); }
 
 @media (max-width: 1023px) {
   .app-shell { display: block; }

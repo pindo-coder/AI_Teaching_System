@@ -144,8 +144,11 @@ LESSON_PREP_SYSTEM_PROMPT = """你是高校思政课教师的备课助手。
 
 LESSON_PREP_USER_PROMPT = """课程：{course_name}
 教材专题：{chapter_title}
+学习阶段：{learning_stage_label}
+阶段侧重点：{learning_stage_instructions}
 课时：{lesson_hours} 课时
 学生层次：{student_level}
+完成条件：{completion_condition}
 教师补充目标：{teaching_goal}
 
 已确认的证据：

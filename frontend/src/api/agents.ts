@@ -1,5 +1,6 @@
 import { http, type ApiResponse } from './http'
 import type { AiSource } from './ai'
+import type { LearningStage } from '@/types'
 
 export type AgentStatus =
   | 'queued'
@@ -232,7 +233,9 @@ export interface CreateLessonPrepRun {
   teaching_class_id: number | null
   input: {
     lesson_hours: number
+    learning_stage: LearningStage
     student_level: string
+    completion_condition: string | null
     teaching_goal: string | null
     output_types: Array<'outline' | 'lesson_plan' | 'ppt'>
   }

@@ -104,10 +104,7 @@ function toggleSource(source: string) {
   void loadNews(true)
 }
 function clearSources() {
-  selectedSources.value = []
-  void loadNews(true)
-}
-function resetSearch() {
+  // “全部”同时代表清除媒体、时间、排序和关键词筛选，避免再占一个重置按钮。
   searchKeyword.value = ''
   selectedSources.value = []
   timeDays.value = 90
@@ -371,11 +368,10 @@ function openSavedNote() {
               <el-option label="按相关度排序" value="relevance" :disabled="!searchKeyword.trim()" />
             </el-select>
             <el-button type="primary" :icon="Search" :loading="newsLoading" @click="loadNews(true)">搜索</el-button>
-            <el-button v-if="searchKeyword.trim() || selectedSources.length || timeDays !== 90 || sortBy !== 'latest'" class="news-reset-button" @click="resetSearch">重置</el-button>
           </div>
           <div v-if="sourceNames.length" class="news-source-filter">
             <span class="news-source-label">媒体来源</span>
-            <el-check-tag :checked="selectedSources.length === 0" @change="clearSources">全部</el-check-tag>
+            <el-check-tag :checked="selectedSources.length === 0" title="清除所有筛选" @change="clearSources">全部</el-check-tag>
             <el-check-tag v-for="source in sourceNames" :key="source" :checked="selectedSources.includes(source)" @change="toggleSource(source)">{{ source }}</el-check-tag>
           </div>
           <div class="news-search-summary">
@@ -413,11 +409,11 @@ function openSavedNote() {
                 </div>
               </div>
               <div class="news-item-aside">
-                <el-link :href="item.article_url" target="_blank" type="primary" :underline="false" class="news-original-link">
+                <el-link :href="item.article_url" target="_blank" type="primary" underline="never" class="news-original-link">
                   <span>查看原文</span><strong>⟶</strong>
                 </el-link>
-                <div class="news-date"><el-icon><Calendar /></el-icon><span>{{ formatPublishedTime(item.published_time) }}</span></div>
               </div>
+              <div class="news-date"><el-icon><Calendar /></el-icon><span>{{ formatPublishedTime(item.published_time) }}</span></div>
             </article>
             <el-empty v-if="!newsLoading && !news.length" description="暂未获取到时政信息，请稍后再试" />
           </el-card>

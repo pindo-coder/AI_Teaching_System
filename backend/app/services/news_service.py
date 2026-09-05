@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from html import escape, unescape
@@ -25,14 +27,23 @@ from app.services.study_service import StudyService
 
 
 logger = logging.getLogger(__name__)
+# 只保留已验证会持续更新的公开 RSS。来源按钮不会直接依据这份配置展示，
+# 而是根据当前时间窗口内实际抓到的稿件动态生成；抓取失败或无有效稿件的来源
+# 会自动从筛选区消失。
 FEEDS = (
-    ("人民网时政", "https://www.people.com.cn/rss/politics.xml"),
     ("中国新闻网时政", "https://www.chinanews.com.cn/rss/china.xml"),
-    # 央视新闻公开提供国内新闻 RSS；单个源失败不会影响其他来源刷新。
-    ("央视新闻国内", "https://www.cctv.com/program/rss/02/01/index.xml"),
-    # 同一媒体的要闻流作为补充，保留来源名称以便学生辨识资讯出处。
+    ("中国新闻网国际", "https://www.chinanews.com.cn/rss/world.xml"),
+    ("中国新闻网社会", "https://www.chinanews.com.cn/rss/society.xml"),
     ("中国新闻网要闻", "https://www.chinanews.com.cn/rss/importnews.xml"),
 )
+
+
+@dataclass(frozen=True)
+class _ParsedNewsItem:
+    title: str
+    article_url: str
+    summary: str | None
+    published_time: datetime | None
 
 
 class _SummaryTextExtractor(HTMLParser):
@@ -166,10 +177,24 @@ class NewsService:
         items.sort(key=lambda item: (_effective_news_time(item), item.id), reverse=True)
         return items[:limit]
 
-    def source_names(self) -> list[str]:
-        configured = [name for name, _ in FEEDS]
-        stored = list(self.db.scalars(select(NewsItem.source_name).distinct()).all())
-        return list(dict.fromkeys([*configured, *stored]))
+    def source_names(self, days: int | None = None) -> list[str]:
+        """Return configured sources with real articles in the requested window.
+
+        ``FEEDS`` is a retrieval allow-list, not a promise that every source is
+        available. Deriving this list from stored articles prevents empty or
+        stale RSS feeds from becoming misleading filter buttons. Unknown legacy
+        source names are intentionally excluded because they are no longer part
+        of the verified retrieval set.
+        """
+        configured_order = {name: index for index, (name, _) in enumerate(FEEDS)}
+        configured_names = list(configured_order)
+        statement = select(NewsItem).where(NewsItem.source_name.in_(configured_names))
+        items = list(self.db.scalars(statement).all())
+        if days is not None:
+            cutoff = utc_now() - timedelta(days=days)
+            items = [item for item in items if _effective_news_time(item) >= cutoff]
+        active_names = {item.source_name for item in items}
+        return sorted(active_names, key=lambda name: configured_order[name])
 
     def clean_existing_summaries(self) -> int:
         """幂等修复历史 RSS 摘要；正常纯文本不会发生更新。"""
@@ -187,7 +212,9 @@ class NewsService:
     def search(self, query: str = "", sources: list[str] | None = None, days: int | None = None,
                sort_by: str = "latest", page: int = 1, page_size: int = 10) -> dict[str, object]:
         self.clean_existing_summaries()
-        statement = select(NewsItem)
+        # 只展示当前仍在验证白名单中的来源；旧版本缓存的失效来源不再回到页面。
+        configured_names = [name for name, _ in FEEDS]
+        statement = select(NewsItem).where(NewsItem.source_name.in_(configured_names))
         keyword = query.strip()
         if keyword:
             pattern = f"%{keyword}%"
@@ -221,7 +248,9 @@ class NewsService:
             "page": page,
             "page_size": page_size,
             "pages": max(1, (total + page_size - 1) // page_size),
-            "sources": self.source_names(),
+            # 来源列表由同一时间窗口内的实际检索结果推导，保证每个按钮至少
+            # 对应一条可展示的时政稿件。
+            "sources": self.source_names(days=days),
         }
 
     def require_news(self, news_id: int) -> NewsItem:
@@ -335,51 +364,91 @@ class NewsService:
         return {"note_id": note.id, "course_id": chapter.course_id, "chapter_id": chapter.id,
                 "created": existing is None, "appended": existing is not None}
 
+    @staticmethod
+    def _fetch_feed(source_name: str, source_url: str) -> list[_ParsedNewsItem]:
+        """Download and normalize one public RSS feed.
+
+        Feeds are fetched outside the DB session so the caller can run several
+        independent sources concurrently.  A browser-compatible User-Agent is
+        required by some otherwise public feeds (notably CCTV); the source URL
+        itself remains the canonical origin shown to users.
+        """
+        separator = "&" if "?" in source_url else "?"
+        request = Request(
+            f"{source_url}{separator}_ts={int(utc_now().timestamp())}",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+                ),
+                "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*;q=0.8",
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+                "Cache-Control": "no-cache",
+            },
+        )
+        with urlopen(request, timeout=settings.news_request_timeout_seconds) as response:
+            root = _parse_feed(response.read())
+
+        parsed: list[_ParsedNewsItem] = []
+        for item in NewsService._feed_items(root)[:settings.news_feed_item_limit]:
+            title = _clean(NewsService._feed_value(item, "title"))
+            article_url = _clean(NewsService._feed_value(item, "link"))
+            if not title or not article_url:
+                continue
+            summary = _clean(NewsService._feed_value(item, "description", "summary", "content"))[:1000] or None
+            published_time = _parse_time(
+                NewsService._feed_value(item, "pubDate", "published", "updated", "date")
+            )
+            parsed.append(_ParsedNewsItem(title, article_url, summary, published_time))
+        if not parsed:
+            logger.warning("news_feed_empty source=%s url=%s", source_name, source_url)
+        return parsed
+
     def refresh(self) -> int:
         created = 0
-        # 同一篇稿件可能同时出现在“时政”和“要闻”流中；本轮内也必须去重。
+        # 同一篇稿件可能同时出现在多个栏目中；本轮内也必须去重。
         existing_by_url = {
             item.article_url: item for item in self.db.scalars(select(NewsItem)).all()
         }
+        # RSS 源彼此独立，串行等待会让一个失效站点拖慢整页刷新；并行只做网络
+        # 与 XML 解析，所有 SQLAlchemy 对象仍在当前线程按确定顺序写入。
+        fetched: dict[str, list[_ParsedNewsItem]] = {}
+        with ThreadPoolExecutor(max_workers=min(4, len(FEEDS))) as executor:
+            pending = {
+                executor.submit(self._fetch_feed, source_name, source_url): (source_name, source_url)
+                for source_name, source_url in FEEDS
+            }
+            for future in as_completed(pending):
+                source_name, source_url = pending[future]
+                try:
+                    fetched[source_name] = future.result()
+                except (OSError, ET.ParseError, ValueError) as exc:
+                    # 单个来源失败不能阻塞其他来源；日志会保留真实来源和错误原因，
+                    # 不在前端伪造“已抓取”的新闻。
+                    logger.warning("news_feed_failed source=%s url=%s error=%s", source_name, source_url, exc)
+
+        # 按 FEEDS 配置顺序写入，重复 URL 的来源标识不会因线程完成顺序而漂移。
         for source_name, source_url in FEEDS:
-            try:
-                # 给 RSS 地址增加时间戳，避免 CDN/反向代理重复返回历史快照。
-                separator = "&" if "?" in source_url else "?"
-                request = Request(
-                    f"{source_url}{separator}_ts={int(utc_now().timestamp())}",
-                    headers={"User-Agent": "AI-Teaching-System/0.1", "Cache-Control": "no-cache"},
-                )
-                with urlopen(request, timeout=settings.news_request_timeout_seconds) as response:
-                    root = _parse_feed(response.read())
-                for item in self._feed_items(root)[:settings.news_feed_item_limit]:
-                    title = _clean(self._feed_value(item, "title"))
-                    article_url = _clean(self._feed_value(item, "link"))
-                    if not title or not article_url:
-                        continue
-                    summary = _clean(self._feed_value(item, "description", "summary", "content"))[:1000] or None
-                    published_time = _parse_time(
-                        self._feed_value(item, "pubDate", "published", "updated", "date")
+            fetched_at = utc_now()
+            for parsed in fetched.get(source_name, []):
+                existing = existing_by_url.get(parsed.article_url)
+                if existing is None:
+                    existing = NewsItem(
+                        article_url=parsed.article_url,
+                        source_name=source_name,
+                        title=parsed.title,
                     )
-                    existing = existing_by_url.get(article_url)
-                    if existing is None:
-                        existing = NewsItem(
-                            article_url=article_url,
-                            source_name=source_name,
-                            title=title,
-                        )
-                        self.db.add(existing)
-                        existing_by_url[article_url] = existing
-                        created += 1
-                    # 同一链接的稿件可能被媒体补发或修订，不能永久保留首次抓取的旧日期。
-                    existing.title = title
-                    existing.summary = summary
-                    existing.source_name = source_name
-                    existing.source_url = source_url
-                    existing.published_time = published_time
-                    existing.published_time_is_utc = True
-                    existing.fetched_time = utc_now()
-            except (OSError, ET.ParseError, ValueError) as exc:
-                logger.warning("news_feed_failed source=%s error=%s", source_name, exc)
+                    self.db.add(existing)
+                    existing_by_url[parsed.article_url] = existing
+                    created += 1
+                # 同一链接的稿件可能被媒体补发或修订，不能永久保留首次抓取的旧日期。
+                existing.title = parsed.title
+                existing.summary = parsed.summary
+                existing.source_name = source_name
+                existing.source_url = source_url
+                existing.published_time = parsed.published_time
+                existing.published_time_is_utc = True
+                existing.fetched_time = fetched_at
         self.db.commit()
         self._trim()
         return created
@@ -403,7 +472,27 @@ class NewsService:
         return self.refresh()
 
     def _trim(self) -> None:
-        items = list(self.db.scalars(select(NewsItem).order_by(NewsItem.fetched_time.desc())).all())
-        for item in items[60:]:
-            self.db.delete(item)
+        max_items = settings.news_max_items
+        items = list(self.db.scalars(select(NewsItem)).all())
+        items.sort(key=lambda item: (_effective_news_time(item), item.id), reverse=True)
+        if len(items) <= max_items:
+            return
+
+        # 先给每个真实来源一个均衡配额，再用全局发布时间补齐剩余名额。
+        # 这样不会再因为某个 feed 在最后完成而挤掉其他来源。
+        by_source: dict[str, list[NewsItem]] = {}
+        for item in items:
+            by_source.setdefault(item.source_name, []).append(item)
+        quota = max(1, max_items // max(1, len(by_source)))
+        keep_ids: set[int] = set()
+        for source_items in by_source.values():
+            keep_ids.update(item.id for item in source_items[:quota] if item.id is not None)
+        for item in items:
+            if len(keep_ids) >= max_items:
+                break
+            if item.id is not None:
+                keep_ids.add(item.id)
+        for item in items:
+            if item.id not in keep_ids:
+                self.db.delete(item)
         self.db.commit()

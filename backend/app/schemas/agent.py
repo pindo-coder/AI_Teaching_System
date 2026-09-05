@@ -3,6 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.schemas.learning import LearningStage
 from app.schemas.ai import AiSource
 
 
@@ -19,7 +20,9 @@ AgentStatus = Literal[
 
 class LessonPrepInput(BaseModel):
     lesson_hours: int = Field(default=2, ge=1, le=8)
+    learning_stage: LearningStage = "preview"
     student_level: str = Field(default="本科生", min_length=1, max_length=100)
+    completion_condition: str | None = Field(default="教材阅读", max_length=200)
     teaching_goal: str | None = Field(default=None, max_length=1000)
     output_types: list[Literal["outline", "lesson_plan", "ppt"]] = Field(
         default_factory=lambda: ["outline"]

@@ -14,12 +14,13 @@ import { courseApi } from '@/api/courses'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import EvidenceCard from '@/components/ui/EvidenceCard.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
-import StepProgress from '@/components/ui/StepProgress.vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiEmptyState from '@/components/ui/UiEmptyState.vue'
-import UiPageHeader from '@/components/ui/UiPageHeader.vue'
-import type { Course, CourseDetail } from '@/types'
+import type { Course, CourseDetail, LearningStage } from '@/types'
 import { formatBeijingDateTime } from '@/utils/time'
+import logoUrl from '@/assets/logo1.svg'
+import progressBackgroundUrl from '@/assets/lesson-prep-progress-bg.png'
+import contextBackgroundUrl from '@/assets/lesson-prep-context-bg.png'
 
 const router = useRouter()
 const route = useRoute()
@@ -30,7 +31,9 @@ const course = ref<CourseDetail | null>(null)
 const selectedCourseId = ref<number>()
 const selectedChapterId = ref<number>()
 const lessonHours = ref(2)
+const learningStage = ref<LearningStage>('preview')
 const studentLevel = ref('本科生')
+const completionCondition = ref('教材阅读')
 const teachingGoal = ref('')
 const currentRun = ref<AgentRun | null>(null)
 const activeStage = ref(1)
@@ -79,6 +82,11 @@ const selectedVersionId = ref('')
 const hydratingRun = ref(false)
 
 const steps = ['设置任务', '构建证据', '生成课纲', '生成成果', '预览发布']
+const learningStageOptions: Array<{ value: LearningStage; label: string }> = [
+  { value: 'preview', label: '课前预习' },
+  { value: 'review', label: '课后巩固' },
+  { value: 'exam', label: '考前冲刺' },
+]
 const currentStep = computed(() => activeStage.value - 1)
 const chapter = computed(() => course.value?.chapters.find((item) => item.id === selectedChapterId.value) || null)
 const evidence = computed(() => currentRun.value?.evidence_snapshot || [])
@@ -224,7 +232,11 @@ async function applyRun(run: AgentRun) {
     if (selectedCourseId.value) await loadCourse(selectedCourseId.value, run.chapter_id)
     selectedTeachingClassId.value = run.teaching_class_id || eligibleTeachingClasses.value[0]?.id
     lessonHours.value = Number(run.input_data.lesson_hours || 2)
+    learningStage.value = learningStageOptions.some((item) => item.value === run.input_data.learning_stage)
+      ? run.input_data.learning_stage as LearningStage
+      : 'preview'
     studentLevel.value = String(run.input_data.student_level || '本科生')
+    completionCondition.value = String(run.input_data.completion_condition || '教材阅读')
     teachingGoal.value = String(run.input_data.teaching_goal || '')
     if (run.input_data.ppt_preferences) {
       pptPreferences.value = { ...pptPreferences.value, ...(run.input_data.ppt_preferences as Partial<PptPreferences>) }
@@ -275,6 +287,10 @@ function handleSlideCountChange(event: Event) {
   setSlideCount(Number((event.target as HTMLInputElement).value))
 }
 
+function changeLessonHours(delta: number) {
+  lessonHours.value = Math.max(1, Math.min(8, lessonHours.value + delta))
+}
+
 async function listenToRun(id: number) {
   try {
     await agentApi.stream(id, {
@@ -310,7 +326,9 @@ async function startAgent() {
       teaching_class_id: selectedTeachingClassId.value || null,
       input: {
         lesson_hours: lessonHours.value,
+        learning_stage: learningStage.value,
         student_level: studentLevel.value,
+        completion_condition: completionCondition.value.trim() || null,
         teaching_goal: teachingGoal.value.trim() || null,
         output_types: ['outline'],
       },
@@ -600,20 +618,34 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 
 <template>
   <div v-loading="loading" class="lesson-prep-workspace">
-    <UiPageHeader
-      eyebrow="LESSON PREPARATION"
-      title="课程备课"
-      description="先确定教学专题，再冻结证据快照并生成课纲草稿；任何发布操作仍由教师确认。"
-    >
-      <template #actions>
+    <header class="prep-page-header">
+      <div class="prep-page-brand">
+        <img :src="logoUrl" alt="思政红芯" class="prep-page-logo">
+        <div>
+          <p class="prep-page-eyebrow">LESSON PREPARATION</p>
+          <h1>课程备课</h1>
+          <p class="prep-page-description">先确定教学专题，再冻结证据快照并生成课纲草稿；任何发布操作仍由教师确认。</p>
+        </div>
+      </div>
+      <div class="prep-page-actions">
         <StatusChip :label="runStatus" :status="runStatusType" />
         <el-button @click="router.push('/courses')">查看教材专题</el-button>
         <el-button @click="router.push('/knowledge')">管理资料</el-button>
-      </template>
-    </UiPageHeader>
+      </div>
+    </header>
 
-    <UiCard class="prep-progress-card">
-      <StepProgress :steps="steps" :current="currentStep" />
+    <UiCard class="prep-progress-card" :style="{ backgroundImage: `url(${progressBackgroundUrl})` }">
+      <ol class="prep-step-progress" aria-label="任务步骤">
+        <li
+          v-for="(step, index) in steps"
+          :key="step"
+          :class="{ active: index === currentStep, completed: index < currentStep, locked: index + 1 > maxAvailableStage }"
+          :aria-current="index === currentStep ? 'step' : undefined"
+        >
+          <span class="prep-step-node">{{ index + 1 }}</span>
+          <strong>{{ step }}</strong>
+        </li>
+      </ol>
       <nav class="stage-navigation" aria-label="备课步骤导航">
         <button
           v-for="(step, index) in steps"
@@ -643,50 +675,89 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
     />
 
     <section class="prep-grid">
-      <UiCard v-show="activeStage === 1" class="prep-settings stage-card">
+      <UiCard v-show="activeStage === 1" class="prep-settings stage-card" :style="{ '--prep-context-bg': `url(${contextBackgroundUrl})` }">
         <template #title>
           <div><p class="eyebrow">01 · CONTEXT</p><h2>教学任务</h2></div>
         </template>
-        <el-form label-position="top">
-          <el-form-item label="课程">
-            <el-select v-model="selectedCourseId" :disabled="isExecuting" placeholder="选择课程">
-              <el-option v-for="item in courses" :key="item.id" :label="item.name" :value="item.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="教材专题">
-            <el-select v-model="selectedChapterId" :disabled="isExecuting" placeholder="选择专题">
-              <el-option v-for="item in course?.chapters || []" :key="item.id" :label="item.title" :value="item.id" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="目标教学班">
-            <el-select v-model="selectedTeachingClassId" :disabled="isExecuting" placeholder="选择教学班">
-              <el-option
-                v-for="item in eligibleTeachingClasses"
-                :key="item.id"
-                :label="`${item.name} · ${item.term_name}`"
-                :value="item.id"
-              />
-            </el-select>
-          </el-form-item>
-          <div class="compact-form-row">
-            <el-form-item label="课时">
-              <el-input-number v-model="lessonHours" :min="1" :max="8" :disabled="isExecuting" />
-            </el-form-item>
-            <el-form-item label="学生层次">
-              <el-select v-model="studentLevel" :disabled="isExecuting">
-                <el-option label="本科生" value="本科生" />
-                <el-option label="高职学生" value="高职学生" />
-                <el-option label="研究生" value="研究生" />
+        <div class="prep-settings-body">
+          <el-form label-position="top">
+            <el-form-item>
+              <template #label><span class="prep-field-label">目标教学班 <i>*</i></span></template>
+              <el-select v-model="selectedTeachingClassId" :disabled="isExecuting" placeholder="任务将发布到具体教学班">
+                <el-option
+                  v-for="item in eligibleTeachingClasses"
+                  :key="item.id"
+                  :label="`${item.name} · ${item.term_name}`"
+                  :value="item.id"
+                />
               </el-select>
             </el-form-item>
+            <div class="compact-form-row prep-context-row">
+              <el-form-item>
+                <template #label><span class="prep-field-label">课程 <i>*</i></span></template>
+                <el-select v-model="selectedCourseId" :disabled="isExecuting" placeholder="选择课程">
+                  <el-option v-for="item in courses" :key="item.id" :label="item.name" :value="item.id" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label><span class="prep-field-label">专题章节 <i>*</i></span></template>
+                <el-select v-model="selectedChapterId" :disabled="isExecuting" placeholder="选择专题">
+                  <el-option v-for="item in course?.chapters || []" :key="item.id" :label="item.title" :value="item.id" />
+                </el-select>
+              </el-form-item>
+            </div>
+            <div class="compact-form-row prep-context-row">
+              <el-form-item>
+                <template #label><span class="prep-field-label">学习阶段 <i>*</i></span></template>
+                <el-select v-model="learningStage" :disabled="isExecuting" placeholder="选择学习阶段">
+                  <el-option
+                    v-for="item in learningStageOptions"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label><span class="prep-field-label">课时安排 <i>*</i></span></template>
+                <div class="prep-number-control" :class="{ 'is-disabled': isExecuting }">
+                  <button type="button" aria-label="减少课时" :disabled="isExecuting || lessonHours <= 1" @click="changeLessonHours(-1)">−</button>
+                  <input v-model.number="lessonHours" type="number" min="1" max="8" :disabled="isExecuting" aria-label="课时数">
+                  <button type="button" aria-label="增加课时" :disabled="isExecuting || lessonHours >= 8" @click="changeLessonHours(1)">＋</button>
+                </div>
+              </el-form-item>
+            </div>
+            <div class="compact-form-row prep-context-row">
+              <el-form-item>
+                <template #label><span class="prep-field-label">学生层次 <i>*</i></span></template>
+                <el-select v-model="studentLevel" :disabled="isExecuting">
+                  <el-option label="本科生" value="本科生" />
+                  <el-option label="高职学生" value="高职学生" />
+                  <el-option label="研究生" value="研究生" />
+                </el-select>
+              </el-form-item>
+              <el-form-item>
+                <template #label><span class="prep-field-label">完成条件 <small>（选修）</small></span></template>
+                <el-input
+                  v-model="completionCondition"
+                  :disabled="isExecuting"
+                  maxlength="200"
+                  placeholder="例如：完成教材阅读并提交学习卡片"
+                />
+              </el-form-item>
+            </div>
+            <el-form-item>
+              <template #label><span class="prep-field-label">任务要求 <i>*</i></span></template>
+              <el-input v-model="teachingGoal" type="textarea" :rows="4" :disabled="isExecuting" placeholder="说明学习重点和具体要求，例如：围绕本专题梳理核心概念并准备课堂讨论。" />
+            </el-form-item>
+          </el-form>
+          <div class="prep-settings-footer">
+            <span>带 * 的项目用于生成更准确的课纲，提交后仍可在证据阶段核验资料。</span>
+            <el-button type="primary" :loading="acting" :disabled="!canStart" @click="startAgent">
+              构建备课证据包
+            </el-button>
           </div>
-          <el-form-item label="教师补充目标">
-            <el-input v-model="teachingGoal" type="textarea" :rows="4" :disabled="isExecuting" placeholder="可选：说明本次课希望重点解决的问题" />
-          </el-form-item>
-        </el-form>
-        <el-button type="primary" class="full-button" :loading="acting" :disabled="!canStart" @click="startAgent">
-          构建备课证据包
-        </el-button>
+        </div>
       </UiCard>
 
       <UiCard v-show="activeStage === 2" class="prep-evidence stage-card">
@@ -1274,21 +1345,71 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 </template>
 
 <style scoped>
-.lesson-prep-workspace { display: grid; gap: var(--space-5); }
-.prep-progress-card { overflow: auto; }
-.stage-navigation { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-5); }
-.stage-navigation button { display: flex; min-width: 0; align-items: center; justify-content: center; gap: var(--space-2); padding: 10px 12px; color: var(--ink-400); background: var(--surface-muted); border: 1px solid var(--line); border-radius: 999px; font: inherit; font-size: var(--fs-meta); cursor: pointer; }
-.stage-navigation button span { color: var(--ink-300); font-family: Georgia, serif; }
-.stage-navigation button.available { color: var(--ink-700); cursor: pointer; }
-.stage-navigation button.active { color: white; background: linear-gradient(110deg, var(--authority-red), var(--action-blue)); border-color: transparent; box-shadow: var(--shadow-card); }
-.stage-navigation button.active span { color: #f8db9a; }
+.lesson-prep-workspace { display: grid; gap: clamp(14px, 1.6vw, 20px); }
+.prep-page-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
+.prep-page-brand { display: flex; min-width: 0; align-items: center; gap: 16px; }
+.prep-page-logo { flex: none; width: 66px; height: 66px; object-fit: contain; border-radius: 50%; box-shadow: 0 6px 14px rgb(193 55 73 / 12%); }
+.prep-page-brand > div { min-width: 0; }
+.prep-page-eyebrow { margin: 0 0 4px; color: #ff7b82; font-size: clamp(10px, .9vw, 13px); font-weight: 800; letter-spacing: .11em; }
+.prep-page-header h1 { margin: 0 0 4px; color: #2e1c2a; font-size: clamp(26px, 2.7vw, 36px); font-weight: 800; letter-spacing: .02em; line-height: 1.12; }
+.prep-page-description { max-width: 680px; margin: 0; color: #71757e; font-size: clamp(12px, 1.05vw, 15px); line-height: 1.45; }
+.prep-page-actions { display: flex; flex: none; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.prep-page-actions :deep(.el-button) { min-height: 36px; padding: 0 13px; color: #684d78; background: #fff; border: 1px solid #f2b8bd; border-radius: 9px; box-shadow: 0 4px 8px rgb(71 44 73 / 12%); font-size: 12px; font-weight: 650; }
+.prep-page-actions :deep(.el-button:hover), .prep-page-actions :deep(.el-button:focus) { color: #c52c45; border-color: #ff7e87; background: #fff8f8; }
+.prep-progress-card { overflow: hidden; padding: clamp(18px, 2.1vw, 28px) clamp(20px, 2.7vw, 36px) 14px; background-color: #fff; background-position: center; background-repeat: no-repeat; background-size: cover; border-color: #f4dfe3; border-radius: 15px; box-shadow: 0 7px 13px rgb(68 42 65 / 13%); }
+.prep-step-progress { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+.prep-step-progress li { position: relative; z-index: 0; display: grid; justify-items: center; gap: 7px; color: #7f828a; font-size: clamp(12px, 1vw, 15px); font-weight: 650; text-align: center; }
+.prep-step-progress li::after { position: absolute; z-index: -1; top: 21px; left: 50%; width: 100%; height: 2px; content: ''; background: #d9d9dc; }
+.prep-step-progress li:last-child::after { display: none; }
+.prep-step-progress li.completed::after, .prep-step-progress li.active::after { background: #ff5966; }
+.prep-step-progress li.locked { color: #8d9097; }
+.prep-step-node { display: grid; width: 44px; height: 44px; place-items: center; color: #6e7076; background: #fff; border: 2px solid #c5c6c9; border-radius: 50%; box-shadow: 0 4px 7px rgb(45 45 55 / 12%); font-family: Georgia, serif; font-size: 20px; font-weight: 700; }
+.prep-step-progress li.active { color: #ff4656; }
+.prep-step-progress li.active .prep-step-node { color: #fff; background: #ff3e4e; border-color: #ff2338; box-shadow: 0 0 0 9px rgb(255 101 111 / 22%), 0 5px 10px rgb(211 53 64 / 30%); }
+.prep-step-progress li.completed .prep-step-node { color: #fff; background: #ff6570; border-color: #ff5663; }
+.stage-navigation { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: clamp(8px, 1vw, 15px); margin-top: 14px; padding-bottom: 1px; }
+.stage-navigation button { display: flex; min-width: 0; height: 45px; align-items: center; justify-content: center; gap: 7px; padding: 0 9px; color: #686b72; background: rgb(255 255 255 / 90%); border: 1px solid #d8d8dc; border-radius: 14px; box-shadow: 0 4px 6px rgb(43 43 50 / 14%); font: inherit; font-size: clamp(12px, 1vw, 15px); font-weight: 650; cursor: pointer; transition: border-color .18s ease, background .18s ease, color .18s ease, transform .18s ease; }
+.stage-navigation button span { color: #6c6b72; font-family: Georgia, serif; font-weight: 700; }
+.stage-navigation button.available { cursor: pointer; }
+.stage-navigation button.available:hover { color: #e03349; border-color: #ff8b91; transform: translateY(-2px); }
+.stage-navigation button.active { color: #f33648; background: #ffe1e4; border: 2px solid #ff5060; box-shadow: 0 6px 10px rgb(198 49 63 / 20%); }
+.stage-navigation button.active span { color: #ee3a4c; }
 .stage-navigation button:disabled { cursor: not-allowed; opacity: .55; }
-.run-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-5); padding-top: var(--space-3); color: var(--ink-400); border-top: 1px solid var(--line); font-size: var(--fs-meta); }
+.run-toolbar { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: 12px; padding-top: 10px; color: #747780; border-top: 1px solid #e8dfe4; font-size: 11px; }
 .prep-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-4); align-items: start; }
 .prep-grid h2 { margin: var(--space-1) 0 0; font-size: var(--fs-section); }
 .prep-settings, .prep-evidence, .prep-output, .artifact-results { min-width: 0; }
 .stage-card { width: 100%; }
-.prep-settings :deep(.el-select), .prep-settings :deep(.el-input-number) { width: 100%; }
+.prep-settings { overflow: hidden; padding: 0; border-color: #ecdce1; border-radius: 18px; box-shadow: 0 8px 16px rgb(72 40 62 / 9%); }
+.prep-settings :deep(.ui-card__header) { min-height: 140px; align-items: flex-start; margin: 0; padding: 24px 30px 20px; background: #fff9fa var(--prep-context-bg) center / cover no-repeat; border-bottom: 1px solid #eadfe3; }
+.prep-settings :deep(.ui-card__header) .eyebrow { margin: 0 0 13px; color: #ff6975 !important; font-size: 13px; letter-spacing: .1em; }
+.prep-settings :deep(.ui-card__header) h2 { margin: 0; color: #2d1b2a; font-size: clamp(23px, 2vw, 30px); letter-spacing: .02em; }
+.prep-settings-body { padding: 18px 26px 20px; }
+.prep-settings :deep(.el-form) { display: grid; gap: 3px; }
+.prep-settings :deep(.el-form-item) { margin-bottom: 8px; }
+.prep-settings :deep(.el-form-item__label) { height: auto; margin-bottom: 5px; padding: 0; color: #5f4578; font-size: 14px; font-weight: 650; line-height: 1.3; }
+.prep-field-label i { color: #ff5270; font-style: normal; }
+.prep-field-label small { color: #7f7485; font-size: .8em; font-weight: 500; }
+.prep-settings :deep(.el-input__wrapper), .prep-settings :deep(.el-select .el-input__wrapper), .prep-settings :deep(.el-textarea__inner) { min-height: 40px; padding: 0 12px; background: #fff; border: 1px solid #e5e1e8; border-radius: 9px; box-shadow: 0 3px 6px rgb(47 35 55 / 8%); }
+.prep-settings :deep(.el-input__wrapper:hover), .prep-settings :deep(.el-select .el-input__wrapper:hover), .prep-settings :deep(.el-textarea__inner:hover) { border-color: #d3b9dc; }
+.prep-settings :deep(.el-input__wrapper.is-focus), .prep-settings :deep(.el-select .el-input__wrapper.is-focus), .prep-settings :deep(.el-textarea__inner:focus) { border-color: #c4a9d2; box-shadow: 0 0 0 3px rgb(175 126 197 / 13%); }
+.prep-settings :deep(.el-input__inner), .prep-settings :deep(.el-select .el-input__inner), .prep-settings :deep(.el-textarea__inner) { color: #684d78; font-size: 14px; }
+.prep-settings :deep(.el-input.is-disabled .el-input__wrapper), .prep-settings :deep(.el-select .el-input.is-disabled .el-input__wrapper) { background: #fff; }
+.prep-number-control { display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px; width: 100%; min-height: 40px; overflow: hidden; background: #fff; border: 1px solid #e5e1e8; border-radius: 9px; box-shadow: 0 3px 6px rgb(47 35 55 / 8%); }
+.prep-number-control:focus-within { border-color: #c4a9d2; box-shadow: 0 0 0 3px rgb(175 126 197 / 13%); }
+.prep-number-control button { color: #745080; background: #f9f4fb; border: 0; font-size: 17px; cursor: pointer; }
+.prep-number-control button:first-child { border-right: 1px solid #eee6f1; }
+.prep-number-control button:last-child { border-left: 1px solid #eee6f1; }
+.prep-number-control button:hover:not(:disabled) { color: #c52c45; background: #fff1f2; }
+.prep-number-control button:disabled { color: #bdb3c2; cursor: not-allowed; }
+.prep-number-control input { min-width: 0; width: 100%; color: #684d78; background: transparent; border: 0; outline: 0; font: inherit; font-size: 14px; text-align: center; appearance: textfield; }
+.prep-number-control input::-webkit-inner-spin-button, .prep-number-control input::-webkit-outer-spin-button { margin: 0; appearance: none; }
+.prep-number-control.is-disabled { background: #fff; opacity: .72; }
+.prep-context-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(18px, 2vw, 28px); }
+.prep-settings :deep(.el-textarea__inner) { min-height: 96px; padding: 10px 12px; line-height: 1.5; resize: vertical; }
+.prep-settings-footer { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 2px; padding-top: 11px; border-top: 1px solid #eee5eb; }
+.prep-settings-footer > span { color: #867c89; font-size: 11px; line-height: 1.45; }
+.prep-settings-footer :deep(.el-button) { min-width: 158px; height: 40px; border: 0; border-radius: 9px; box-shadow: 0 6px 11px rgb(205 53 70 / 20%); font-size: 13px; font-weight: 700; }
 .compact-form-row { display: grid; grid-template-columns: 1fr 1.25fr; gap: var(--space-2); }
 .full-button { width: 100%; }
 .evidence-list { display: grid; max-height: 680px; gap: var(--space-3); overflow: auto; }

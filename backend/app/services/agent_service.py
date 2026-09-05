@@ -26,6 +26,8 @@ from app.core.prompts import (
     LESSON_PPT_REVISION_USER_PROMPT,
     LESSON_PREP_SYSTEM_PROMPT,
     LESSON_PREP_USER_PROMPT,
+    STAGE_INSTRUCTIONS,
+    STAGE_LABELS,
 )
 from app.services.llm_compat import clean_model_text
 from app.models.agent_run import AgentRun, AgentStep
@@ -1566,7 +1568,7 @@ class AgentService:
                 AiAssistRequest(
                     course_id=course.id,
                     chapter_id=chapter.id,
-                    learning_stage="preview",
+                    learning_stage=payload.input.learning_stage,
                     task_type="chapter_summary",
                     question="为教师备课构建本专题证据包",
                 )
@@ -1862,12 +1864,17 @@ def execute_lesson_outline(run_id: int, bind: Engine) -> None:
             if course is None or chapter is None:
                 raise RuntimeError("课程或专题已不存在")
             input_data = run.input_data
+            learning_stage = str(input_data.get("learning_stage") or "preview")
+            learning_stage_label = STAGE_LABELS.get(learning_stage, STAGE_LABELS["preview"])
             outline = LessonOutlineGenerator(db, run.created_by).generate(
                 {
                     "course_name": course.name,
                     "chapter_title": chapter.title,
+                    "learning_stage_label": learning_stage_label,
+                    "learning_stage_instructions": STAGE_INSTRUCTIONS[learning_stage_label],
                     "lesson_hours": str(input_data.get("lesson_hours", 2)),
                     "student_level": str(input_data.get("student_level", "本科生")),
+                    "completion_condition": str(input_data.get("completion_condition") or "教材阅读"),
                     "teaching_goal": str(input_data.get("teaching_goal") or "按教材要求完成本专题教学"),
                     "evidence_context": run.context_snapshot or "",
                 }

@@ -110,6 +110,8 @@ class Settings(BaseSettings):
     news_default_days: int = Field(default=90, ge=1, le=365)
     news_max_stale_days: int = Field(default=14, ge=1, le=3650)
     news_feed_item_limit: int = Field(default=50, ge=1, le=200)
+    # 全部来源共享的保留上限；_trim 会先按来源均衡保留，再按发布时间补齐。
+    news_max_items: int = Field(default=120, ge=20, le=1000)
     news_request_timeout_seconds: int = Field(default=10, ge=2, le=60)
     material_batch_max_items: int = 500
     material_batch_worker_concurrency: int = 2

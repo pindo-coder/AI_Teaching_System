@@ -858,7 +858,6 @@ defineExpose({ applyExternalRequest })
         <div><p class="workspace-ai-eyebrow">{{ mode === 'chat' ? 'TEXTBOOK · CHAT' : role === 'admin' ? 'PLATFORM · GOVERNANCE' : 'TEACHING · AGENT' }}</p><h2>{{ mode === 'chat' ? 'Chat 教材问答' : role === 'admin' ? 'Admin 治理 Agent' : 'Agent 任务执行' }}</h2><p>{{ mode === 'chat' ? '围绕当前教材直接回答、解释和辨析，不触发任务操作。' : agentWelcome }}</p></div>
       </section>
       <section v-if="!messages.length" class="workspace-ai-capabilities">
-        <p>我可以帮你</p>
         <button v-for="action in mode === 'chat' ? chatQuickActions : quickActions" :key="action.title" type="button" @click="selectQuickAction(action.prompt, mode, action.taskType)"><el-icon><component :is="action.icon" /></el-icon><span><strong>{{ action.title }}</strong><small>{{ action.description }}</small><em v-if="action.requiresContext && !(props.context?.chapter_id || props.chapterId)">执行前需选择教材专题</em></span></button>
       </section>
       <div v-for="message in renderedMessages" :key="message.id" class="workspace-ai-message" :class="`is-${message.role}`">
@@ -987,7 +986,6 @@ defineExpose({ applyExternalRequest })
 .workspace-ai-welcome h2 { margin: 3px 0 6px; color: #1f2f4b; font-size: 22px; line-height: 1.25; }
 .workspace-ai-welcome p:not(.workspace-ai-eyebrow) { margin: 0; color: #75839a; font-size: 12px; line-height: 1.6; }
 .workspace-ai-eyebrow { margin: 0; color: #5370d9; font-size: 9px; font-weight: 800; letter-spacing: 1.6px; }
-.workspace-ai-capabilities > p { margin: 0 0 9px; color: #6d7a90; font-size: 12px; }
 .workspace-ai-capabilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .workspace-ai-capabilities button { display: flex; min-height: 72px; align-items: flex-start; gap: 9px; padding: 12px; color: #34435d; text-align: left; background: #fff; border: 1px solid #e4eaf5; border-radius: 12px; cursor: pointer; transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
 .workspace-ai-capabilities button:hover { border-color: #90a8ee; box-shadow: 0 8px 18px rgba(59, 91, 172, .1); transform: translateY(-1px); }

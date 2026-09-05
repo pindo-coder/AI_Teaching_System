@@ -81,10 +81,21 @@ const configs: Record<LearningStage, {
   },
 }
 const config = computed(() => configs[stage.value])
-const previewGuideActions: Array<{ label: string; description: string; taskType: AiTaskType; prompt: string }> = [
+type GuideAiAction = { label: string; description: string; taskType: AiTaskType; prompt: string }
+const previewGuideActions: GuideAiAction[] = [
   { label: '梳理本章重点', description: '概括专题主旨与学习线索', taskType: 'chapter_summary', prompt: '请用简洁的层级结构梳理当前专题的核心观点。' },
   { label: '解释核心概念', description: '结合教材原文说明', taskType: 'question_answer', prompt: '请依据当前专题教材解释最重要的核心概念。' },
   { label: '生成预习问题', description: '带着问题进入课堂', taskType: 'preview_questions', prompt: '请严格依据当前专题教材生成 5 个预习问题。' },
+]
+const reviewGuideActions: GuideAiAction[] = [
+  { label: '梳理本章重点', description: '概括专题核心观点与知识结构', taskType: 'chapter_summary', prompt: '请依据当前专题教材，梳理本章核心观点、知识结构和需要重点复习的内容。' },
+  { label: '辨析核心概念', description: '理解概念之间的联系与区别', taskType: 'question_answer', prompt: '请依据当前专题教材，辨析本章重要概念之间的联系、区别和适用情境。' },
+  { label: '生成复习提纲', description: '形成可直接回顾的章节总结', taskType: 'review_outline', prompt: '请严格依据当前专题教材，生成一份结构清晰的章节复习提纲。' },
+]
+const examGuideActions: GuideAiAction[] = [
+  { label: '提炼考点', description: '识别章节主旨、核心概念和重要论述', taskType: 'chapter_summary', prompt: '请依据当前专题教材，提炼必须掌握的核心考点，并标注每个考点对应的关键论述。' },
+  { label: '梳理答题结构', description: '组织概念、观点、依据与意义', taskType: 'question_answer', prompt: '请依据当前专题教材，梳理简答题和材料分析题的答题结构，并给出组织答案的要点。' },
+  { label: '生成模拟练习', description: '通过练习定位薄弱知识点', taskType: 'mock_questions', prompt: '请严格依据当前专题教材生成一组考前模拟练习，并附上答题要点。' },
 ]
 const chapterHeading = computed(() => {
   const title = chapter.value?.title?.trim() || ''
@@ -182,7 +193,7 @@ function finishPracticeAndContinue() {
 function goToStageDirect(target: LearningStage) {
   router.push(`/courses/${courseId.value}/chapters/${chapterId.value}/${target}`)
 }
-function askPreviewGuideAi(action: typeof previewGuideActions[number]) {
+function askGuideAi(action: GuideAiAction) {
   if (!course.value || !chapter.value) return
   requestWorkspaceAi({
     courseId: courseId.value,
@@ -330,14 +341,14 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
     <nav class="stage-switcher" aria-label="学习阶段">
       <button v-for="item in (['preview', 'review', 'exam'] as LearningStage[])" :key="item" :class="{ active: stage === item }" @click="goToStageDirect(item)">{{ configs[item].title }}</button>
     </nav>
-    <section v-if="stage !== 'preview'" class="stage-goal-grid"><div v-for="(goal, index) in config.goals" :key="goal" class="stage-goal-card"><span>0{{ index + 1 }}</span><p>{{ goal }}</p></div></section>
+    <section v-if="stage === 'review'" class="review-goal-grid"><div v-for="(goal, index) in config.goals" :key="goal" class="preview-goal-item"><span class="preview-goal-index">0{{ index + 1 }}</span><div class="preview-goal-copy"><strong>{{ goal }}</strong><small>{{ reviewGuideActions[index].description }}</small></div><button type="button" class="preview-goal-ai" :aria-label="`向 AI ${reviewGuideActions[index].label}`" @click="askGuideAi(reviewGuideActions[index])"><el-icon><MagicStick /></el-icon><span>问 AI</span></button></div></section>
 
     <section v-if="stage === 'preview'" class="stage-workspace preview-workspace">
       <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文预读滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
       <aside class="preview-side" aria-label="专题导览与活动记录">
         <el-card shadow="never" class="workspace-card preview-guide-card">
           <template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template>
-          <div class="preview-goal-list"><div v-for="(goal, index) in config.goals" :key="goal" class="preview-goal-item"><span class="preview-goal-index">0{{ index + 1 }}</span><div class="preview-goal-copy"><strong>{{ goal }}</strong><small>{{ previewGuideActions[index].description }}</small></div><button type="button" class="preview-goal-ai" :aria-label="`向 AI ${previewGuideActions[index].label}`" @click="askPreviewGuideAi(previewGuideActions[index])"><el-icon><MagicStick /></el-icon><span>问 AI</span></button></div></div>
+          <div class="preview-goal-list"><div v-for="(goal, index) in config.goals" :key="goal" class="preview-goal-item"><span class="preview-goal-index">0{{ index + 1 }}</span><div class="preview-goal-copy"><strong>{{ goal }}</strong><small>{{ previewGuideActions[index].description }}</small></div><button type="button" class="preview-goal-ai" :aria-label="`向 AI ${previewGuideActions[index].label}`" @click="askGuideAi(previewGuideActions[index])"><el-icon><MagicStick /></el-icon><span>问 AI</span></button></div></div>
         </el-card>
         <el-card shadow="never" class="workspace-card preview-activity-card">
           <template #header><div class="content-heading"><span>活动记录</span><span class="muted">自动记录</span></div></template>
@@ -349,9 +360,10 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
       </aside>
     </section>
 
-    <section v-else-if="stage === 'review'" class="stage-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材重点回看" reader-hint="选中文字即可添加标注" reader-label="教材重点回看滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
-      <el-card shadow="never" class="workspace-card note-workspace">
+    <section v-else-if="stage === 'review'" class="stage-workspace preview-workspace review-workspace">
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card review-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材重点回看" reader-hint="选中文字即可添加标注" reader-label="教材重点回看滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <aside class="preview-side review-side" aria-label="章节笔记">
+        <el-card shadow="never" class="workspace-card note-workspace review-note-card">
         <template #header>
           <div class="content-heading note-card-heading">
             <div><span>我的章节笔记</span><el-tag type="info">仅本人可见</el-tag></div>
@@ -374,15 +386,35 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
             <el-button type="primary" @click="startNoteEditing">编辑本章笔记</el-button>
           </div>
         </template>
-      </el-card>
+        </el-card>
+      </aside>
     </section>
 
-    <section v-else class="stage-workspace exam-workspace">
-      <el-card shadow="never" class="workspace-card"><template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template><div class="exam-task-grid"><div><strong>考点提炼</strong><p>识别章节主旨、核心概念和重要论述。</p></div><div><strong>答题训练</strong><p>按照“概念—观点—依据—意义”组织答案。</p></div><div><strong>薄弱点检查</strong><p>通过错题定位未掌握的知识点。</p></div></div><el-button class="practice-launch-button" type="primary" @click="beginPractice">开始本章练习</el-button></el-card>
-      <el-card shadow="never" class="workspace-card textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="核心原文速览" reader-hint="选中文字即可添加标注" reader-label="核心原文速览滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+    <section v-else class="stage-workspace preview-workspace exam-workspace">
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文冲刺滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <aside class="preview-side exam-side" aria-label="冲刺训练框架与活动记录">
+        <el-card shadow="never" class="workspace-card preview-guide-card exam-framework-card">
+          <template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template>
+          <div class="preview-goal-list">
+            <div v-for="(action, index) in examGuideActions" :key="action.label" class="preview-goal-item exam-goal-item">
+              <span class="preview-goal-index">0{{ index + 1 }}</span>
+              <div class="preview-goal-copy"><strong>{{ action.label }}</strong><small>{{ action.description }}</small></div>
+              <button type="button" class="preview-goal-ai" :aria-label="`向 AI ${action.label}`" @click="askGuideAi(action)"><el-icon><MagicStick /></el-icon><span>问 AI</span></button>
+            </div>
+          </div>
+          <el-button class="exam-launch-button" type="primary" @click="beginPractice">开始本章练习</el-button>
+        </el-card>
+        <el-card shadow="never" class="workspace-card preview-activity-card">
+          <template #header><div class="content-heading"><span>活动记录</span><span class="muted">自动记录</span></div></template>
+          <div class="preview-activity-status"><strong>{{ stageStatus }}</strong><span>本阶段学习状态</span></div>
+          <div v-if="footprint?.activities.length" class="preview-activity-list"><div v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`"><span class="preview-activity-dot"></span><span>{{ activity.label }}</span></div></div>
+          <p v-else class="preview-activity-empty">开始阅读教材或练习后，最近活动会显示在这里。</p>
+          <p class="preview-activity-next">下一步：{{ footprint?.next_action || '先回顾核心原文，再开始本章练习' }}</p>
+        </el-card>
+      </aside>
     </section>
 
-    <section v-if="stage !== 'preview'" class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>
+    <section v-if="stage === 'review'" class="stage-footprint-panel"><div><p class="eyebrow">本阶段学习足迹</p><h2>{{ footprint?.status_label || '未开始' }}</h2><p>{{ config.aiHint }}</p></div><div class="footprint-content"><div v-if="footprint?.outputs.length" class="footprint-outputs"><strong>已有产出</strong><span v-for="output in footprint.outputs" :key="output">{{ output }}</span></div><div v-if="footprint?.activities.length" class="footprint-activities"><strong>最近活动</strong><span v-for="activity in footprint.activities.slice(0, 4)" :key="`${activity.event_type}-${activity.created_time}`">{{ activity.label }}</span></div><p class="footprint-next">下一步：{{ footprint?.next_action || '先打开专题内容开始学习' }}</p></div></section>
     <footer class="learning-footer">
       <div class="learning-footer-copy"><span>系统会记录学习足迹，用于生成更合适的下一步建议。</span><small>{{ navigationHint }}</small></div>
       <div class="learning-footer-actions">
@@ -594,6 +626,19 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
   margin-top: -2px;
 }
 
+.review-goal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  margin-top: -2px;
+  margin-bottom: 18px;
+}
+
+.review-goal-grid .preview-goal-item {
+  min-width: 0;
+  min-height: 68px;
+}
+
 .preview-workspace {
   grid-template-columns: minmax(0, 1.7fr) minmax(280px, .9fr);
   gap: 20px;
@@ -609,11 +654,45 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
   max-height: min(68vh, 680px);
 }
 
+.review-textbook-card .textbook-scroll-window {
+  max-height: min(68vh, 680px);
+}
+
 .preview-side {
   display: grid;
   align-content: start;
   gap: 16px;
   min-width: 0;
+}
+
+.review-side {
+  gap: 16px;
+}
+
+.review-note-card :deep(.el-card__header) {
+  padding: 14px 16px;
+}
+
+.review-note-card :deep(.el-card__body) {
+  padding: 16px;
+}
+
+.review-note-card .note-guide {
+  margin-top: 0;
+  padding: 12px 13px;
+  color: #806f74;
+  background: #fff7f5;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.review-note-card .learning-note-preview {
+  margin: 14px 0;
+  padding: 15px;
+  background: #fffaf8;
+  border: 1px solid #f3e5e1;
+  border-radius: 10px;
 }
 
 .preview-guide-card :deep(.el-card__header),
@@ -681,23 +760,26 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  min-height: 32px;
-  padding: 0 9px;
-  color: #d34d66;
-  background: rgba(255, 255, 255, .78);
-  border: 1px solid rgba(219, 122, 143, .42);
-  border-radius: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  color: #c84e68;
+  background: rgba(255, 247, 247, .72);
+  border: 1px solid rgba(216, 111, 132, .3);
+  border-radius: 999px;
   cursor: pointer;
   font: inherit;
   font-size: 12px;
   font-weight: 700;
   white-space: nowrap;
-  transition: background .16s ease, border-color .16s ease, transform .16s ease;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .72);
+  transition: color .16s ease, background .16s ease, border-color .16s ease, box-shadow .16s ease, transform .16s ease;
 }
 
 .preview-goal-ai:hover {
-  background: #fff;
-  border-color: #dc6d83;
+  color: #fff;
+  background: #e56a7d;
+  border-color: #e56a7d;
+  box-shadow: 0 5px 12px rgba(210, 79, 105, .2);
   transform: translateY(-1px);
 }
 
@@ -707,7 +789,14 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
 }
 
 .preview-goal-ai .el-icon {
-  color: #eb8396;
+  color: #e2788e;
+  font-size: 14px;
+  transition: color .16s ease, transform .16s ease;
+}
+
+.preview-goal-ai:hover .el-icon {
+  color: #fff;
+  transform: rotate(-8deg);
 }
 
 .preview-activity-status {
@@ -767,7 +856,28 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
   line-height: 1.6;
 }
 
+.exam-framework-card :deep(.el-card__header) {
+  padding-bottom: 13px;
+}
+
+.exam-goal-item {
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+}
+
+.exam-launch-button {
+  width: 100%;
+  min-height: 54px;
+  margin-top: 14px;
+  border: 0;
+  border-radius: 13px;
+  box-shadow: 0 9px 17px rgba(224, 64, 75, .18);
+  font-size: 14px;
+  font-weight: 700;
+}
+
 @media (max-width: 767px) {
+  .review-goal-grid { grid-template-columns: 1fr; }
+
   .learning-hero {
     grid-template-columns: 70px minmax(0, 1fr);
     gap: 22px;
