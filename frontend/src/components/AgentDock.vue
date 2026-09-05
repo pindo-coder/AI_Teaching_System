@@ -101,9 +101,11 @@ async function handleWorkspaceAiRequest(event: Event) {
   const request = (event as CustomEvent<WorkspaceAiRequest>).detail
   const expectedCourseId = routeCourseId.value || workspace.currentCourse?.id || null
   const expectedChapterId = routeChapterId.value || workspace.currentChapter?.id || null
-  if (!request || request.courseId !== expectedCourseId || request.chapterId !== expectedChapterId || request.learningStage !== stage.value) return
-  manualCourseId.value = null
-  manualChapterIds.value = null
+  const scopeMatches = (!expectedCourseId || request?.courseId === expectedCourseId)
+    && (!expectedChapterId || request?.chapterId === expectedChapterId)
+  if (!request || !scopeMatches || request.learningStage !== stage.value) return
+  manualCourseId.value = request.courseId
+  manualChapterIds.value = [request.chapterId]
   manualClassId.value = null
   await refreshContext()
   expanded.value = true

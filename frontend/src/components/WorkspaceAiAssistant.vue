@@ -787,9 +787,14 @@ async function send(executionId?: number | Event) {
 }
 
 async function applyExternalRequest(request: WorkspaceAiRequest) {
-  switchMode('chat')
-  chatQuestion.value = request.prompt.slice(0, 2000)
-  chatTaskType.value = request.taskType
+  const requestMode = request.mode || 'chat'
+  switchMode(requestMode)
+  if (requestMode === 'agent') {
+    agentQuestion.value = request.prompt.slice(0, 2000)
+  } else {
+    chatQuestion.value = request.prompt.slice(0, 2000)
+    chatTaskType.value = request.taskType
+  }
   chatQuestionIsUserAuthored.value = false
   historyVisible.value = false
   taskCenterVisible.value = false

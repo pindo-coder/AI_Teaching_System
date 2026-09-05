@@ -42,6 +42,19 @@ def decision_from_call(call: ToolCall) -> AgentDecision:
 class AgentRuntime:
     """不直接访问业务数据库，只负责编排已注册工具。"""
 
+    # A generated plan may reorder calls after each result. These dependencies
+    # keep tools that consume state behind the reads that establish that state.
+    TOOL_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+        "inspect_learning_state": ("inspect_context",),
+        "draft_study_plan": ("inspect_context", "inspect_tasks", "inspect_learning_state"),
+        "draft_note_improvement": ("inspect_context", "inspect_learning_state"),
+    }
+    DEPENDENCY_REASONS: dict[str, str] = {
+        "inspect_context": "确认当前学习专题",
+        "inspect_tasks": "读取个人待完成任务",
+        "inspect_learning_state": "读取当前专题任务点和笔记状态",
+    }
+
     def __init__(self, db: Any, user: Any) -> None:
         self.db = db
         self.user = user
@@ -96,9 +109,46 @@ class AgentRuntime:
             if call.name in completed:
                 continue
             spec = TOOL_REGISTRY.get(call.name)
-            if spec is not None and role in spec.allowed_roles:
-                return call
+            if spec is None or role not in spec.allowed_roles:
+                continue
+            dependencies = AgentRuntime.TOOL_DEPENDENCIES.get(call.name, ())
+            if not set(dependencies).issubset(completed):
+                continue
+            return call
         return None
+
+    @classmethod
+    def _ensure_candidate_dependencies(
+        cls,
+        candidates: list[ToolCall],
+        completed: set[str],
+        permitted: set[str],
+    ) -> list[ToolCall]:
+        """Add missing read steps before a model-selected dependent tool.
+
+        The planner may return a shortened plan during a replan. Expanding the
+        dependency graph here keeps the execution trace complete even when the
+        model only mentions the final drafting action.
+        """
+        originals = {call.name: call for call in candidates}
+        selected: list[ToolCall] = []
+        included = set(completed)
+
+        def append(name: str) -> None:
+            if name in included or name not in permitted:
+                return
+            for dependency in cls.TOOL_DEPENDENCIES.get(name, ()):
+                append(dependency)
+            call = originals.get(name) or ToolCall(
+                name,
+                cls.DEPENDENCY_REASONS.get(name, "完成当前目标"),
+            )
+            selected.append(call)
+            included.add(name)
+
+        for call in candidates:
+            append(call.name)
+        return selected
 
     @staticmethod
     def _merge_replanned_candidates(
@@ -166,6 +216,7 @@ class AgentRuntime:
 
         permitted = allowed_tools(role)
         candidates = [call for call in candidates if call.name in permitted]
+        candidates = self._ensure_candidate_dependencies(candidates, set(), set(permitted))
         plan_tools = list(dict.fromkeys(call.name for call in candidates))
         decisions = [decision_from_call(call) for call in candidates]
         plan_title = "平台治理检查计划" if role == "admin" else "动态任务执行计划（自主任务执行计划）"
@@ -277,6 +328,7 @@ class AgentRuntime:
                 completed,
                 permitted,
             )
+            candidates = self._ensure_candidate_dependencies(candidates, completed, permitted)
             decisions = [decision_from_call(call) for call in candidates]
             # LLM 可以根据中间结果追加新工具；计划卡片同步扩展，而不是把新步骤藏在执行记录之外。
             known_keys = {item["key"] for item in steps}

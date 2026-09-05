@@ -9,6 +9,7 @@ export interface WorkspaceAiRequest {
   learningStage: LearningStage
   taskType: AiTaskType
   prompt: string
+  mode?: 'chat' | 'agent'
   autoSend?: boolean
 }
 

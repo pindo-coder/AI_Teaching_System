@@ -506,6 +506,73 @@ def test_runtime_replan_keeps_unexecuted_original_steps() -> None:
     assert [call.name for call in merged] == ["draft_study_plan", "inspect_tasks"]
 
 
+def test_runtime_defers_study_plan_until_learning_state_is_read() -> None:
+    candidates = [
+        ToolCall("draft_study_plan", "生成学习计划"),
+        ToolCall("inspect_tasks", "读取任务"),
+        ToolCall("inspect_learning_state", "读取专题状态"),
+    ]
+
+    next_call = AgentRuntime._next_candidate(candidates, {"inspect_context"}, "student")
+    assert next_call is not None
+    assert next_call.name == "inspect_tasks"
+
+    next_call = AgentRuntime._next_candidate(
+        candidates,
+        {"inspect_context", "inspect_tasks"},
+        "student",
+    )
+    assert next_call is not None
+    assert next_call.name == "inspect_learning_state"
+
+    next_call = AgentRuntime._next_candidate(
+        candidates,
+        {"inspect_context", "inspect_tasks", "inspect_learning_state"},
+        "student",
+    )
+    assert next_call is not None
+    assert next_call.name == "draft_study_plan"
+
+
+def test_runtime_adds_missing_study_plan_dependencies() -> None:
+    expanded = AgentRuntime._ensure_candidate_dependencies(
+        [ToolCall("draft_study_plan", "生成学习计划")],
+        completed=set(),
+        permitted={"inspect_context", "inspect_tasks", "inspect_learning_state", "draft_study_plan"},
+    )
+
+    assert [call.name for call in expanded] == [
+        "inspect_context", "inspect_tasks", "inspect_learning_state", "draft_study_plan",
+    ]
+
+
+def test_registered_study_plan_tool_ignores_model_metadata_but_keeps_other_tools_strict(
+    db: Session,
+) -> None:
+    user = User(username="agent_study_plan_schema_user", password_hash=hash_password("secure-pass-123"), role="student")
+    course = Course(name="学习计划测试课程", description="测试课程")
+    db.add_all([user, course])
+    db.flush()
+    chapter = Chapter(course_id=course.id, title="学习计划测试专题", content="测试教材内容", sort_order=1)
+    db.add(chapter)
+    db.commit()
+    context = AgentContextService(db, user).resolve(course_id=course.id, chapter_id=chapter.id)
+
+    result = invoke_registered_tool(
+        PlanningAgent(db, user),
+        name="draft_study_plan",
+        reason="生成学习计划",
+        arguments={"goal": "最近学习总结", "context": {"chapter": chapter.id}},
+        question="请制定学习计划",
+        role="student",
+        context=context,
+    )
+
+    assert result.status == "completed"
+    assert result.data is not None
+    assert result.data["has_note"] is False
+
+
 def test_registered_tool_rejects_unknown_arguments(db: Session) -> None:
     user = User(username="agent_schema_user", password_hash=hash_password("secure-pass-123"), role="student")
     db.add(user)

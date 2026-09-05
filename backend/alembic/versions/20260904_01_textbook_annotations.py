@@ -32,7 +32,7 @@ def upgrade() -> None:
         sa.Column("prefix_text", sa.String(length=300), nullable=False, server_default=""),
         sa.Column("suffix_text", sa.String(length=300), nullable=False, server_default=""),
         sa.Column("annotation_type", sa.String(length=20), nullable=False, server_default="key_point"),
-        sa.Column("comment", sa.Text(), nullable=False, server_default=""),
+        sa.Column("comment", sa.Text(), nullable=False),
         sa.Column("chapter_content_hash", sa.String(length=64), nullable=False),
         sa.Column("created_time", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_time", sa.DateTime(), nullable=False, server_default=sa.func.now()),

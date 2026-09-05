@@ -29,6 +29,21 @@ class EmptyToolArgs(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+def _normalize_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep model-added metadata from breaking context-driven tools.
+
+    ``draft_study_plan`` gets all of its facts from the authenticated user and
+    the resolved workspace context. Some compatible models still emit fields
+    such as ``goal`` or ``context`` in the tool call even though the tool has no
+    user-supplied parameters. Discard only those fields here; direct calls to
+    every other registered tool remain protected by ``extra='forbid'``.
+    """
+    if name != "draft_study_plan":
+        return arguments
+    allowed = set(EmptyToolArgs.model_fields)
+    return {key: value for key, value in arguments.items() if key in allowed}
+
+
 class SearchMaterialsArgs(EmptyToolArgs):
     """资料检索允许 Planner 提供检索词及返回数量。"""
 
@@ -127,7 +142,7 @@ def invoke_registered_tool(
             status="failed",
             warnings=[f"角色“{role}”无权调用工具“{name}”"],
         )
-    raw_arguments = arguments or {}
+    raw_arguments = _normalize_tool_arguments(name, arguments or {})
     try:
         validated_arguments = spec.args_model.model_validate(raw_arguments)
     except ValidationError as exc:

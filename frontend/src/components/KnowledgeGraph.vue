@@ -25,19 +25,18 @@ function chapterDisplayTitle(chapter: Chapter): string {
 
 const overviewNodes = computed(() => {
   const total = props.chapters.length
-  const innerCount = total <= 8 ? total : Math.min(7, Math.ceil(total * .4))
+  const layout = [
+    [16, 28], [28, 14], [44, 20], [62, 13], [80, 27], [88, 46], [78, 67], [64, 83],
+    [45, 88], [26, 78], [12, 60], [20, 44], [35, 36], [56, 34], [72, 44], [67, 61],
+    [47, 65], [34, 56], [87, 82], [10, 82],
+  ]
   return props.chapters.map((chapter, index) => {
-    const inner = index < innerCount
-    const ringIndex = inner ? index : index - innerCount
-    const ringCount = inner ? innerCount : total - innerCount
-    const offset = inner ? -.32 : .18
-    const angle = -Math.PI / 2 + offset + (Math.PI * 2 * ringIndex) / Math.max(ringCount, 1)
+    const [x, y] = layout[index % layout.length]
     return {
       chapter,
       title: chapterDisplayTitle(chapter),
-      x: 50 + Math.cos(angle) * (inner ? 25 : 43),
-      y: 50 + Math.sin(angle) * (inner ? 28 : 42),
-      inner,
+      x,
+      y,
     }
   })
 })
@@ -55,12 +54,13 @@ function extractKnowledgePoints(chapter: Chapter): string[] {
 const radialPoints = computed(() => {
   if (!selectedChapter.value) return []
   const points = extractKnowledgePoints(selectedChapter.value)
+  const layout = [[50, 12], [79, 30], [76, 72], [50, 88], [22, 70], [20, 30]]
   return points.map((label, index) => {
-    const angle = -Math.PI / 2 + (Math.PI * 2 * index) / points.length
+    const [x, y] = layout[index % layout.length]
     return {
       label,
-      x: 50 + Math.cos(angle) * 35,
-      y: 50 + Math.sin(angle) * 34,
+      x,
+      y,
     }
   })
 })
@@ -69,7 +69,7 @@ const radialPoints = computed(() => {
 <template>
   <section class="knowledge-graph-card">
     <header class="knowledge-graph-heading">
-      <div><p class="eyebrow">Knowledge Map</p><h2>教材知识图谱</h2><p>{{ selectedChapter ? '查看当前专题的核心知识点' : '点击专题节点，展开本章知识结构' }}</p></div>
+      <div><p class="eyebrow">Knowledge Map</p><h2><el-icon class="knowledge-graph-title-icon"><Reading /></el-icon>知识图谱</h2><p>{{ selectedChapter ? '查看当前专题的核心知识点' : '点击专题节点，展开本章知识结构' }}</p></div>
       <el-button v-if="selectedChapter" :icon="Back" plain @click="selectedId = null">返回全书</el-button>
     </header>
 
@@ -79,7 +79,7 @@ const radialPoints = computed(() => {
         <div class="orbit orbit-inner"></div><div class="orbit orbit-outer"></div>
         <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line v-for="node in overviewNodes" :key="node.chapter.id" x1="50" y1="50" :x2="node.x" :y2="node.y" /></svg>
         <div class="course-knowledge-core"><span>教材知识体系</span><strong>{{ courseName }}</strong><small>{{ chapters.length }} 个专题</small></div>
-        <button v-for="node in overviewNodes" :key="node.chapter.id" class="chapter-bubble" :class="{ inner: node.inner }" :style="{ left: `${node.x}%`, top: `${node.y}%` }" :title="node.title" @click="selectedId = node.chapter.id">
+        <button v-for="node in overviewNodes" :key="node.chapter.id" class="chapter-bubble" :style="{ left: `${node.x}%`, top: `${node.y}%` }" :title="node.title" @click="selectedId = node.chapter.id">
           <strong>{{ String(node.chapter.sort_order || node.chapter.id).padStart(2, '0') }}</strong>
           <span>{{ node.title }}</span>
         </button>
