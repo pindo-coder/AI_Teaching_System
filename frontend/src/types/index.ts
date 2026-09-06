@@ -102,3 +102,50 @@ export interface DashboardData {
   outputs: string[]
   next_action: string
 }
+
+export interface TeacherDashboardMetrics {
+  ongoing_tasks: number
+  average_completion_rate: number
+  active_students_today: number
+  active_rate_today: number
+  pending_materials: number
+  available_evidence: number
+}
+
+export interface TeacherActivityPoint {
+  date: string
+  active_students: number
+  total_students: number
+  active_rate: number
+}
+
+export interface TeacherTodo {
+  kind: 'assignment' | 'material' | 'calibration' | 'join_request'
+  title: string
+  description: string
+  count: number
+  priority: 'urgent' | 'normal'
+  href: string | null
+}
+
+export interface TeacherCourseRow {
+  teaching_class_id: number
+  class_name: string
+  class_code: string
+  course_id: number | null
+  course_name: string
+  student_count: number
+  completion_rate: number
+  start_date: string | null
+  end_date: string | null
+  status: string
+}
+
+export interface TeacherDashboardData {
+  period_start: string
+  period_end: string
+  metrics: TeacherDashboardMetrics
+  activity_series: TeacherActivityPoint[]
+  todos: TeacherTodo[]
+  courses: TeacherCourseRow[]
+}

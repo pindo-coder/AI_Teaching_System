@@ -85,6 +85,7 @@ const loading = computed(() => loadingByMode.value[mode.value])
 const historyVisible = ref(false)
 const taskCenterVisible = ref(false)
 const executions = ref<AiAgentExecution[]>([])
+const continuationExecutionId = ref<number | null>(null)
 const serverTemplates = ref<AiAgentTemplate[]>([])
 const executionLoading = ref(false)
 const deletingExecutionId = ref<number | null>(null)
@@ -234,6 +235,7 @@ function scrollToBottom(targetMode: AiWorkspaceMode = mode.value) {
 }
 function selectQuickAction(prompt: string, selectedMode: AiWorkspaceMode = mode.value, taskType?: AiTaskType) {
   switchMode(selectedMode)
+  continuationExecutionId.value = null
   if (selectedMode === 'chat') {
     chatQuestion.value = prompt
     chatTaskType.value = taskType || 'question_answer'
@@ -275,6 +277,7 @@ function switchMode(nextMode: AiWorkspaceMode) {
     discardComposerMedia()
     ElMessage.info('Agent 暂不接收图片或语音，已清理本轮临时附件')
   }
+  if (nextMode !== 'agent') continuationExecutionId.value = null
   mode.value = nextMode
   historyVisible.value = false
   taskCenterVisible.value = false
@@ -299,6 +302,7 @@ function newConversation() {
     return false
   }
   if (mediaAssets.value.length) discardComposerMedia()
+  continuationExecutionId.value = null
   messages.value = []
   if (mode.value === 'chat') {
     chatTaskType.value = 'question_answer'
@@ -348,6 +352,66 @@ function openTaskCenter() {
 }
 function executionStatusLabel(status: AiAgentExecution['status']) {
   return ({ planning: '正在规划', running: '正在执行', waiting_input: '等待补充信息', waiting_confirmation: '等待确认', waiting_user_action: '等待你处理', advice_ready: '建议已生成', completed: '已完成', failed: '执行异常', cancelled: '已取消' } as Record<AiAgentExecution['status'], string>)[status]
+}
+function canContinueExecution(status: AiAgentExecution['status']) {
+  return status === 'waiting_input'
+    || status === 'waiting_user_action'
+    || status === 'advice_ready'
+    || status === 'completed'
+    || status === 'failed'
+}
+function scrollToExecution(executionId: number) {
+  void nextTick(() => {
+    const target = messageList.value?.querySelector<HTMLElement>(`[data-execution-id="${executionId}"]`)
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
+}
+function restoreExecutionMessages(execution: AiAgentExecution) {
+  switchMode('agent')
+  const existing = agentMessages.value.find((message) => message.role === 'assistant' && message.execution?.id === execution.id)
+  if (existing) {
+    existing.execution = execution
+    persistHistory()
+  } else {
+    const messageId = Date.now()
+    const plan = 'steps' in execution.plan && Array.isArray(execution.plan.steps)
+      ? execution.plan as AiAgentPlan
+      : undefined
+    const summary = execution.result?.summary?.trim() || execution.error_message || '该任务没有可展示的历史回复，请继续输入新的问题。'
+    agentMessages.value.push(
+      {
+        id: messageId,
+        mode: 'agent',
+        role: 'user',
+        content: execution.question,
+        createdAt: execution.created_time || new Date().toISOString(),
+      },
+      {
+        id: messageId + 1,
+        mode: 'agent',
+        role: 'assistant',
+        content: summary,
+        grounded: Boolean(execution.course_id && execution.chapter_id),
+        sources: [],
+        plan,
+        actions: execution.result?.actions || [],
+        execution,
+        createdAt: execution.updated_time || execution.created_time || new Date().toISOString(),
+      },
+    )
+    persistHistory()
+  }
+  historyVisible.value = false
+  taskCenterVisible.value = false
+  scrollToExecution(execution.id)
+}
+async function continueExecution(execution: AiAgentExecution) {
+  if (loadingByMode.value.agent || !canContinueExecution(execution.status)) return
+  restoreExecutionMessages(execution)
+  continuationExecutionId.value = execution.id
+  agentQuestion.value = ''
+  await nextTick()
+  composerInput.value?.focus()
 }
 async function retryExecution(execution: AiAgentExecution) {
   if (loadingByMode.value.agent) return
@@ -651,16 +715,20 @@ async function downloadArtifact(run: AgentRun, artifactKey: string, fileName: st
 async function send(executionId?: number | Event) {
   // Vue 会把 click/keydown 的原生事件作为无参处理器的第一个参数传入。
   // 只有任务中心显式传入的数字才是 execution_id，原生事件必须忽略。
-  const safeExecutionId = typeof executionId === 'number' && Number.isInteger(executionId) && executionId > 0
+  const requestedExecutionId = typeof executionId === 'number' && Number.isInteger(executionId) && executionId > 0
     ? executionId
+    : continuationExecutionId.value
+  const safeExecutionId = requestedExecutionId && Number.isInteger(requestedExecutionId) && requestedExecutionId > 0
+    ? requestedExecutionId
     : undefined
+  if (safeExecutionId && typeof executionId === 'number') continuationExecutionId.value = safeExecutionId
   const requestMode: AiWorkspaceMode = safeExecutionId ? 'agent' : mode.value
   const requestTaskType: AiTaskType = requestMode === 'chat' ? chatTaskType.value : 'question_answer'
   const shouldSubmitLearningQuestion = requestMode === 'chat'
     && requestTaskType === 'question_answer'
     && chatQuestionIsUserAuthored.value
   const rawContent = (safeExecutionId
-    ? executions.value.find((item) => item.id === safeExecutionId)?.question || question.value
+    ? question.value || executions.value.find((item) => item.id === safeExecutionId)?.question || ''
     : requestMode === 'chat' ? chatQuestion.value : agentQuestion.value).trim()
   const selectedImages = requestMode === 'chat'
     ? mediaAssets.value.filter((asset) => asset.media_kind === 'image' && asset.status === 'ready')
@@ -703,12 +771,13 @@ async function send(executionId?: number | Event) {
       learning_stage: props.context?.learning_stage || props.learningStage || 'preview',
       page_name: props.pageName || null,
     }
-    // 从任务中心重试时必须锁定原任务的上下文快照，不能被当前页面的课程覆盖。
+    // 从任务中心续接或重试时必须锁定原任务的上下文快照，不能被当前页面的课程覆盖。
     const scope = safeExecutionId
       ? { course_id: null, chapter_id: null, chapter_ids: [], teaching_class_id: null, learning_stage: 'preview' as LearningStage, page_name: null }
       : currentScope
     if (requestMode === 'agent') {
-      await aiApi.workspaceAgentStream({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {
+      const streamAgent = safeExecutionId ? aiApi.continueWorkspaceAgentExecution : aiApi.workspaceAgentStream
+      await streamAgent({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {
         onContext: (context) => {
           emit('context-updated', context)
           updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = Boolean(context.course_id && context.chapter_id) })
@@ -789,6 +858,7 @@ async function send(executionId?: number | Event) {
 async function applyExternalRequest(request: WorkspaceAiRequest) {
   const requestMode = request.mode || 'chat'
   switchMode(requestMode)
+  continuationExecutionId.value = null
   if (requestMode === 'agent') {
     agentQuestion.value = request.prompt.slice(0, 2000)
   } else {
@@ -835,7 +905,8 @@ defineExpose({ applyExternalRequest })
           <template v-else-if="execution.status === 'planning' || execution.status === 'running'">
             <el-button size="small" type="danger" plain @click="cancelRunningExecution(execution)">停止</el-button>
           </template>
-          <el-button v-else-if="execution.status === 'failed' || execution.status === 'completed' || execution.status === 'waiting_user_action' || execution.status === 'advice_ready'" size="small" type="primary" plain @click="retryExecution(execution)">基于此任务重试</el-button>
+          <el-button v-if="canContinueExecution(execution.status)" size="small" type="primary" @click="continueExecution(execution)">继续对话</el-button>
+          <el-button v-if="execution.status === 'failed' || execution.status === 'completed' || execution.status === 'waiting_user_action' || execution.status === 'advice_ready'" size="small" type="primary" plain @click="retryExecution(execution)">基于此任务重试</el-button>
           <el-button
             size="small"
             text
@@ -865,7 +936,7 @@ defineExpose({ applyExternalRequest })
       <section v-if="!messages.length" class="workspace-ai-capabilities">
         <button v-for="action in mode === 'chat' ? chatQuickActions : quickActions" :key="action.title" type="button" @click="selectQuickAction(action.prompt, mode, action.taskType)"><el-icon><component :is="action.icon" /></el-icon><span><strong>{{ action.title }}</strong><small>{{ action.description }}</small><em v-if="action.requiresContext && !(props.context?.chapter_id || props.chapterId)">执行前需选择教材专题</em></span></button>
       </section>
-      <div v-for="message in renderedMessages" :key="message.id" class="workspace-ai-message" :class="`is-${message.role}`">
+      <div v-for="message in renderedMessages" :key="message.id" class="workspace-ai-message" :class="`is-${message.role}`" :data-execution-id="message.execution?.id || undefined">
         <div v-if="message.role === 'assistant'" class="workspace-ai-avatar"><el-icon><MagicStick /></el-icon><span>AI</span></div>
         <div class="workspace-ai-bubble">
           <p v-if="message.role === 'user'">{{ message.content }}</p>

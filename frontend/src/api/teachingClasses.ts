@@ -11,7 +11,7 @@ export interface TeachingClass {
 }
 export interface ClassMember { id: number; user_id: number; username: string; identity_no: string | null; status: string; join_method: string; group_id: number | null }
 export interface ClassRequest { id: number; user_id: number; username: string; identity_no: string | null; request_type: string; created_time: string }
-export interface ClassGroup { id: number; name: string; sort_order: number; user_ids: number[] }
+export interface ClassGroup { id: number; name: string; sort_order: number; user_ids: number[]; leader_user_id: number | null }
 export interface AvailableTeacher { id: number; username: string; identity_no: string | null }
 
 export const teachingClassApi = {
@@ -32,7 +32,7 @@ export const teachingClassApi = {
   roster: (classId: number, file: File) => { const data = new FormData(); data.append('file', file); return http.post<ApiResponse<Record<string, number>>>(`/teaching-classes/${classId}/roster`, data) },
   groups: (classId: number) => http.get<ApiResponse<ClassGroup[]>>(`/teaching-classes/${classId}/groups`),
   randomGroups: (classId: number, groupCount: number) => http.post<ApiResponse<ClassGroup[]>>(`/teaching-classes/${classId}/groups/random`, { group_count: groupCount, name_prefix: '第' }),
-  createGroup: (classId: number, name: string, userIds: number[]) => http.post<ApiResponse<ClassGroup>>(`/teaching-classes/${classId}/groups`, { name, user_ids: userIds }),
+  createGroup: (classId: number, name: string, userIds: number[], leaderUserId?: number) => http.post<ApiResponse<ClassGroup>>(`/teaching-classes/${classId}/groups`, { name, user_ids: userIds, leader_user_id: leaderUserId }),
   updateStatus: (classId: number, status: TeachingClass['status']) => http.put<ApiResponse<{ id: number; status: string }>>(`/teaching-classes/${classId}/status`, { status }),
   updateJoinCode: (classId: number, payload: { enabled?: boolean; regenerate?: boolean }) => http.put<ApiResponse<{ join_code: string; join_code_enabled: boolean }>>(`/teaching-classes/${classId}/join-code`, payload),
   addTeacher: (classId: number, userId: number) => http.post<ApiResponse<{ id: number; user_id: number }>>(`/teaching-classes/${classId}/teachers`, { user_id: userId }),

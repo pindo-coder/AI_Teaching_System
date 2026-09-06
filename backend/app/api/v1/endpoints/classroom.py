@@ -1,24 +1,74 @@
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
-from app.core.time import utc_now
+from app.core.time import to_utc_naive, utc_now
 from app.db.session import get_db
 from app.models.chapter import Chapter
 from app.models.classroom import ClassroomActivity, ClassroomResponse, DiscussionReply, DiscussionThread
 from app.models.course import Course
 from app.models.user import User
-from app.models.teaching_class import ClassMembership, TeachingClass, TeachingClassMaterial, TeachingClassTeacher
+from app.models.teaching_class import ClassGroup, ClassGroupMember, ClassMembership, TeachingClass, TeachingClassMaterial, TeachingClassTeacher
 from app.schemas.classroom import (
-    ActivityCreate, ActivityRead, DiscussionAuthor, DiscussionCreate, DiscussionReplyCreate,
-    DiscussionReplyRead, DiscussionReplyUpdate, DiscussionThreadRead, DiscussionUpdate,
-    ResponseCreate, ResponseRead,
+    ActivityCreate, ActivityRead, ActivityResponsesRead, DiscussionAuthor, DiscussionCreate,
+    DiscussionReplyCreate, DiscussionReplyRead, DiscussionReplyUpdate, DiscussionThreadRead,
+    DiscussionUpdate, ResponseCommentUpdate, ResponseCreate, ResponseRead,
 )
 from app.schemas.common import ApiResponse
+from app.schemas.ai import AiAssistRequest
+from app.services.ai_service import AiService
 
 
 router = APIRouter(prefix="/classroom", tags=["classroom"])
+
+
+def _activity_read(activity: ClassroomActivity, current_user: User, db: Session) -> ActivityRead:
+    response_count = db.scalar(select(func.count(func.distinct(ClassroomResponse.user_id))).join(
+        User, User.id == ClassroomResponse.user_id
+    ).where(
+        ClassroomResponse.activity_id == activity.id, User.role == "student"
+    )) or 0
+    my_response_count = db.scalar(select(func.count(ClassroomResponse.id)).where(
+        ClassroomResponse.activity_id == activity.id, ClassroomResponse.user_id == current_user.id
+    )) or 0
+    return ActivityRead.model_validate(activity).model_copy(update={
+        "response_count": int(response_count), "my_response_count": int(my_response_count),
+    })
+
+
+def _activity_or_404(activity_id: int, db: Session) -> ClassroomActivity:
+    activity = db.get(ClassroomActivity, activity_id)
+    if activity is None:
+        raise HTTPException(status_code=404, detail="课堂互动不存在")
+    return activity
+
+
+def _check_activity_access(activity: ClassroomActivity, current_user: User, db: Session) -> None:
+    if activity.teaching_class_id is None:
+        return
+    if current_user.role == "student":
+        membership = db.scalar(select(ClassMembership.id).where(
+            ClassMembership.teaching_class_id == activity.teaching_class_id,
+            ClassMembership.user_id == current_user.id,
+            ClassMembership.status == "active",
+        ))
+        if membership is None:
+            raise HTTPException(status_code=403, detail="你不属于该课堂互动所在教学班")
+    else:
+        _class_access(db, current_user, activity.teaching_class_id)
+
+
+def _response_read(response: ClassroomResponse, user_name: str) -> ResponseRead:
+    return ResponseRead(
+        id=response.id, activity_id=response.activity_id, user_id=response.user_id,
+        user_name=user_name, answer=response.answer, attempt_no=response.attempt_no,
+        group_id=response.group_id, teacher_comment=response.teacher_comment,
+        ai_comment=response.ai_comment, commented_by=response.commented_by,
+        commented_time=response.commented_time, created_time=response.created_time,
+    )
 
 
 def _class_access(db: Session, user: User, class_id: int) -> None:
@@ -61,7 +111,7 @@ def _reply_read(reply: DiscussionReply, author: User) -> DiscussionReplyRead:
 
 @router.get("/activities", response_model=ApiResponse[list[ActivityRead]])
 def list_activities(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[ActivityRead]]:
-    statement = select(ClassroomActivity).where(ClassroomActivity.status == "published")
+    statement = select(ClassroomActivity).where(ClassroomActivity.status.in_(["published", "closed"]))
     if current_user.role == "student":
         class_ids = select(ClassMembership.teaching_class_id).where(
             ClassMembership.user_id == current_user.id, ClassMembership.status == "active"
@@ -70,14 +120,14 @@ def list_activities(current_user: User = Depends(get_current_user), db: Session 
             (ClassroomActivity.teaching_class_id.is_(None)) | (ClassroomActivity.teaching_class_id.in_(class_ids))
         )
     elif current_user.role == "teacher":
-        class_ids = select(TeachingClassTeacher.teaching_class_id).where(
-            TeachingClassTeacher.user_id == current_user.id
-        )
+        class_ids = select(TeachingClassTeacher.teaching_class_id).where(TeachingClassTeacher.user_id == current_user.id)
+        owned_class_ids = select(TeachingClass.id).where(TeachingClass.owner_id == current_user.id)
         statement = statement.where(
-            (ClassroomActivity.teaching_class_id.is_(None)) | (ClassroomActivity.teaching_class_id.in_(class_ids))
+            (ClassroomActivity.teaching_class_id.is_(None))
+            | (ClassroomActivity.teaching_class_id.in_(class_ids.union(owned_class_ids)))
         )
     activities = db.scalars(statement.order_by(ClassroomActivity.id.desc())).all()
-    return ApiResponse(data=list(activities))
+    return ApiResponse(data=[_activity_read(item, current_user, db) for item in activities])
 
 
 @router.post("/activities", response_model=ApiResponse[ActivityRead], status_code=status.HTTP_201_CREATED)
@@ -92,31 +142,171 @@ def publish_activity(payload: ActivityCreate, current_user: User = Depends(requi
             TeachingClassMaterial.course_id == payload.course_id,
         )) is None:
             raise HTTPException(status_code=400, detail="该教材未绑定到当前教学班")
-    activity = ClassroomActivity(**payload.model_dump(), created_by=current_user.id)
+    if payload.activity_type == "group":
+        if payload.teaching_class_id is None or payload.grouping_mode not in {"manual", "random"}:
+            raise HTTPException(status_code=400, detail="小组讨论必须选择教学班和分组方式")
+        if not db.scalar(select(ClassGroup.id).where(ClassGroup.teaching_class_id == payload.teaching_class_id)):
+            raise HTTPException(status_code=400, detail="请先完成教学班分组")
+    if payload.activity_type != "group" and payload.grouping_mode is not None:
+        raise HTTPException(status_code=400, detail="只有小组讨论需要分组方式")
+    values = payload.model_dump()
+    values["deadline_time"] = to_utc_naive(payload.deadline_time) if payload.deadline_time else None
+    activity = ClassroomActivity(**values, created_by=current_user.id)
     db.add(activity)
     db.commit()
     db.refresh(activity)
-    return ApiResponse(message="课堂互动已发布", data=activity)
+    return ApiResponse(message="课堂互动已发布", data=_activity_read(activity, current_user, db))
 
 
 @router.post("/activities/{activity_id}/responses", response_model=ApiResponse[ResponseRead], status_code=status.HTTP_201_CREATED)
 def submit_response(activity_id: int, payload: ResponseCreate, current_user: User = Depends(require_roles("student", "teacher", "admin")), db: Session = Depends(get_db)) -> ApiResponse[ResponseRead]:
-    activity = db.get(ClassroomActivity, activity_id)
-    if activity is None or activity.status != "published":
+    activity = _activity_or_404(activity_id, db)
+    if activity.status != "published":
         raise HTTPException(status_code=404, detail="课堂互动不存在或已结束")
-    if activity.teaching_class_id is not None and current_user.role == "student":
-        membership = db.scalar(select(ClassMembership.id).where(
-            ClassMembership.teaching_class_id == activity.teaching_class_id,
-            ClassMembership.user_id == current_user.id,
-            ClassMembership.status == "active",
-        ))
+    _check_activity_access(activity, current_user, db)
+    if activity.deadline_time and activity.deadline_time < utc_now():
+        raise HTTPException(status_code=400, detail="该课堂互动已超过截止时间")
+    submitted_count = db.scalar(select(func.count(ClassroomResponse.id)).where(
+        ClassroomResponse.activity_id == activity_id, ClassroomResponse.user_id == current_user.id
+    )) or 0
+    if submitted_count >= activity.response_limit:
+        raise HTTPException(status_code=400, detail=f"该活动最多提交 {activity.response_limit} 次")
+    group_id = None
+    if activity.activity_type == "group":
+        membership = db.execute(select(ClassGroupMember, ClassGroup).join(
+            ClassGroup, ClassGroup.id == ClassGroupMember.group_id
+        ).where(
+            ClassGroupMember.teaching_class_id == activity.teaching_class_id,
+            ClassGroupMember.user_id == current_user.id,
+        )).first()
         if membership is None:
-            raise HTTPException(status_code=403, detail="你不属于该课堂互动所在教学班")
-    response = ClassroomResponse(activity_id=activity_id, user_id=current_user.id, answer=payload.answer.strip())
+            raise HTTPException(status_code=400, detail="你还没有加入当前教学班的小组")
+        group_member, group = membership
+        if group.leader_user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="小组讨论仅限组长提交")
+        group_id = group_member.group_id
+    response = ClassroomResponse(
+        activity_id=activity_id, user_id=current_user.id, answer=payload.answer.strip(),
+        attempt_no=int(submitted_count) + 1, group_id=group_id,
+    )
     db.add(response)
     db.commit()
     db.refresh(response)
-    return ApiResponse(message="观点提交成功", data=response)
+    return ApiResponse(message="回答提交成功", data=_response_read(response, current_user.username))
+
+
+@router.get("/activities/{activity_id}/responses", response_model=ApiResponse[ActivityResponsesRead])
+def list_activity_responses(
+    activity_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[ActivityResponsesRead]:
+    activity = _activity_or_404(activity_id, db)
+    _check_activity_access(activity, current_user, db)
+    responses = db.scalars(select(ClassroomResponse).join(
+        User, User.id == ClassroomResponse.user_id
+    ).where(
+        ClassroomResponse.activity_id == activity_id, User.role == "student"
+    ).order_by(ClassroomResponse.created_time, ClassroomResponse.id)).all()
+    users = {user.id: user for user in db.scalars(select(User).where(
+        User.id.in_([item.user_id for item in responses])
+    )).all()} if responses else {}
+    anonymous_names: dict[int, str] = {}
+    next_anonymous = 1
+    response_items: list[ResponseRead] = []
+    for item in responses:
+        account = users.get(item.user_id)
+        if account is None:
+            continue
+        if current_user.role in {"teacher", "admin"}:
+            display_name = account.username
+        elif item.user_id == current_user.id:
+            display_name = "我的回答"
+        else:
+            if item.user_id not in anonymous_names:
+                anonymous_names[item.user_id] = f"同学{next_anonymous}"
+                next_anonymous += 1
+            display_name = anonymous_names[item.user_id]
+        response_items.append(_response_read(item, display_name))
+    response_count = len({item.user_id for item in responses})
+    return ApiResponse(data=ActivityResponsesRead(
+        activity=_activity_read(activity, current_user, db),
+        responses=response_items,
+        response_count=response_count,
+    ))
+
+
+@router.patch("/activities/{activity_id}/responses/{response_id}", response_model=ApiResponse[ResponseRead])
+def comment_activity_response(
+    activity_id: int,
+    response_id: int,
+    payload: ResponseCommentUpdate,
+    current_user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[ResponseRead]:
+    activity = _activity_or_404(activity_id, db)
+    _check_activity_access(activity, current_user, db)
+    response = db.scalar(select(ClassroomResponse).where(
+        ClassroomResponse.id == response_id, ClassroomResponse.activity_id == activity_id
+    ))
+    if response is None:
+        raise HTTPException(status_code=404, detail="学生回答不存在")
+    response.teacher_comment = payload.teacher_comment.strip() or None
+    response.commented_by = current_user.id
+    response.commented_time = utc_now()
+    db.commit()
+    db.refresh(response)
+    student = db.get(User, response.user_id)
+    return ApiResponse(message="教师点评已保存", data=_response_read(response, student.username if student else "学生"))
+
+
+@router.post("/activities/{activity_id}/responses/{response_id}/ai-review", response_model=ApiResponse[ResponseRead])
+def ai_review_activity_response(
+    activity_id: int,
+    response_id: int,
+    current_user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[ResponseRead]:
+    activity = _activity_or_404(activity_id, db)
+    _check_activity_access(activity, current_user, db)
+    response = db.scalar(select(ClassroomResponse).where(
+        ClassroomResponse.id == response_id, ClassroomResponse.activity_id == activity_id
+    ))
+    if response is None:
+        raise HTTPException(status_code=404, detail="学生回答不存在")
+    result = AiService(db, user=current_user).assist(AiAssistRequest(
+        course_id=activity.course_id,
+        chapter_id=activity.chapter_id,
+        learning_stage="review",
+        task_type="question_answer",
+        question=(
+            "请作为课堂助教，基于当前专题教材，对下面这份学生回答生成简洁、具体、可执行的点评。"
+            "请分别指出回答中的优点、需要补充的教材依据和一个改进建议，不要虚构教材内容。\n\n"
+            f"课堂问题：{activity.question}\n学生回答：{response.answer}"
+        ),
+        assistant_role="teacher",
+    ))
+    response.ai_comment = result.answer.strip() or None
+    response.commented_by = current_user.id
+    response.commented_time = utc_now()
+    db.commit()
+    db.refresh(response)
+    student = db.get(User, response.user_id)
+    return ApiResponse(message="AI 辅助点评已生成", data=_response_read(response, student.username if student else "学生"))
+
+
+@router.post("/activities/{activity_id}/close", response_model=ApiResponse[ActivityRead])
+def close_activity(
+    activity_id: int,
+    current_user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[ActivityRead]:
+    activity = _activity_or_404(activity_id, db)
+    _check_activity_access(activity, current_user, db)
+    activity.status = "closed"
+    db.commit()
+    db.refresh(activity)
+    return ApiResponse(message="课堂互动已结束", data=_activity_read(activity, current_user, db))
 
 
 @router.get("/discussions", response_model=ApiResponse[list[DiscussionThreadRead]])

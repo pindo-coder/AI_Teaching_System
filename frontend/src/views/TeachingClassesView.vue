@@ -25,6 +25,9 @@ const members = ref<ClassMember[]>([])
 const requests = ref<ClassRequest[]>([])
 const groups = ref<ClassGroup[]>([])
 const randomCount = ref(4)
+const manualGroupName = ref('')
+const manualGroupUserIds = ref<number[]>([])
+const manualLeaderId = ref<number>()
 const availableTeachers = ref<AvailableTeacher[]>([])
 const collaboratorId = ref<number>()
 const extraMaterialId = ref<number>()
@@ -118,6 +121,23 @@ async function randomGroup() {
   catch (error) { ElMessage.error(getErrorMessage(error, '分组失败')) }
 }
 
+async function createManualGroup() {
+  if (!selected.value || !manualGroupName.value.trim() || !manualGroupUserIds.value.length || !manualLeaderId.value) {
+    ElMessage.warning('请填写小组名称、选择成员和组长')
+    return
+  }
+  try {
+    const { data } = await teachingClassApi.createGroup(selected.value.id, manualGroupName.value.trim(), manualGroupUserIds.value, manualLeaderId.value)
+    groups.value.push(data.data)
+    manualGroupName.value = ''; manualGroupUserIds.value = []; manualLeaderId.value = undefined
+    ElMessage.success('手动分组完成')
+  } catch (error) { ElMessage.error(getErrorMessage(error, '手动分组失败')) }
+}
+
+function memberName(userId: number) {
+  return members.value.find((item) => item.user_id === userId)?.username || `学生${userId}`
+}
+
 async function regenerateCode() {
   if (!selected.value) return
   const { data } = await teachingClassApi.updateJoinCode(selected.value.id, { regenerate: true })
@@ -198,7 +218,7 @@ onMounted(load)
       <el-tabs>
         <el-tab-pane label="学生成员"><div class="drawer-toolbar"><label class="roster-upload"><el-icon><UploadFilled /></el-icon> 导入 Excel/CSV<input type="file" accept=".xlsx,.csv" @change="uploadRoster" /></label></div><el-table :data="members"><el-table-column prop="username" label="姓名/账号" /><el-table-column prop="identity_no" label="学号" /><el-table-column prop="join_method" label="加入方式" /><el-table-column prop="status" label="状态" /></el-table></el-tab-pane>
         <el-tab-pane :label="`待审核 ${requests.length}`"><el-empty v-if="!requests.length" description="暂无待审核申请" /><div v-for="item in requests" :key="item.id" class="request-row"><div><strong>{{ item.username }}</strong><span>{{ item.identity_no }} · {{ item.request_type }}</span></div><div><el-button type="success" @click="review(item,true)">通过</el-button><el-button @click="review(item,false)">拒绝</el-button></div></div></el-tab-pane>
-        <el-tab-pane label="学习小组"><div class="drawer-toolbar"><el-input-number v-model="randomCount" :min="2" :max="30" /><el-button type="primary" :icon="UserFilled" @click="randomGroup">随机分组</el-button></div><article v-for="group in groups" :key="group.id" class="group-row"><strong>{{ group.name }}</strong><span>{{ group.user_ids.length }} 人</span></article><el-empty v-if="!groups.length" description="尚未分组" /></el-tab-pane>
+        <el-tab-pane label="学习小组"><div class="drawer-toolbar"><el-input-number v-model="randomCount" :min="2" :max="30" /><el-button type="primary" :icon="UserFilled" @click="randomGroup">随机分组</el-button></div><div class="manual-group-form"><el-input v-model="manualGroupName" placeholder="小组名称，例如：第一组" /><el-select v-model="manualGroupUserIds" multiple filterable placeholder="选择小组成员"><el-option v-for="member in members.filter(item => item.status === 'active')" :key="member.user_id" :label="`${member.username} · ${member.identity_no || '无学号'}`" :value="member.user_id" /></el-select><el-select v-model="manualLeaderId" placeholder="选择组长"><el-option v-for="userId in manualGroupUserIds" :key="userId" :label="memberName(userId)" :value="userId" /></el-select><el-button type="primary" @click="createManualGroup">手动创建小组</el-button></div><article v-for="group in groups" :key="group.id" class="group-row"><strong>{{ group.name }}</strong><span>{{ group.user_ids.length }} 人 · 组长：{{ group.leader_user_id ? memberName(group.leader_user_id) : '未设置' }}</span></article><el-empty v-if="!groups.length" description="尚未分组" /></el-tab-pane>
         <el-tab-pane label="教师与教材">
           <el-divider content-position="left">协作教师</el-divider><div class="drawer-toolbar"><el-select v-model="collaboratorId" filterable placeholder="选择已审核教师" style="flex:1"><el-option v-for="teacher in availableTeachers" :key="teacher.id" :label="`${teacher.username} · ${teacher.identity_no || '无工号'}`" :value="teacher.id" /></el-select><el-button type="primary" @click="addCollaborator">添加</el-button></div>
           <el-divider content-position="left">绑定教材</el-divider><div class="drawer-toolbar"><el-select v-model="extraMaterialId" placeholder="选择教材" style="flex:1"><el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" /></el-select><el-select v-model="extraMaterialRole" style="width:130px"><el-option label="主教材" value="primary" /><el-option label="补充教材" value="supplementary" /></el-select><el-button type="primary" @click="addMaterial">保存</el-button></div><el-tag v-for="courseId in selected?.material_ids" :key="courseId" class="class-material-tag">{{ courses.find((course) => course.id === courseId)?.name || courseId }}</el-tag>
@@ -208,3 +228,8 @@ onMounted(load)
     </el-drawer>
   </div>
 </template>
+
+<style scoped>
+.manual-group-form { display: grid; gap: 10px; padding: 12px; margin: 12px 0; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.manual-group-form :deep(.el-select) { width: 100%; }
+</style>

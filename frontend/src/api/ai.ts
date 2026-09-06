@@ -184,6 +184,18 @@ export interface AiWorkspaceAgentPayload extends AiWorkspaceContextPayload {
   execution_id?: number | null
 }
 
+export interface AiWorkspaceAgentStreamHandlers {
+  onContext: (context: AiWorkspaceContext) => void
+  onMeta: (data: { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole; execution_id?: number }) => void
+  onExecution: (execution: AiAgentExecution) => void
+  onPlan: (plan: AiAgentPlan) => void
+  onProgress: (progress: { title: string; status: string }) => void
+  onTool: (tool: { name: string; title: string; status: string; error?: string; requires_confirmation?: boolean }) => void
+  onAction: (action: AiAgentAction) => void
+  onChunk: (text: string) => void
+  onSources: (sources: AiSource[]) => void
+}
+
 async function readSse(
   response: Response,
   onEvent: (event: string, data: any) => void,
@@ -292,21 +304,13 @@ export const aiApi = {
     http.get<ApiResponse<AiAgentTemplate[]>>('/ai/workspace/agent/templates'),
   retryWorkspaceAgentExecution: (executionId: number) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/retry`),
+  continueWorkspaceAgentExecution: (payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers) =>
+    aiApi.workspaceAgentStream(payload, handlers),
   resolveWorkspaceAgentExecution: (executionId: number, resolution: 'confirmed' | 'cancelled', note?: string) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/resolve`, { resolution, note }),
   cancelWorkspaceAgentExecution: (executionId: number) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/cancel`),
-  async workspaceAgentStream(payload: AiWorkspaceAgentPayload, handlers: {
-    onContext: (context: AiWorkspaceContext) => void
-    onMeta: (data: { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole; execution_id?: number }) => void
-    onExecution: (execution: AiAgentExecution) => void
-    onPlan: (plan: AiAgentPlan) => void
-    onProgress: (progress: { title: string; status: string }) => void
-    onTool: (tool: { name: string; title: string; status: string; error?: string; requires_confirmation?: boolean }) => void
-    onAction: (action: AiAgentAction) => void
-    onChunk: (text: string) => void
-    onSources: (sources: AiSource[]) => void
-  }) {
+  async workspaceAgentStream(payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers) {
     const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
     // 不把可选范围字段的 null 发送给旧版后端。新后端支持 null，省略后
     // 仍会按“自动识别教学范围”处理，同时兼容尚未完成迁移的部署实例。

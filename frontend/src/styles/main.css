@@ -10,6 +10,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 a { color: var(--primary); text-decoration: none; }
+.el-empty__image { background: url('../assets/empty-state-original.svg') center / contain no-repeat; }
+.el-empty__image > * { visibility: hidden; }
 .app-layout { min-height: 100vh; }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 10; background: #fff; border-right: 1px solid var(--border); }
 .sidebar + .el-container { margin-left: 0; }

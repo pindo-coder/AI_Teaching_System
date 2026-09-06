@@ -10,7 +10,7 @@ defineEmits<{ action: [] }>()
 
 <template>
   <div class="ui-empty-state">
-    <div class="ui-empty-state__mark" aria-hidden="true">—</div>
+    <div class="ui-empty-state__illustration" aria-hidden="true"></div>
     <h3>{{ title }}</h3>
     <p>{{ description }}</p>
     <el-button v-if="actionLabel" type="primary" plain @click="$emit('action')">{{ actionLabel }}</el-button>
@@ -32,15 +32,10 @@ defineEmits<{ action: [] }>()
   text-align: center;
 }
 
-.ui-empty-state__mark {
-  display: grid;
-  width: 42px;
-  height: 42px;
-  place-items: center;
-  color: var(--action-blue);
-  background: var(--action-soft);
-  border-radius: var(--radius-input);
-  font-size: 24px;
+.ui-empty-state__illustration {
+  width: min(210px, 100%);
+  height: 145px;
+  background: url('../../assets/empty-state-original.svg') center / contain no-repeat;
 }
 
 .ui-empty-state h3,

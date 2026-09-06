@@ -8,16 +8,36 @@ export interface ClassroomActivity {
   created_by: number
   question: string
   minutes: number
+  activity_type: 'qa' | 'judgment' | 'group' | 'feedback'
+  response_limit: number
+  config: Record<string, unknown> | null
+  deadline_time: string | null
+  grouping_mode: 'manual' | 'random' | null
   status: string
   created_time: string
+  response_count: number
+  my_response_count: number
 }
 
 export interface ClassroomResponse {
   id: number
   activity_id: number
   user_id: number
+  user_name: string
   answer: string
+  attempt_no: number
+  group_id: number | null
+  teacher_comment: string | null
+  ai_comment: string | null
+  commented_by: number | null
+  commented_time: string | null
   created_time: string
+}
+
+export interface ActivityResponses {
+  activity: ClassroomActivity
+  responses: ClassroomResponse[]
+  response_count: number
 }
 
 export interface DiscussionAuthor { id: number; name: string; role: string }
@@ -33,10 +53,18 @@ export interface DiscussionReply {
 
 export const classroomApi = {
   list: () => http.get<ApiResponse<ClassroomActivity[]>>('/classroom/activities'),
-  publish: (payload: { teaching_class_id: number; course_id: number; chapter_id: number; question: string; minutes: number }) =>
+  publish: (payload: { teaching_class_id: number; course_id: number; chapter_id: number; question: string; minutes: number; activity_type: ClassroomActivity['activity_type']; response_limit: number; config?: Record<string, unknown>; deadline_time?: string | null; grouping_mode?: 'manual' | 'random' | null }) =>
     http.post<ApiResponse<ClassroomActivity>>('/classroom/activities', payload),
   respond: (activityId: number, answer: string) =>
     http.post<ApiResponse<ClassroomResponse>>(`/classroom/activities/${activityId}/responses`, { answer }),
+  responses: (activityId: number) =>
+    http.get<ApiResponse<ActivityResponses>>(`/classroom/activities/${activityId}/responses`),
+  commentResponse: (activityId: number, responseId: number, teacherComment: string) =>
+    http.patch<ApiResponse<ClassroomResponse>>(`/classroom/activities/${activityId}/responses/${responseId}`, { teacher_comment: teacherComment }),
+  aiReviewResponse: (activityId: number, responseId: number) =>
+    http.post<ApiResponse<ClassroomResponse>>(`/classroom/activities/${activityId}/responses/${responseId}/ai-review`),
+  close: (activityId: number) =>
+    http.post<ApiResponse<ClassroomActivity>>(`/classroom/activities/${activityId}/close`),
   discussions: (params?: Record<string, unknown>) =>
     http.get<ApiResponse<DiscussionThread[]>>('/classroom/discussions', { params }),
   createDiscussion: (payload: { teaching_class_id?: number; course_id?: number; chapter_id?: number; activity_id?: number; title: string; content: string }) =>

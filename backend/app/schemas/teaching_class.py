@@ -89,6 +89,7 @@ class ClassMaterialAdd(BaseModel):
 class ClassGroupCreate(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     user_ids: list[int] = Field(default_factory=list)
+    leader_user_id: int | None = None
 
 
 class RandomGroupCreate(BaseModel):
@@ -106,6 +107,7 @@ class ClassGroupRead(BaseModel):
     name: str
     sort_order: int
     user_ids: list[int]
+    leader_user_id: int | None = None
 
 
 class JoinRequestReview(BaseModel):

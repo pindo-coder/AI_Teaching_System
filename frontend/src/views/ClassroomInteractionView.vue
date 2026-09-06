@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ChatDotRound, Connection, Finished, Histogram, QuestionFilled } from '@element-plus/icons-vue'
+import { Finished } from '@element-plus/icons-vue'
 import { courseApi } from '@/api/courses'
 import type { CourseDetail } from '@/types'
 import { useAuthStore } from '@/stores/auth'
-import { classroomApi, type ClassroomActivity, type DiscussionReply, type DiscussionThread } from '@/api/classroom'
+import { classroomApi, type ClassroomActivity, type ClassroomResponse, type DiscussionReply, type DiscussionThread } from '@/api/classroom'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import { agentApi, type LessonPublication } from '@/api/agents'
 import { getErrorMessage } from '@/utils/error'
@@ -32,6 +32,7 @@ const activeMode = ref<'classroom' | 'free'>('classroom')
 const publications = ref<LessonPublication[]>([])
 const responseText = ref<Record<number, string>>({})
 const route = useRoute()
+const router = useRouter()
 const textbook = ref<CourseDetail | null>(null)
 const selectedChapterId = ref<number>()
 const selectedCourseId = ref<number>()
@@ -39,7 +40,23 @@ const availableCourses = ref<CourseDetail[]>([])
 const allCourses = ref<CourseDetail[]>([])
 const teachingClasses = ref<TeachingClass[]>([])
 const selectedClassId = ref<number>()
-const activity = reactive({ question: '中国式现代化为什么既有各国现代化的共同特征，又有基于自己国情的中国特色？', minutes: 8 })
+type ActivityType = ClassroomActivity['activity_type']
+const activity = reactive({
+  question: '中国式现代化为什么既有各国现代化的共同特征，又有基于自己国情的中国特色？',
+  minutes: 8,
+  activityType: 'qa' as ActivityType,
+  responseLimit: 1,
+  deadlineTime: '',
+  groupingMode: 'manual' as 'manual' | 'random',
+  judgmentOptions: '正确\n错误',
+})
+const activityDrawerOpen = ref(false)
+const selectedActivity = ref<ClassroomActivity | null>(null)
+const activityResponses = ref<ClassroomResponse[]>([])
+const responseCount = ref(0)
+const responseLoading = ref(false)
+const commentDrafts = ref<Record<number, string>>({})
+let activityPollTimer: number | undefined
 const firstChapter = computed(() => textbook.value?.chapters.find((item) => item.id === selectedChapterId.value) || textbook.value?.chapters[0] || null)
 const discussionCourseOptions = computed(() => {
   const selected = teachingClasses.value.find((item) => item.id === discussionForm.teachingClassId)
@@ -66,11 +83,33 @@ const visiblePublications = computed(() => publications.value.filter((item) =>
   && (!selectedCourseId.value || item.course_id === selectedCourseId.value)
   && (!selectedChapterId.value || item.chapter_id === selectedChapterId.value)))
 const patterns = [
-  { title: '随堂问答', desc: '围绕一个核心概念生成递进式提问。', icon: QuestionFilled },
-  { title: '观点辨析', desc: '给出正误判断、理由说明和追问。', icon: ChatDotRound },
-  { title: '小组讨论', desc: '按主题分组，产出讨论任务和汇报要求。', icon: Connection },
-  { title: '即时反馈', desc: '记录课堂表现，形成课后巩固方向。', icon: Histogram },
+  { type: 'qa' as ActivityType, index: '01', tone: 'warm', title: '随堂问答', desc: '围绕核心概念设置递进问题引导学生思考理解并巩固知识。' },
+  { type: 'judgment' as ActivityType, index: '02', tone: 'pink', title: '观点辨析', desc: '设置观点辨析引导学生判断正误说明理由并追问深化认识。' },
+  { type: 'group' as ActivityType, index: '03', tone: 'warm', title: '小组讨论', desc: '根据主题组织学生分组讨论明确任务协作与成果汇报形式。' },
+  { type: 'feedback' as ActivityType, index: '04', tone: 'pink', title: '即时反馈', desc: '及时记录课堂参与表现分析掌握情况为课后巩固提供方向。' },
 ]
+const activePattern = computed(() => patterns.find((item) => item.type === activity.activityType) || patterns[0])
+const drawerActivities = computed(() => visibleActivities.value.filter((item) => item.activity_type === activity.activityType))
+const judgmentChoice = ref<Record<number, string>>({})
+
+function patternActivityCount(type: ActivityType) {
+  return visibleActivities.value.filter((item) => item.activity_type === type).length
+}
+
+function activityOptions(item: ClassroomActivity) {
+  const options = item.config?.options
+  return Array.isArray(options) ? options.map(String) : []
+}
+
+function activityTypeLabel(type: ActivityType) {
+  return patterns.find((item) => item.type === type)?.title || '课堂活动'
+}
+
+function canSubmitActivity(item: ClassroomActivity) {
+  return item.status === 'published'
+    && item.my_response_count < item.response_limit
+    && (!item.deadline_time || beijingTimestamp(item.deadline_time) > Date.now())
+}
 
 onMounted(async () => {
   try {
@@ -108,6 +147,56 @@ watch([discussionScopeFilter, discussionSort], () => { discussionPage.value = 1 
 async function loadDiscussions() {
   discussions.value = (await classroomApi.discussions()).data.data
 }
+
+async function loadActivityResponses(item: ClassroomActivity) {
+  responseLoading.value = true
+  try {
+    const result = (await classroomApi.responses(item.id)).data.data
+    activityResponses.value = result.responses
+    responseCount.value = result.response_count
+    selectedActivity.value = result.activity
+    for (const response of result.responses) {
+      if (commentDrafts.value[response.id] === undefined) commentDrafts.value[response.id] = response.teacher_comment || ''
+    }
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '回答数据加载失败'))
+  } finally {
+    responseLoading.value = false
+  }
+}
+
+function openPattern(item: typeof patterns[number]) {
+  activity.activityType = item.type
+  activityDrawerOpen.value = true
+  selectedActivity.value = drawerActivities.value[0] || null
+  activityResponses.value = []
+  responseCount.value = selectedActivity.value?.response_count || 0
+  if (selectedActivity.value) void loadActivityResponses(selectedActivity.value)
+}
+
+function selectActivity(item: ClassroomActivity) {
+  selectedActivity.value = item
+  void loadActivityResponses(item)
+}
+
+function stopActivityPolling() {
+  if (activityPollTimer !== undefined) {
+    window.clearInterval(activityPollTimer)
+    activityPollTimer = undefined
+  }
+}
+
+function startActivityPolling() {
+  stopActivityPolling()
+  activityPollTimer = window.setInterval(() => {
+    if (selectedActivity.value) void loadActivityResponses(selectedActivity.value)
+  }, 5000)
+}
+
+watch(activityDrawerOpen, (open) => {
+  if (open) startActivityPolling()
+  else stopActivityPolling()
+})
 
 async function createDiscussion() {
   if (!discussionForm.title.trim() || !discussionForm.content.trim()) return ElMessage.warning('请填写讨论标题和内容')
@@ -217,16 +306,64 @@ async function launchActivity() {
   if (!activity.question.trim()) return ElMessage.warning('请输入互动主题')
   if (!auth.isTeacher) return ElMessage.warning('只有教师可以发布课堂互动')
   if (!selectedClassId.value || !textbook.value || !firstChapter.value) return ElMessage.warning('请先选择教学班及教材专题')
-  await classroomApi.publish({ teaching_class_id: selectedClassId.value, course_id: textbook.value.id, chapter_id: firstChapter.value.id, question: activity.question.trim(), minutes: activity.minutes })
+  if (activity.activityType === 'group' && !activity.groupingMode) return ElMessage.warning('请选择分组方式')
+  const options = activity.judgmentOptions.split('\n').map((item) => item.trim()).filter(Boolean)
+  await classroomApi.publish({
+    teaching_class_id: selectedClassId.value, course_id: textbook.value.id, chapter_id: firstChapter.value.id,
+    question: activity.question.trim(), minutes: activity.minutes, activity_type: activity.activityType,
+    response_limit: activity.responseLimit,
+    deadline_time: activity.deadlineTime ? new Date(activity.deadlineTime).toISOString() : null,
+    grouping_mode: activity.activityType === 'group' ? activity.groupingMode : null,
+    config: activity.activityType === 'judgment' ? { options } : undefined,
+  })
   activities.value = (await classroomApi.list()).data.data
+  selectedActivity.value = drawerActivities.value[0] || null
+  if (selectedActivity.value) await loadActivityResponses(selectedActivity.value)
   ElMessage.success('课堂互动已发布，学生可以参与')
 }
 async function submitResponse(item: ClassroomActivity) {
-  const answer = responseText.value[item.id]?.trim()
+  const textAnswer = responseText.value[item.id]?.trim() || ''
+  const choice = judgmentChoice.value[item.id]?.trim() || ''
+  const answer = item.activity_type === 'judgment'
+    ? `判断：${choice}\n理由：${textAnswer}`
+    : textAnswer
+  if (item.activity_type === 'judgment' && !choice) return ElMessage.warning('请选择判断结果')
+  if (item.activity_type === 'judgment' && !textAnswer) return ElMessage.warning('请填写判断理由')
   if (!answer) return ElMessage.warning('请先填写你的观点')
   await classroomApi.respond(item.id, answer)
   responseText.value[item.id] = ''
+  await loadActivityResponses(item)
+  activities.value = (await classroomApi.list()).data.data
   ElMessage.success('观点提交成功')
+}
+
+async function saveTeacherComment(response: ClassroomResponse) {
+  try {
+    const result = (await classroomApi.commentResponse(response.activity_id, response.id, commentDrafts.value[response.id] || '')).data.data
+    const index = activityResponses.value.findIndex((item) => item.id === response.id)
+    if (index >= 0) activityResponses.value[index] = result
+    ElMessage.success('教师点评已保存')
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '点评保存失败')) }
+}
+
+async function aiReviewResponse(response: ClassroomResponse) {
+  try {
+    const result = (await classroomApi.aiReviewResponse(response.activity_id, response.id)).data.data
+    const index = activityResponses.value.findIndex((item) => item.id === response.id)
+    if (index >= 0) activityResponses.value[index] = result
+    commentDrafts.value[response.id] = result.teacher_comment || commentDrafts.value[response.id] || ''
+    ElMessage.success('AI 辅助点评已生成')
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, 'AI 点评生成失败')) }
+}
+
+async function closeSelectedActivity() {
+  if (!selectedActivity.value) return
+  try {
+    const result = (await classroomApi.close(selectedActivity.value.id)).data.data
+    activities.value = (await classroomApi.list()).data.data
+    selectedActivity.value = result
+    ElMessage.success('课堂互动已结束')
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '结束活动失败')) }
 }
 
 async function downloadPublishedPpt(item: LessonPublication) {
@@ -292,36 +429,16 @@ async function downloadPublishedPpt(item: LessonPublication) {
         </el-card>
 
         <section v-if="activeMode === 'classroom'" class="module-grid interaction-patterns">
-          <el-card v-for="item in patterns" :key="item.title" shadow="never" class="module-card quiet-card">
-            <el-icon :size="24"><component :is="item.icon" /></el-icon>
-            <h3>{{ item.title }}</h3>
-            <p>{{ item.desc }}</p>
-          </el-card>
+          <button v-for="item in patterns" :key="item.title" type="button" class="module-card quiet-card interaction-pattern-card" @click="openPattern(item)">
+            <span v-if="patternActivityCount(item.type)" class="interaction-pattern-notice" aria-label="已有布置的课堂活动"></span>
+            <div class="interaction-pattern-label" :class="item.tone">
+              <span>{{ item.index }}</span><span aria-hidden="true">|</span><strong>{{ item.title }}</strong>
+            </div>
+            <p class="interaction-pattern-description">{{ item.desc }}</p>
+            <div class="interaction-pattern-action"><span>进入查看</span><span class="interaction-pattern-arrow" aria-hidden="true">→</span></div>
+          </button>
         </section>
 
-        <el-card v-if="activeMode === 'classroom' && auth.isTeacher" shadow="never" class="interaction-builder">
-          <template #header><div class="content-heading"><span>互动任务生成</span><el-tag type="success">MVP</el-tag></div></template>
-          <el-form label-position="top">
-            <div class="scope-fields">
-              <el-form-item label="所属教学班"><el-select v-model="selectedClassId" placeholder="请选择教学班"><el-option v-for="item in teachingClasses" :key="item.id" :label="`${item.name} · ${item.term_name}`" :value="item.id" /></el-select></el-form-item>
-              <el-form-item label="关联教材"><el-select v-model="selectedCourseId" placeholder="请选择教材"><el-option v-for="item in availableCourses" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
-              <el-form-item label="关联专题"><el-select v-model="selectedChapterId" placeholder="请选择专题"><el-option v-for="chapter in textbook?.chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item>
-            </div>
-            <el-form-item label="互动主题">
-              <el-input v-model="activity.question" type="textarea" :rows="4" maxlength="500" show-word-limit />
-            </el-form-item>
-            <el-form-item label="建议时长">
-              <el-input-number v-model="activity.minutes" :min="3" :max="30" />
-              <span class="form-hint">分钟</span>
-            </el-form-item>
-          </el-form>
-          <el-button v-if="auth.isTeacher" type="primary" :icon="Finished" @click="launchActivity">发布课堂活动</el-button>
-          <div class="activity-preview">
-            <strong>活动预览</strong>
-            <p>围绕“{{ activity.question }}”进行 {{ activity.minutes }} 分钟讨论：先独立思考，再小组交流，最后由教师引导回到教材专题“{{ firstChapter?.title || '未选择专题' }}”。</p>
-          </div>
-        </el-card>
-        <el-card v-else-if="activeMode === 'classroom'" shadow="never" class="interaction-builder student-interaction-hint"><el-result icon="info" title="学生参与区" sub-title="教师发布课堂互动后，你可以在右侧选择活动并提交自己的观点。" /></el-card>
       </div>
       <div :class="{ 'full-mode-column': activeMode === 'free' }">
         <el-card v-if="activeMode === 'classroom'" shadow="never" class="interaction-activities"><template #header><div class="content-heading"><span>已发布的课堂互动</span><el-tag>{{ visibleActivities.length }} 项</el-tag></div></template><div v-if="visibleActivities.length" class="published-activities"><article v-for="item in visibleActivities" :key="item.id" class="published-activity"><span class="activity-label">{{ item.minutes }} 分钟讨论</span><h3>{{ item.question }}</h3><p v-if="auth.isTeacher" class="muted">教师可继续组织课堂讨论，学生将提交观点。</p><template v-else><el-input v-model="responseText[item.id]" type="textarea" :rows="3" placeholder="写下你的观点或问题……" /><el-button type="primary" size="small" @click="submitResponse(item)">提交观点</el-button></template></article></div><el-empty v-else description="当前教学班尚未发布互动" /></el-card>
@@ -353,6 +470,43 @@ async function downloadPublishedPpt(item: LessonPublication) {
         </el-card>
       </div>
     </section>
+    <el-drawer v-model="activityDrawerOpen" :title="`${activePattern.title} · ${auth.isTeacher ? '活动工作台' : '活动列表'}`" size="min(620px, 100%)" :destroy-on-close="false" class="activity-drawer">
+      <template v-if="auth.isTeacher">
+        <el-alert v-if="activity.activityType === 'group'" title="小组讨论仅允许组长提交；请先在教学班管理中完成手动或随机分组。" type="info" :closable="false" show-icon />
+        <el-form label-position="top" class="activity-drawer-form">
+          <el-form-item label="活动问题"><el-input v-model="activity.question" type="textarea" :rows="3" maxlength="2000" show-word-limit /></el-form-item>
+          <div class="activity-form-grid"><el-form-item label="建议时长"><el-input-number v-model="activity.minutes" :min="3" :max="60" /><span class="form-hint">分钟</span></el-form-item><el-form-item label="最多提交次数"><el-input-number v-model="activity.responseLimit" :min="1" :max="20" /></el-form-item></div>
+          <el-form-item label="截止时间"><el-date-picker v-model="activity.deadlineTime" type="datetime" value-format="YYYY-MM-DD HH:mm:ss" format="YYYY-MM-DD HH:mm" placeholder="不设置则长期开放" clearable /></el-form-item>
+          <el-form-item v-if="activity.activityType === 'judgment'" label="判断选项（每行一个）"><el-input v-model="activity.judgmentOptions" type="textarea" :rows="3" placeholder="正确\n错误" /></el-form-item>
+          <el-form-item v-if="activity.activityType === 'group'" label="分组方式"><el-radio-group v-model="activity.groupingMode"><el-radio-button value="manual">手动分组</el-radio-button><el-radio-button value="random">随机分组</el-radio-button></el-radio-group><p class="form-hint">分组请在教学班管理中完成，活动发布时会校验当前班级已有分组。</p></el-form-item>
+        </el-form>
+        <el-button type="primary" :icon="Finished" @click="launchActivity">发布{{ activePattern.title }}</el-button>
+        <el-button v-if="activity.activityType === 'group'" @click="router.push('/classes')">前往管理分组</el-button>
+        <el-divider content-position="left">已布置的{{ activePattern.title }}（{{ drawerActivities.length }}）</el-divider>
+      </template>
+      <template v-else>
+        <el-alert title="回答人数按去重后的学生人数统计；学生端仅展示匿名同学回答，教师端可查看姓名。" type="info" :closable="false" show-icon />
+        <el-divider content-position="left">已布置的{{ activePattern.title }}（{{ drawerActivities.length }}）</el-divider>
+      </template>
+      <div v-if="drawerActivities.length" class="activity-drawer-list">
+        <button v-for="item in drawerActivities" :key="item.id" type="button" class="activity-drawer-item" :class="{ selected: selectedActivity?.id === item.id }" @click="selectActivity(item)"><div><strong>{{ item.question }}</strong><small>{{ item.response_count }} 人已回答 · {{ item.my_response_count }}/{{ item.response_limit }} 次{{ item.deadline_time ? ` · 截止 ${formatBeijingDateTime(item.deadline_time)}` : ' · 未设置截止时间' }}</small></div><el-tag size="small" :type="item.status === 'published' ? 'success' : 'info'">{{ item.status === 'published' ? '进行中' : '已结束' }}</el-tag></button>
+      </div>
+      <el-empty v-else :description="auth.isTeacher ? `还没有布置${activePattern.title}` : `当前还没有${activePattern.title}`" />
+      <template v-if="selectedActivity">
+        <el-divider content-position="left">{{ auth.isTeacher ? '学生回答' : '回答内容' }} · {{ responseCount }} 人</el-divider>
+        <div v-if="!auth.isTeacher && canSubmitActivity(selectedActivity)" class="student-activity-response">
+          <el-radio-group v-if="selectedActivity.activity_type === 'judgment'" v-model="judgmentChoice[selectedActivity.id]" class="judgment-options"><el-radio v-for="option in activityOptions(selectedActivity)" :key="option" :value="option">{{ option }}</el-radio></el-radio-group>
+          <el-input v-model="responseText[selectedActivity.id]" type="textarea" :rows="4" :placeholder="selectedActivity.activity_type === 'feedback' ? '请输入你的课堂反馈……' : '写下你的回答或理由……'" />
+          <el-button type="primary" size="small" @click="submitResponse(selectedActivity)">提交回答（还可提交 {{ selectedActivity.response_limit - selectedActivity.my_response_count }} 次）</el-button>
+        </div>
+        <el-alert v-else-if="!auth.isTeacher" :title="selectedActivity.status === 'closed' || (selectedActivity.deadline_time && beijingTimestamp(selectedActivity.deadline_time) <= Date.now()) ? '该活动已结束' : '你已达到提交次数上限'" type="info" :closable="false" />
+        <div v-if="activityResponses.length" class="activity-response-list" v-loading="responseLoading">
+          <article v-for="response in activityResponses" :key="response.id" class="activity-response-item"><div class="response-item-heading"><strong>{{ response.user_name }}</strong><small>第 {{ response.attempt_no }} 次 · {{ formatBeijingDateTime(response.created_time) }}</small></div><p class="response-answer">{{ response.answer }}</p><template v-if="auth.isTeacher"><el-input v-model="commentDrafts[response.id]" type="textarea" :rows="2" placeholder="写下教师点评……" /><div class="response-actions"><el-button size="small" type="primary" @click="saveTeacherComment(response)">保存点评</el-button><el-button size="small" @click="aiReviewResponse(response)">AI 辅助点评</el-button></div><p v-if="response.ai_comment" class="ai-review">AI点评：{{ response.ai_comment }}</p><p v-if="response.teacher_comment" class="teacher-review">教师点评：{{ response.teacher_comment }}</p></template><template v-else><p v-if="response.ai_comment" class="ai-review">AI点评：{{ response.ai_comment }}</p><p v-if="response.teacher_comment" class="teacher-review">教师点评：{{ response.teacher_comment }}</p></template></article>
+        </div>
+        <el-empty v-else description="暂时还没有回答" :image-size="60" />
+        <el-button v-if="auth.isTeacher && selectedActivity.status === 'published'" type="danger" plain @click="closeSelectedActivity">结束当前活动</el-button>
+      </template>
+    </el-drawer>
     <el-drawer v-model="discussionDrawerOpen" title="自由讨论详情" size="min(560px, 100%)" :destroy-on-close="false">
       <template v-if="selectedThread">
         <div class="thread-heading"><div><h2 class="thread-title">{{ selectedThread.title }}</h2><p class="thread-meta">{{ selectedThread.author.name }} · {{ selectedThread.author.role === 'teacher' ? '教师' : '学生' }} · 发布于 {{ formatBeijingDateTime(selectedThread.created_time) }}</p></div><div v-if="selectedThread.author.id === auth.user?.id || canModerate(selectedThread)"><el-button v-if="selectedThread.author.id === auth.user?.id" text size="small" @click="editThread(selectedThread)">编辑</el-button><el-button text size="small" type="danger" @click="deleteThread(selectedThread)">删除</el-button></div></div><p class="thread-content">{{ selectedThread.content }}</p>
@@ -411,6 +565,35 @@ async function downloadPublishedPpt(item: LessonPublication) {
 .lesson-publication h3 { margin: 4px 0 8px; }
 .lesson-publication small { color: var(--action-blue); font-weight: 700; }
 .lesson-publication p { color: var(--ink-500); line-height: 1.6; }
+.interaction-pattern-card { position: relative; display: flex; width: 100%; min-height: 238px; flex-direction: column; align-items: flex-start; padding: 21px 18px 18px; color: #5f4b78; text-align: left; appearance: none; background: #fff; border: 1px solid #e7e1ea; border-radius: 15px; box-shadow: 0 3px 5px rgba(70, 55, 86, .12); cursor: pointer; font: inherit; transition: border-color .2s, box-shadow .2s, transform .2s; }
+.interaction-pattern-card:hover, .interaction-pattern-card:focus-visible { border-color: #c7b8d2; box-shadow: 0 9px 20px rgba(70, 55, 86, .14); transform: translateY(-2px); outline: none; }
+.interaction-pattern-notice { position: absolute; top: 13px; right: 13px; width: 10px; height: 10px; background: #ff4242; border: 2px solid #fff; border-radius: 50%; box-shadow: 0 2px 5px rgba(255, 66, 66, .3); }
+.interaction-pattern-label { display: inline-flex; align-items: center; gap: 7px; padding: 8px 17px; border-radius: 11px; font-size: 16px; line-height: 1.2; }
+.interaction-pattern-label.warm { color: #c6b400; background: #fff8eb; }
+.interaction-pattern-label.pink { color: #f03d8d; background: #fff0f7; }
+.interaction-pattern-label strong { font-weight: 500; }
+.interaction-pattern-description { flex: 1; width: 100%; padding: 21px 0 17px; margin: 0; color: #604b78; font-size: 16px; line-height: 1.5; border-bottom: 1px dashed #e7ddea; }
+.interaction-pattern-action { display: inline-flex; align-items: center; gap: 12px; min-width: 148px; height: 44px; padding: 0 7px 0 18px; margin-top: 20px; color: #604b78; background: #fff; border: 2px solid #eee8f0; border-radius: 999px; font-size: 16px; font-weight: 600; }
+.interaction-pattern-arrow { display: inline-flex; width: 30px; height: 30px; align-items: center; justify-content: center; color: #fff; background: #ff4242; border-radius: 50%; font-size: 22px; font-weight: 400; line-height: 1; }
+.activity-drawer-form { margin-top: 18px; }
+.activity-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.activity-drawer :deep(.el-date-editor) { width: 100%; }
+.activity-drawer-list, .activity-response-list { display: grid; gap: 10px; }
+.activity-drawer-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px; color: var(--ink-800); text-align: left; background: #fff; border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; }
+.activity-drawer-item:hover, .activity-drawer-item.selected { border-color: var(--action-blue); background: var(--action-soft); }
+.activity-drawer-item strong, .activity-drawer-item small { display: block; }
+.activity-drawer-item strong { line-height: 1.5; }
+.activity-drawer-item small { margin-top: 5px; color: var(--ink-500); font-size: 12px; }
+.student-activity-response { display: grid; gap: 10px; padding: 14px; margin-bottom: 14px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.judgment-options { display: flex; gap: 14px; }
+.activity-response-item { padding: 14px; background: var(--surface-soft); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.response-item-heading, .response-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.response-item-heading small { color: var(--ink-500); }
+.response-answer { margin: 10px 0; white-space: pre-wrap; line-height: 1.65; }
+.response-actions { justify-content: flex-start; margin-top: 8px; }
+.ai-review, .teacher-review { padding: 9px 10px; margin: 8px 0 0; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
+.ai-review { color: #725519; background: #fff7e5; border-left: 3px solid #d6a44c; }
+.teacher-review { color: var(--action-blue); background: #eef5fb; border-left: 3px solid var(--action-blue); }
 @media (max-width: 767px) {
   .mode-tabs { align-items: stretch; flex-direction: column; padding: 0 0 12px; }
   .mode-tab-list { width: 100%; }
@@ -419,7 +602,12 @@ async function downloadPublishedPpt(item: LessonPublication) {
   .discussion-toolbar { align-items: stretch; flex-direction: column; }
   .discussion-sort { width: 100%; }
   .scope-fields { grid-template-columns: 1fr; gap: 0; }
+  .activity-form-grid { grid-template-columns: 1fr; gap: 0; }
   .lesson-publication { align-items: flex-start; flex-direction: column; }
   .lesson-publication :deep(.el-button) { width: 100%; }
+  .interaction-pattern-card { min-height: 220px; }
+  .interaction-pattern-label { font-size: 15px; }
+  .interaction-pattern-description { font-size: 15px; }
+  .interaction-pattern-action { font-size: 15px; }
 }
 </style>

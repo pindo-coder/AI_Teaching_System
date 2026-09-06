@@ -116,6 +116,7 @@ class ClassGroup(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     teaching_class_id: Mapped[int] = mapped_column(ForeignKey("teaching_classes.id", ondelete="CASCADE"), index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    leader_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
     sort_order: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 

@@ -1,8 +1,9 @@
 import { http, type ApiResponse } from './http'
-import type { DashboardData, LearningFootprint, LearningProgress, LearningStage, TaskProgressSummary } from '@/types'
+import type { DashboardData, LearningFootprint, LearningProgress, LearningStage, TaskProgressSummary, TeacherDashboardData } from '@/types'
 
 export const learningApi = {
   dashboard: () => http.get<ApiResponse<DashboardData>>('/dashboard'),
+  teacherDashboard: (month?: string) => http.get<ApiResponse<TeacherDashboardData>>('/teacher/dashboard', { params: month ? { month } : undefined }),
   updateProgress: (payload: {
     course_id: number
     chapter_id: number

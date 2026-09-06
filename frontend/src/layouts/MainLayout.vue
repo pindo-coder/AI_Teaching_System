@@ -348,9 +348,9 @@ function agentStatus(run: AgentRun) {
   return labels[run.status] || run.status
 }
 
-function openAgentRun() {
+function openAgentRun(runId?: number) {
   taskVisible.value = false
-  router.push('/lesson-prep')
+  router.push(runId ? { path: '/lesson-prep', query: { run_id: String(runId) } } : '/lesson-prep')
 }
 
 function openHeaderAlerts() {
@@ -554,16 +554,19 @@ watch(() => auth.user?.id, () => {
     <el-drawer v-model="taskVisible" title="后台任务" size="min(92vw, 420px)">
       <div v-loading="taskLoading" class="agent-task-center">
         <template v-if="agentRuns.length">
-          <button v-for="run in agentRuns" :key="run.id" type="button" class="agent-task-item" @click="openAgentRun">
+          <article v-for="run in agentRuns" :key="run.id" class="agent-task-item">
             <span>
               <strong>课程备课 #{{ run.id }}</strong>
               <small>{{ formatBeijingDateTime(run.updated_time) }}</small>
             </span>
-            <StatusChip
-              :label="agentStatus(run)"
-              :status="run.status === 'failed' ? 'danger' : run.status === 'completed' ? 'success' : run.status === 'waiting_confirmation' ? 'warning' : 'info'"
-            />
-          </button>
+            <div class="agent-task-item-actions">
+              <StatusChip
+                :label="agentStatus(run)"
+                :status="run.status === 'failed' ? 'danger' : run.status === 'completed' ? 'success' : run.status === 'waiting_confirmation' ? 'warning' : 'info'"
+              />
+              <el-button class="agent-task-continue" size="small" plain @click="openAgentRun(run.id)">继续会话</el-button>
+            </div>
+          </article>
           <el-button plain type="primary" @click="loadAgentRuns">刷新任务状态</el-button>
         </template>
         <div v-else class="utility-drawer-content">
@@ -741,10 +744,13 @@ watch(() => auth.user?.id, () => {
 .notification-item small { color: var(--ink-400); }
 .utility-mark { display: grid; width: 48px; height: 48px; place-items: center; color: var(--action-blue); background: var(--action-soft); border-radius: var(--radius-card); font-size: 22px; }
 .agent-task-center { display: grid; gap: var(--space-3); min-height: 220px; align-content: start; }
-.agent-task-item { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); color: var(--ink-900); background: var(--surface-card); border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
+.agent-task-item { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-3); color: var(--ink-900); background: var(--surface-card); border: 1px solid var(--line); border-radius: var(--radius-input); text-align: left; }
 .agent-task-item:hover { background: var(--action-soft); border-color: var(--action-line); }
 .agent-task-item > span { display: grid; min-width: 0; gap: var(--space-1); }
 .agent-task-item small { color: var(--ink-400); }
+.agent-task-item-actions { display: flex; flex: 0 0 auto; align-items: center; gap: var(--space-2); }
+.agent-task-continue { color: var(--action-blue); border-color: var(--action-line); }
+.agent-task-continue:hover, .agent-task-continue:focus { color: var(--action-blue); background: var(--action-soft); border-color: var(--action-blue); }
 .join-class-drawer { display: grid; gap: var(--space-5); }
 .join-class-intro { display: flex; align-items: flex-start; gap: var(--space-3); padding: var(--space-4); background: var(--action-soft); border: 1px solid var(--action-line); border-radius: var(--radius-card); }
 .join-class-intro .utility-mark { flex: 0 0 auto; width: 42px; height: 42px; font-size: 19px; }

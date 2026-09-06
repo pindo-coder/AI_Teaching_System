@@ -309,11 +309,16 @@ class TeachingClassService:
         return {"total": len(rows), "created": created, "updated": updated,
                 "bound": bound, "conflicted": conflicted}
 
-    def create_group(self, class_id: int, user: User, name: str, user_ids: list[int]) -> ClassGroup:
+    def create_group(self, class_id: int, user: User, name: str, user_ids: list[int], leader_user_id: int | None = None) -> ClassGroup:
         self.require_teacher(class_id, user, owner_only=True)
-        group = ClassGroup(teaching_class_id=class_id, name=name.strip())
+        unique_user_ids = list(dict.fromkeys(user_ids))
+        if not unique_user_ids:
+            raise HTTPException(status_code=400, detail="小组至少需要一名学生")
+        if leader_user_id is not None and leader_user_id not in unique_user_ids:
+            raise HTTPException(status_code=400, detail="组长必须是当前小组成员")
+        group = ClassGroup(teaching_class_id=class_id, name=name.strip(), leader_user_id=leader_user_id or (unique_user_ids[0] if unique_user_ids else None))
         self.db.add(group); self.db.flush()
-        for user_id in set(user_ids):
+        for user_id in unique_user_ids:
             membership = self.db.scalar(select(ClassMembership.id).where(
                 ClassMembership.teaching_class_id == class_id, ClassMembership.user_id == user_id,
                 ClassMembership.status == "active"
@@ -333,6 +338,7 @@ class TeachingClassService:
             ClassGroup.teaching_class_id == class_id
         ).order_by(ClassGroup.sort_order, ClassGroup.id)).all()
         return [{"id": group.id, "name": group.name, "sort_order": group.sort_order,
+                 "leader_user_id": group.leader_user_id,
                  "user_ids": list(self.db.scalars(select(ClassGroupMember.user_id).where(
                      ClassGroupMember.group_id == group.id)).all())} for group in groups]
 
@@ -352,7 +358,9 @@ class TeachingClassService:
             name = f"{prefix}{index + 1}组" if prefix == "第" else f"{prefix}{index + 1}"
             group = ClassGroup(teaching_class_id=class_id, name=name, sort_order=index)
             self.db.add(group); self.db.flush()
-            for student_id in student_ids[index::count]:
+            group_student_ids = student_ids[index::count]
+            group.leader_user_id = group_student_ids[0] if group_student_ids else None
+            for student_id in group_student_ids:
                 self.db.add(ClassGroupMember(teaching_class_id=class_id, group_id=group.id, user_id=student_id))
         self.db.commit()
         return self.list_groups(class_id, user)

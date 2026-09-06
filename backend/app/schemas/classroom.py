@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
@@ -11,6 +12,11 @@ class ActivityCreate(BaseModel):
     chapter_id: int
     question: str = Field(min_length=5, max_length=2000)
     minutes: int = Field(default=8, ge=3, le=60)
+    activity_type: Literal["qa", "judgment", "group", "feedback"] = "qa"
+    response_limit: int = Field(default=1, ge=1, le=20)
+    config: dict | None = None
+    deadline_time: datetime | None = None
+    grouping_mode: Literal["manual", "random"] | None = None
 
 
 class ActivityRead(BaseModel):
@@ -23,8 +29,15 @@ class ActivityRead(BaseModel):
     created_by: int
     question: str
     minutes: int
+    activity_type: str
+    response_limit: int
+    config: dict | None
+    deadline_time: datetime | None
+    grouping_mode: str | None
     status: str
     created_time: datetime
+    response_count: int = 0
+    my_response_count: int = 0
 
 
 class ResponseCreate(BaseModel):
@@ -37,8 +50,25 @@ class ResponseRead(BaseModel):
     id: int
     activity_id: int
     user_id: int
+    user_name: str
     answer: str
+    attempt_no: int
+    group_id: int | None
+    teacher_comment: str | None
+    ai_comment: str | None
+    commented_by: int | None
+    commented_time: datetime | None
     created_time: datetime
+
+
+class ActivityResponsesRead(BaseModel):
+    activity: ActivityRead
+    responses: list[ResponseRead]
+    response_count: int
+
+
+class ResponseCommentUpdate(BaseModel):
+    teacher_comment: str = Field(default="", max_length=5000)
 
 
 class DiscussionCreate(BaseModel):

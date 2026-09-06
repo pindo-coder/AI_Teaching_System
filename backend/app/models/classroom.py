@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -18,6 +18,11 @@ class ClassroomActivity(Base):
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     question: Mapped[str] = mapped_column(Text, nullable=False)
     minutes: Mapped[int] = mapped_column(Integer, default=8, nullable=False)
+    activity_type: Mapped[str] = mapped_column(String(20), default="qa", nullable=False, index=True)
+    response_limit: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    deadline_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    grouping_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="published", nullable=False)
     created_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
@@ -29,6 +34,12 @@ class ClassroomResponse(Base):
     activity_id: Mapped[int] = mapped_column(ForeignKey("classroom_activities.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     answer: Mapped[str] = mapped_column(Text, nullable=False)
+    attempt_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("class_groups.id", ondelete="SET NULL"), index=True)
+    teacher_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commented_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    commented_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 

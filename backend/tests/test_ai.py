@@ -488,6 +488,41 @@ def test_workspace_agent_persists_execution_and_supports_retry(client: TestClien
     assert retried.json()["data"]["retry_of_execution_id"] == execution.id
 
 
+def test_workspace_agent_can_continue_existing_execution(client: TestClient, db: Session) -> None:
+    headers, course_id, chapter_id = prepare_context(db)
+    initial = client.post(
+        "/api/v1/ai/workspace/agent/stream",
+        headers=headers,
+        json={
+            "role": "student",
+            "course_id": course_id,
+            "chapter_id": chapter_id,
+            "learning_stage": "preview",
+            "question": "请根据当前专题制定学习计划",
+        },
+    )
+    assert initial.status_code == 200
+    execution = db.scalar(select(AgentExecution).order_by(AgentExecution.id.desc()))
+    assert execution is not None
+    original_id = execution.id
+
+    continued = client.post(
+        "/api/v1/ai/workspace/agent/stream",
+        headers=headers,
+        json={
+            "role": "student",
+            "execution_id": original_id,
+            "question": "请继续处理这个任务，并给出下一步建议",
+        },
+    )
+
+    assert continued.status_code == 200
+    db.expire_all()
+    executions = list(db.scalars(select(AgentExecution).order_by(AgentExecution.id.asc())).all())
+    assert len(executions) == 1
+    assert executions[0].id == original_id
+
+
 def test_runtime_replan_keeps_unexecuted_original_steps() -> None:
     previous = [
         ToolCall("inspect_context", "确认上下文"),

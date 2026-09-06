@@ -233,10 +233,11 @@ async def import_roster(class_id: int, file: UploadFile = File(...),
 def create_group(class_id: int, payload: ClassGroupCreate,
                  user: User = Depends(require_roles("teacher", "admin")),
                  db: Session = Depends(get_db)) -> ApiResponse[ClassGroupRead]:
-    service = TeachingClassService(db); group = service.create_group(class_id, user, payload.name, payload.user_ids)
+    service = TeachingClassService(db); group = service.create_group(class_id, user, payload.name, payload.user_ids, payload.leader_user_id)
     ids = list(db.scalars(select(ClassGroupMember.user_id).where(ClassGroupMember.group_id == group.id)).all())
     return ApiResponse(message="学习小组已创建", data={"id": group.id, "name": group.name,
-                                                       "sort_order": group.sort_order, "user_ids": ids})
+                                                       "sort_order": group.sort_order, "user_ids": ids,
+                                                       "leader_user_id": group.leader_user_id})
 
 
 @router.get("/{class_id}/groups", response_model=ApiResponse[list[ClassGroupRead]])

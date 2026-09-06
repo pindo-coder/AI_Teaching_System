@@ -435,8 +435,8 @@ def workspace_agent_stream(
         raise HTTPException(status_code=404, detail="未找到该 Agent 任务")
     if existing_execution and existing_execution.role != effective_role:
         raise HTTPException(status_code=403, detail="无权继续该 Agent 任务")
-    if existing_execution and existing_execution.status in {"completed", "advice_ready", "waiting_user_action", "failed", "cancelled"}:
-        raise HTTPException(status_code=409, detail="该 Agent 任务已经结束，请使用重试接口创建新任务")
+    if existing_execution and existing_execution.status in {"planning", "running", "waiting_confirmation", "cancelled"}:
+        raise HTTPException(status_code=409, detail="当前 Agent 任务暂不能继续，请先完成当前操作或使用重试接口")
 
     resolved_context = AgentContextService(db, user).resolve(
         course_id=payload.course_id,
