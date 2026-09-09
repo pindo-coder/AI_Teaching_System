@@ -2,7 +2,7 @@
   /* 账号设置页基准：低饱和紫灰色作为品牌强调色。 */
   /* 红色阶（采用参考图 Color 10–50，控制在 Color 60 以下）。 */
   /* 普通界面统一使用阿里巴巴普惠体；未安装时按中文系统字体回退。 */
-  --font-ui: "Alibaba PuHuiTi 2.0", "Alibaba PuHuiTi", "阿里巴巴普惠体 2.0", "阿里巴巴普惠体", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-ui: "Alibaba PuHuiTi", "Alibaba PuHuiTi 2.0", "阿里巴巴普惠体 2.0", "阿里巴巴普惠体", "PingFang SC", "Microsoft YaHei", sans-serif;
   --brand-primary: #ff8787;
   --brand-primary-hover: #ffa8a8;
   --brand-primary-deep: #ff8787;
