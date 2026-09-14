@@ -46,6 +46,61 @@ class Settings(BaseSettings):
     llm_model: str = Field(default="gpt-4o-mini", validation_alias=AliasChoices("LLM_MODEL", "OPENAI_MODEL", "DEEPSEEK_MODEL"))
     llm_temperature: float = 0.2
     llm_timeout_seconds: int = 60
+    # 本地垂类模型只接管学生学习和笔记类文本任务；教师备课、PPT 和 Agent
+    # 复杂工作流仍使用上面的 LLM_* 通用 API。功能列表支持逗号分隔，并可用
+    # note_ 前缀匹配全部笔记任务。
+    llm_teacher_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("LLM_TEACHER_ENABLED", "SZ_TEACHER_ENABLED"),
+    )
+    llm_teacher_base_url: str = Field(
+        default="http://127.0.0.1:8001/v1",
+        validation_alias=AliasChoices("LLM_TEACHER_BASE_URL", "SZ_TEACHER_BASE_URL"),
+    )
+    llm_teacher_api_key: str = Field(
+        default="local-vllm",
+        validation_alias=AliasChoices("LLM_TEACHER_API_KEY", "SZ_TEACHER_API_KEY"),
+    )
+    llm_teacher_model: str = Field(
+        default="sz-teacher-v1",
+        validation_alias=AliasChoices("LLM_TEACHER_MODEL", "SZ_TEACHER_MODEL"),
+    )
+    llm_teacher_temperature: float = Field(
+        default=0.3,
+        validation_alias=AliasChoices("LLM_TEACHER_TEMPERATURE", "SZ_TEACHER_TEMPERATURE"),
+    )
+    llm_teacher_timeout_seconds: int = Field(
+        default=180,
+        validation_alias=AliasChoices(
+            "LLM_TEACHER_TIMEOUT_SECONDS",
+            "SZ_TEACHER_TIMEOUT_SECONDS",
+        ),
+    )
+    llm_teacher_features: str = Field(
+        default="learning_assist,news_study_note,note_",
+        validation_alias=AliasChoices(
+            "LLM_TEACHER_FEATURES",
+            "SZ_TEACHER_FEATURES",
+        ),
+    )
+    llm_teacher_max_input_chars: int = Field(
+        default=6000,
+        ge=1000,
+        le=30000,
+        validation_alias=AliasChoices(
+            "LLM_TEACHER_MAX_INPUT_CHARS",
+            "SZ_TEACHER_MAX_INPUT_CHARS",
+        ),
+    )
+    llm_teacher_max_output_tokens: int = Field(
+        default=1024,
+        ge=128,
+        le=4096,
+        validation_alias=AliasChoices(
+            "LLM_TEACHER_MAX_OUTPUT_TOKENS",
+            "SZ_TEACHER_MAX_OUTPUT_TOKENS",
+        ),
+    )
     # 百炼视觉、语音、Embedding 共用同一地域的 API Key；各能力仍可用独立 Key 覆盖。
     dashscope_api_key: str | None = None
     # 学习助手的输入侧多模态保持轻量：文件分块落盘，推理交给外部兼容 API，

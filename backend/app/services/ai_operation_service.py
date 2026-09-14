@@ -334,6 +334,42 @@ class AiProviderConfigService:
         )
 
     @staticmethod
+    def _uses_local_teacher_model(feature: str) -> bool:
+        if not settings.llm_teacher_enabled:
+            return False
+        configured = {
+            item.strip()
+            for item in str(settings.llm_teacher_features or "").split(",")
+            if item.strip()
+        }
+        return feature in configured or any(
+            item.endswith("_") and feature.startswith(item) for item in configured
+        )
+
+    @staticmethod
+    def uses_local_teacher_model(feature: str) -> bool:
+        return AiProviderConfigService._uses_local_teacher_model(feature)
+
+    @staticmethod
+    def resolve_for_feature(
+        feature: str,
+        db: Session | None = None,
+    ) -> RuntimeLlmConfig:
+        """Resolve local learning features separately from teacher API tasks."""
+        if AiProviderConfigService._uses_local_teacher_model(feature):
+            return RuntimeLlmConfig(
+                config_id=None,
+                source="local_teacher_model",
+                base_url=settings.llm_teacher_base_url,
+                api_key=settings.llm_teacher_api_key or "local-vllm",
+                model_name=settings.llm_teacher_model,
+                temperature=settings.llm_teacher_temperature,
+                timeout_seconds=settings.llm_teacher_timeout_seconds,
+                streaming_enabled=True,
+            )
+        return AiProviderConfigService.resolve(db)
+
+    @staticmethod
     def active_row(db: Session, capability: AiCapabilityName) -> AiProviderConfig | None:
         return db.scalar(
             select(AiProviderConfig)
@@ -1004,7 +1040,7 @@ def build_chat_model(
     max_tokens: int | None = None,
     streaming: bool = False,
 ) -> tuple[ChatOpenAI, RuntimeLlmConfig]:
-    config = AiProviderConfigService.resolve(db)
+    config = AiProviderConfigService.resolve_for_feature(feature, db)
     if not config.api_key:
         raise RuntimeError("尚未配置 LLM_API_KEY")
     effective_streaming = streaming and config.streaming_enabled

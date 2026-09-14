@@ -1978,41 +1978,63 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
             )
             renderer = PresentationArtifactService(run.id)
             artifacts: dict[str, Any] = {}
+            successful_types: list[str] = []
+            artifact_errors: dict[str, str] = {}
             if "ppt" in requested:
-                ppt_data = generated.get("ppt")
-                if not isinstance(ppt_data, dict) or not ppt_data.get("slides"):
-                    raise RuntimeError("模型没有返回可用的 PPT 结构")
-                ppt_data = _sanitize_ppt_visible_content(ppt_data)
-                preferences = (run.input_data or {}).get("ppt_preferences") or {}
-                if bool(preferences.get("include_visuals")):
-                    ppt_data = PptMultimodalService(run.id).enhance(ppt_data)
-                generated["ppt"] = ppt_data
-                artifacts["ppt"] = renderer.render_pptx(
-                    course_name=course.name,
-                    chapter_title=chapter.title,
-                    ppt_data=ppt_data,
-                    evidence=run.evidence_snapshot or [],
-                )
+                try:
+                    ppt_data = generated.get("ppt")
+                    if not isinstance(ppt_data, dict) or not ppt_data.get("slides"):
+                        raise RuntimeError("模型没有返回可用的 PPT 结构")
+                    ppt_data = _sanitize_ppt_visible_content(ppt_data)
+                    preferences = (run.input_data or {}).get("ppt_preferences") or {}
+                    if bool(preferences.get("include_visuals")):
+                        ppt_data = PptMultimodalService(run.id).enhance(ppt_data)
+                    generated["ppt"] = ppt_data
+                    artifacts["ppt"] = renderer.render_pptx(
+                        course_name=course.name,
+                        chapter_title=chapter.title,
+                        ppt_data=ppt_data,
+                        evidence=run.evidence_snapshot or [],
+                    )
+                    successful_types.append("ppt")
+                except Exception as exc:
+                    logger.exception("lesson artifact ppt failed run_id=%s", run_id)
+                    artifact_errors["ppt"] = str(exc) or type(exc).__name__
             if "lesson_plan" in requested:
-                lesson_plan = generated.get("lesson_plan")
-                if not isinstance(lesson_plan, dict):
-                    raise RuntimeError("模型没有返回可用的教案结构")
-                artifacts["lesson_plan"] = renderer.render_lesson_plan(
-                    course_name=course.name,
-                    chapter_title=chapter.title,
-                    lesson_plan=lesson_plan,
-                    evidence=run.evidence_snapshot or [],
-                )
+                try:
+                    lesson_plan = generated.get("lesson_plan")
+                    if not isinstance(lesson_plan, dict):
+                        raise RuntimeError("模型没有返回可用的教案结构")
+                    artifacts["lesson_plan"] = renderer.render_lesson_plan(
+                        course_name=course.name,
+                        chapter_title=chapter.title,
+                        lesson_plan=lesson_plan,
+                        evidence=run.evidence_snapshot or [],
+                    )
+                    successful_types.append("lesson_plan")
+                except Exception as exc:
+                    logger.exception("lesson artifact lesson_plan failed run_id=%s", run_id)
+                    artifact_errors["lesson_plan"] = str(exc) or type(exc).__name__
             if "classroom_activities" in requested:
-                activities = generated.get("classroom_activities")
-                if not isinstance(activities, list) or not activities:
-                    raise RuntimeError("模型没有返回可用的课堂活动")
-                artifacts["classroom_activities"] = renderer.render_activity_guide(
-                    course_name=course.name,
-                    chapter_title=chapter.title,
-                    activities=activities,
-                    evidence=run.evidence_snapshot or [],
+                try:
+                    activities = generated.get("classroom_activities")
+                    if not isinstance(activities, list) or not activities:
+                        raise RuntimeError("模型没有返回可用的课堂活动")
+                    artifacts["classroom_activities"] = renderer.render_activity_guide(
+                        course_name=course.name,
+                        chapter_title=chapter.title,
+                        activities=activities,
+                        evidence=run.evidence_snapshot or [],
+                    )
+                    successful_types.append("classroom_activities")
+                except Exception as exc:
+                    logger.exception("lesson artifact classroom_activities failed run_id=%s", run_id)
+                    artifact_errors["classroom_activities"] = str(exc) or type(exc).__name__
+            if not successful_types:
+                detail = "；".join(
+                    f"{key}: {message}" for key, message in artifact_errors.items()
                 )
+                raise RuntimeError(detail or "所有教学成果均生成失败")
             db.refresh(run)
             if run.cancel_requested:
                 run.status = "cancelled"
@@ -2024,11 +2046,19 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 # 避免用户为了补一份教案而丢失已经核验过的 PPT。
                 output_data = dict(run.output_data or {})
                 existing_bundle = dict(output_data.get("artifact_bundle") or {})
-                existing_bundle.update({key: value for key, value in generated.items() if key in requested})
+                existing_bundle.update(
+                    {
+                        key: value
+                        for key, value in generated.items()
+                        if key in successful_types
+                    }
+                )
                 existing_artifacts = dict(output_data.get("artifacts") or {})
                 existing_artifacts.update(artifacts)
                 output_data["artifact_bundle"] = existing_bundle
                 output_data["artifacts"] = existing_artifacts
+                output_data["artifact_errors"] = artifact_errors
+                output_data["artifact_success_types"] = successful_types
                 run.output_data = output_data
                 run.status = "completed"
                 run.current_step = 3
@@ -2037,6 +2067,8 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 step.output_data = {
                     "output_types": requested,
                     "artifact_count": len(artifacts),
+                    "successful_types": successful_types,
+                    "artifact_errors": artifact_errors,
                 }
                 step.finished_time = _now()
             db.commit()

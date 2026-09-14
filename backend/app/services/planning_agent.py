@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 import json
 import logging
 from typing import Any, Iterator
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -301,7 +302,19 @@ class PlanningAgent:
                     ensure_ascii=False,
                 ),
             }
-            structured = getattr(model, "with_structured_output", None)
+            provider_hostname = (urlparse(runtime.base_url or "").hostname or "").lower()
+            # DeepSeek currently rejects the response_format used by
+            # with_structured_output. Use the JSON prompt fallback directly
+            # instead of emitting a failed 400 audit call on every planning step.
+            supports_structured_output = not (
+                provider_hostname == "api.deepseek.com"
+                or provider_hostname.endswith(".deepseek.com")
+            )
+            structured = (
+                getattr(model, "with_structured_output", None)
+                if supports_structured_output
+                else None
+            )
             response: Any
             if callable(structured):
                 try:

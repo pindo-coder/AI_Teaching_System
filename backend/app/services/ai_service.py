@@ -37,8 +37,9 @@ from app.services.llm_compat import (
     clean_model_text,
     known_streaming_support,
     remember_streaming_support,
+    strip_thinking_stream,
 )
-from app.services.ai_operation_service import build_chat_model
+from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.services.ai_media_service import AiMediaNotFoundError, AiMediaService
 from app.services.multimodal_provider import MultimodalProviderError, VisionProvider
 
@@ -66,15 +67,29 @@ class AiGenerator(Protocol):
 class LangChainGenerator:
     """使用 OpenAI 兼容 API；通过配置即可替换具体模型供应商。"""
 
-    def __init__(self, db: Session | None = None, user: User | None = None) -> None:
+    def __init__(
+        self,
+        db: Session | None = None,
+        user: User | None = None,
+        feature: str = "learning_assist",
+        max_tokens: int | None = None,
+    ) -> None:
+        local_teacher = AiProviderConfigService.uses_local_teacher_model(feature)
+        system_prompt = AI_SYSTEM_PROMPT
+        if local_teacher:
+            # Qwen3 otherwise spends the whole small output budget on hidden
+            # reasoning. The soft switch keeps the same model and teaching
+            # prompt while returning the answer directly.
+            system_prompt = f"{system_prompt.rstrip()}\n\n/no_think"
         prompt = ChatPromptTemplate.from_messages(
-            [("system", AI_SYSTEM_PROMPT), ("human", AI_USER_PROMPT)]
+            [("system", system_prompt), ("human", AI_USER_PROMPT)]
         )
         try:
             model, config = build_chat_model(
-                feature="learning_assist",
+                feature=feature,
                 user_id=user.id if user else None,
                 db=db,
+                max_tokens=max_tokens,
                 streaming=True,
             )
         except RuntimeError as exc:
@@ -116,7 +131,7 @@ class LangChainGenerator:
 
         emitted = False
         try:
-            for part in self.chain.stream(variables):
+            for part in strip_thinking_stream(self.chain.stream(variables)):
                 if part:
                     emitted = True
                     yield part
@@ -202,8 +217,46 @@ class AiService:
         self.chapters = ChapterRepository(db)
         self.documents = KnowledgeRepository(db)
         self.user = user
-        self.generator = generator or (MockGenerator() if settings.ai_mock_mode else LangChainGenerator(db, user))
+        self._generator_override = generator
+        self._generators: dict[str, AiGenerator] = {}
         self.vision_provider = vision_provider or VisionProvider(db=db)
+
+    @staticmethod
+    def _feature_for_payload(payload: AiAssistRequest) -> str:
+        """Keep local learning tasks separate from teacher and score workflows."""
+        if payload.assistant_role in {"teacher", "admin"}:
+            return "teacher_assist"
+        if payload.task_type == "news_study_note":
+            return "news_study_note"
+        if payload.task_type.startswith("note_"):
+            return payload.task_type
+        if payload.task_type == "review_feedback":
+            return "review_feedback"
+        return "learning_assist"
+
+    def _generator_for(self, payload: AiAssistRequest) -> AiGenerator:
+        if self._generator_override is not None:
+            return self._generator_override
+        feature = self._feature_for_payload(payload)
+        generator = self._generators.get(feature)
+        if generator is None:
+            local_teacher = AiProviderConfigService.uses_local_teacher_model(feature)
+            generator = (
+                MockGenerator()
+                if settings.ai_mock_mode
+                else LangChainGenerator(
+                    self.db,
+                    self.user,
+                    feature=feature,
+                    max_tokens=(
+                        settings.llm_teacher_max_output_tokens
+                        if local_teacher
+                        else None
+                    ),
+                )
+            )
+            self._generators[feature] = generator
+        return generator
 
     def _vision_inputs(self, payload: AiAssistRequest) -> list[str]:
         """Resolve private image IDs to bounded local paths after ownership checks."""
@@ -465,6 +518,26 @@ class AiService:
                 model="none",
             )
 
+        feature = self._feature_for_payload(payload)
+        question_for_model = payload.question
+        if AiProviderConfigService.uses_local_teacher_model(feature):
+            # The local Qwen3-14B service is launched with an 8192-token window.
+            # Bound both the user question and retrieved evidence so vLLM rejects
+            # neither the request nor the already generated reference context.
+            max_input_chars = settings.llm_teacher_max_input_chars
+            question_budget = min(len(question_for_model), max(800, max_input_chars // 4))
+            if len(question_for_model) > question_budget:
+                question_for_model = (
+                    question_for_model[:question_budget].rstrip()
+                    + "\n\n[本地模型上下文限制：问题末尾已截断]"
+                )
+            content_budget = max(800, max_input_chars - len(question_for_model))
+            if len(content) > content_budget:
+                content = (
+                    content[:content_budget].rstrip()
+                    + "\n\n[本地模型上下文限制：后续资料未进入本次生成]"
+                )
+
         variables = {
             "course_name": course.name,
             "chapter_title": "、".join(item.title for item in chapters),
@@ -475,7 +548,7 @@ class AiService:
             "assistant_role_label": WORKSPACE_ROLE_LABELS[payload.assistant_role],
             "assistant_role_instructions": WORKSPACE_ROLE_INSTRUCTIONS[payload.assistant_role],
             "chapter_content": content,
-            "question": payload.question,
+            "question": question_for_model,
             "task_instructions": TASK_INSTRUCTIONS[TASK_LABELS[payload.task_type]],
             "stage_instructions": STAGE_INSTRUCTIONS[STAGE_LABELS[payload.learning_stage]],
         }
@@ -557,9 +630,10 @@ class AiService:
         if isinstance(prepared, AiAssistData):
             return prepared
         variables, sources, rag_chunks = prepared
-        answer = self._generate_with_images(variables, image_paths) if image_paths else self.generator.generate(variables)
+        generator = self._generator_for(payload)
+        answer = self._generate_with_images(variables, image_paths) if image_paths else generator.generate(variables)
         logger.info("ai_assist chapter_id=%s stage=%s task=%s rag_chunks=%s", payload.chapter_id, payload.learning_stage, payload.task_type, rag_chunks)
-        model_name = self.vision_provider.model_name if image_paths else self.generator.model_name
+        model_name = self.vision_provider.model_name if image_paths else generator.model_name
         return AiAssistData(answer=answer, grounded=True, model=model_name, sources=sources)
 
     def stream(
@@ -575,4 +649,5 @@ class AiService:
         variables, sources, _ = prepared
         if image_paths:
             return self._stream_with_images(variables, image_paths), sources, True, self.vision_provider.model_name
-        return self.generator.stream(variables), sources, True, self.generator.model_name
+        generator = self._generator_for(payload)
+        return generator.stream(variables), sources, True, generator.model_name

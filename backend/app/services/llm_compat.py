@@ -67,3 +67,48 @@ def chunk_text(text: str, *, size: int = 72):
     """把非流式回退结果切成前端可消费的小块。"""
     for start in range(0, len(text), size):
         yield text[start:start + size]
+
+
+_OPEN_THINK_PATTERN = re.compile(r"<(?:think|reasoning)>", re.I)
+_CLOSE_THINK_PATTERN = re.compile(r"</(?:think|reasoning)>", re.I)
+_MAX_TAG_BOUNDARY = 20
+
+
+def strip_thinking_stream(chunks):
+    """Remove Qwen-style thinking blocks without breaking streamed chunks.
+
+    Chat providers may split ``<think>`` or ``</think>`` across SSE chunks.
+    Keep only a small tail while scanning so ordinary answer text still flows
+    immediately and partial tags cannot leak to the user.
+    """
+    buffer = ""
+    inside_thinking = False
+
+    for raw_chunk in chunks:
+        buffer += str(raw_chunk or "")
+        while buffer:
+            if inside_thinking:
+                closing = _CLOSE_THINK_PATTERN.search(buffer)
+                if closing is None:
+                    buffer = buffer[-_MAX_TAG_BOUNDARY:]
+                    break
+                buffer = buffer[closing.end():]
+                inside_thinking = False
+                continue
+
+            opening = _OPEN_THINK_PATTERN.search(buffer)
+            if opening is not None:
+                visible = buffer[:opening.start()]
+                buffer = buffer[opening.end():]
+                inside_thinking = True
+                if visible:
+                    yield visible
+                continue
+
+            if len(buffer) > _MAX_TAG_BOUNDARY:
+                yield buffer[:-_MAX_TAG_BOUNDARY]
+                buffer = buffer[-_MAX_TAG_BOUNDARY:]
+            break
+
+    if buffer and not inside_thinking:
+        yield buffer
