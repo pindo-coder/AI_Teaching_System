@@ -123,8 +123,31 @@ PPTX 由公开可部署的 PptxGenJS 运行时生成，需要受支持的 Node.j
 
 ```bash
 cd backend/presentation_runtime
-pnpm install
+pnpm install --frozen-lockfile --prod
 ```
+
+运行时依赖由 `backend/presentation_runtime/package.json` 和
+`pnpm-lock.yaml` 管理，当前固定为 `pptxgenjs@4.0.1`。非 Docker 部署时，必须在
+服务器的 `backend/presentation_runtime` 目录执行上面的安装命令，生成
+`node_modules` 后才能渲染 PPT；不要直接复制其他操作系统或其他 Node.js 环境的
+`node_modules`。网络受限时可以临时指定镜像，但仍须保留锁文件校验：
+
+```bash
+pnpm install --frozen-lockfile --prod \
+  --registry=https://registry.npmmirror.com
+```
+
+安装后在后端目录执行运行时检查：
+
+```bash
+cd backend
+PYTHONPATH=. python scripts/verify_presentation_runtime.py
+```
+
+检查结果必须确认 Node.js、`render_pptx.mjs`、`pptxgenjs` 和教学成果目录均可用。
+Docker 部署会在镜像构建阶段自动安装并检查这些依赖，非 Docker 部署则需要将上述
+安装和验证步骤纳入每次发布流程。补装或更新 PPT 运行时依赖不会修改 MySQL、知识库
+或用户数据。
 
 如果后端服务进程找不到 `node`，在 `backend/.env` 中配置绝对路径：
 
