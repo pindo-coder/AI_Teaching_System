@@ -19,6 +19,7 @@ import { agentApi, type AgentRun } from '@/api/agents'
 import { aiMediaApi, type AiMediaAsset } from '@/api/aiMedia'
 import { learningApi } from '@/api/learning'
 import AiMediaComposer from '@/components/AiMediaComposer.vue'
+import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
 import { useAuthStore } from '@/stores/auth'
 import type { LearningStage } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
@@ -92,6 +93,8 @@ const deletingExecutionId = ref<number | null>(null)
 const expandedActivityIds = ref<Set<number>>(new Set())
 const mediaAssets = ref<AiMediaAsset[]>([])
 const mediaBusy = ref(false)
+const citationVisible = ref(false)
+const selectedSource = ref<AiSource | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const composerInput = ref<{ focus: () => void } | null>(null)
 const role = computed<AiWorkspaceRole>(() => auth.user?.role || 'student')
@@ -119,6 +122,22 @@ const modeHint = computed(() => mode.value === 'chat'
 const disclaimer = computed(() => role.value === 'admin'
   ? 'AI 生成内容仅汇总平台状态并提供管理入口，不会自动审核、发布、删除或修改服务配置。'
   : 'AI 生成内容依据当前教材资料，仅供教学参考；发布、删除、导入和通知等操作需人工确认。')
+
+function canOpenCitation(source: AiSource) {
+  return Boolean(
+    (source.document_id && source.pdf_page_start)
+      || source.source_url,
+  )
+}
+
+function openCitation(source: AiSource) {
+  if (source.document_id && source.pdf_page_start) {
+    selectedSource.value = source
+    citationVisible.value = true
+  } else if (source.source_url) {
+    window.open(source.source_url, '_blank', 'noopener,noreferrer')
+  }
+}
 const storageScopeKey = computed(() => `workspace-ai-history:${auth.user?.id || 'guest'}:${props.context?.course_id || props.courseId || 0}:${props.context?.chapter_ids.join('-') || props.context?.chapter_id || props.chapterId || 0}`)
 function storageKey(targetMode: AiWorkspaceMode) {
   return `${storageScopeKey.value}:${targetMode}`
@@ -980,7 +999,15 @@ defineExpose({ applyExternalRequest })
             </header>
             <section v-if="message.run.evidence_snapshot.length" class="workspace-ai-evidence">
               <strong>本次证据快照 · {{ message.run.evidence_snapshot.length }} 条</strong>
-              <span v-for="source in message.run.evidence_snapshot.slice(0, 3)" :key="`${source.source_title}-${source.position}`">{{ source.source_title }} · {{ source.position }}</span>
+              <button
+                v-for="source in message.run.evidence_snapshot.slice(0, 3)"
+                :key="`${source.source_title}-${source.position}`"
+                type="button"
+                class="workspace-ai-evidence-source"
+                :class="{ clickable: canOpenCitation(source) }"
+                :disabled="!canOpenCitation(source)"
+                @click="openCitation(source)"
+              >{{ source.source_title }} · {{ source.position }}<small v-if="canOpenCitation(source)">查看原页</small></button>
             </section>
             <p v-if="runFailure(message.run)" class="workspace-ai-run-error">{{ runFailure(message.run) }}</p>
             <section v-if="message.run.output_data.outline" class="workspace-ai-outline">
@@ -1012,7 +1039,17 @@ defineExpose({ applyExternalRequest })
           </section>
           <div v-if="message.role === 'user' && message.attachments?.length" class="workspace-ai-attachments"><span v-for="attachment in message.attachments" :key="attachment.id">图片 · {{ attachment.name }}</span></div>
           <div v-if="message.role === 'assistant' && message.content" class="workspace-ai-meta"><el-tag size="small" :type="role === 'admin' && message.mode === 'agent' ? 'success' : message.grounded ? 'success' : 'warning'">{{ role === 'admin' && message.mode === 'agent' ? 'AI 生成内容 · 平台数据' : message.grounded ? 'AI 生成内容 · 教材依据' : 'AI 生成内容 · 待绑定教材' }}</el-tag><span v-if="message.model">{{ message.model }}</span></div>
-          <div v-if="message.role === 'assistant' && message.sources?.length" class="workspace-ai-sources"><span v-for="source in message.sources.slice(0, 3)" :key="`${source.source_title}-${source.position}`">{{ source.source_title }} · {{ source.position }}</span></div>
+          <div v-if="message.role === 'assistant' && message.sources?.length" class="workspace-ai-sources">
+            <button
+              v-for="source in message.sources.slice(0, 3)"
+              :key="`${source.source_title}-${source.position}`"
+              type="button"
+              class="workspace-ai-source-link"
+              :class="{ clickable: canOpenCitation(source) }"
+              :disabled="!canOpenCitation(source)"
+              @click="openCitation(source)"
+            >{{ source.source_title }} · {{ source.position }}<small v-if="canOpenCitation(source)">查看原页</small></button>
+          </div>
         </div>
       </div>
     </div>
@@ -1023,6 +1060,7 @@ defineExpose({ applyExternalRequest })
       <div class="workspace-ai-composer-footer"><div class="workspace-ai-mode-switch" role="tablist" aria-label="AI 工作模式"><button type="button" role="tab" :aria-selected="mode === 'chat'" :class="{ active: mode === 'chat' }" @click="switchMode('chat')"><el-icon><ChatDotRound /></el-icon>Chat<i v-if="loadingByMode.chat"></i></button><button type="button" role="tab" :aria-selected="mode === 'agent'" :class="{ active: mode === 'agent' }" @click="switchMode('agent')"><el-icon><MagicStick /></el-icon>Agent<i v-if="loadingByMode.agent"></i></button></div><span class="workspace-ai-hint">{{ modeHint }}</span><el-button type="primary" :loading="loading" :disabled="mode === 'chat' && mediaBusy" :icon="Promotion" aria-label="发送" @click="send()">发送</el-button></div>
     </div>
     <p class="workspace-ai-disclaimer">{{ disclaimer }}</p>
+    <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
   </section>
 </template>
 
@@ -1084,7 +1122,10 @@ defineExpose({ applyExternalRequest })
 .workspace-ai-bubble :deep(.teaching-document p) { margin: 0 0 10px; }
 .workspace-ai-bubble :deep(.teaching-document strong) { color: #2e54c4; font-weight: 750; }
 .workspace-ai-meta, .workspace-ai-sources { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; color: #8693a9; font-size: 10px; }
-.workspace-ai-sources span { padding: 3px 6px; color: #5572a7; background: #f1f5fc; border-radius: 5px; }
+.workspace-ai-source-link, .workspace-ai-evidence-source { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; overflow: hidden; padding: 3px 6px; color: #5572a7; text-align: left; text-overflow: ellipsis; white-space: nowrap; background: #f1f5fc; border: 0; border-radius: 5px; font: inherit; font-size: inherit; }
+.workspace-ai-source-link.clickable, .workspace-ai-evidence-source.clickable { cursor: pointer; }
+.workspace-ai-source-link.clickable:hover, .workspace-ai-evidence-source.clickable:hover { color: #285dcc; background: #e6efff; }
+.workspace-ai-source-link small, .workspace-ai-evidence-source small { color: #7591c8; font-size: 9px; }
 .workspace-ai-attachments { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 7px; }
 .workspace-ai-attachments span { max-width: 220px; overflow: hidden; padding: 3px 7px; color: #315ed5; background: rgba(255,255,255,.9); border-radius: 6px; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .workspace-ai-generating { display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 7px 0; color: #31518a; }
@@ -1108,7 +1149,7 @@ defineExpose({ applyExternalRequest })
 .workspace-ai-activity.is-failed, .workspace-ai-activity.is-needs_input { color: #a4661c; }.workspace-ai-activity.is-failed .workspace-ai-activity-marker { background: #c45656; }.workspace-ai-activity.is-needs_input .workspace-ai-activity-marker { background: #d29132; }
 @keyframes workspace-ai-pulse { 50% { opacity: .55; transform: scale(.82); } }
 .workspace-ai-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.workspace-ai-run { display: grid; gap: 10px; margin-top: 12px; padding: 12px; background: linear-gradient(145deg, #f5f8ff, #fff); border: 1px solid #dce6fa; border-radius: 12px; }.workspace-ai-run.is-running, .workspace-ai-run.is-queued { border-color: #aebffc; }.workspace-ai-run.is-completed { border-color: #b8e6ce; }.workspace-ai-run.is-failed { border-color: #f2c3c7; }.workspace-ai-run-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.workspace-ai-run-header div { display: grid; gap: 2px; }.workspace-ai-run-header span, .workspace-ai-run-eyebrow { color: #8191aa; font-size: 10px; }.workspace-ai-run-header strong { color: #29466e; font-size: 12px; }.workspace-ai-evidence { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; background: #fbfcff; border: 1px dashed #d7e2f5; border-radius: 8px; }.workspace-ai-evidence strong { width: 100%; color: #52709e; font-size: 10px; }.workspace-ai-evidence span { max-width: 100%; overflow: hidden; padding: 3px 5px; color: #687995; text-overflow: ellipsis; white-space: nowrap; background: #eef4ff; border-radius: 5px; font-size: 10px; }.workspace-ai-run-error { margin: 0; color: #b33c49; font-size: 11px; line-height: 1.55; }.workspace-ai-outline { padding: 11px; background: #fff; border: 1px solid #e5ebf4; border-radius: 10px; }.workspace-ai-outline h4 { margin: 3px 0 5px; color: #263f67; font-size: 14px; }.workspace-ai-outline > p:not(.workspace-ai-run-eyebrow) { margin: 0; color: #65748b; font-size: 11px; line-height: 1.55; }.workspace-ai-outline-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }.workspace-ai-outline-grid > div, .workspace-ai-flow { padding: 8px; background: #f8faff; border-radius: 8px; }.workspace-ai-outline-grid strong, .workspace-ai-flow strong, .workspace-ai-artifacts > strong { display: block; color: #4564a4; font-size: 11px; }.workspace-ai-outline-grid ul { display: grid; gap: 3px; margin: 5px 0 0; padding-left: 16px; color: #66758d; font-size: 10px; line-height: 1.45; }.workspace-ai-flow { display: flex; flex-wrap: wrap; gap: 5px 7px; margin-top: 8px; }.workspace-ai-flow strong { width: 100%; }.workspace-ai-flow span { padding: 3px 5px; color: #677790; background: #fff; border: 1px solid #e4eaf4; border-radius: 5px; font-size: 10px; }.workspace-ai-artifact-actions { display: grid; gap: 7px; }.workspace-ai-artifact-actions p { margin: 0; color: #55677f; font-size: 11px; }.workspace-ai-artifact-actions > div { display: flex; flex-wrap: wrap; gap: 6px; }.workspace-ai-artifacts { display: grid; gap: 6px; padding-top: 2px; }.workspace-ai-artifacts article { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; color: #50627b; background: #fff; border: 1px solid #e3eaf5; border-radius: 8px; font-size: 11px; }
+.workspace-ai-run { display: grid; gap: 10px; margin-top: 12px; padding: 12px; background: linear-gradient(145deg, #f5f8ff, #fff); border: 1px solid #dce6fa; border-radius: 12px; }.workspace-ai-run.is-running, .workspace-ai-run.is-queued { border-color: #aebffc; }.workspace-ai-run.is-completed { border-color: #b8e6ce; }.workspace-ai-run.is-failed { border-color: #f2c3c7; }.workspace-ai-run-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }.workspace-ai-run-header div { display: grid; gap: 2px; }.workspace-ai-run-header span, .workspace-ai-run-eyebrow { color: #8191aa; font-size: 10px; }.workspace-ai-run-header strong { color: #29466e; font-size: 12px; }.workspace-ai-evidence { display: flex; flex-wrap: wrap; gap: 5px; padding: 8px; background: #fbfcff; border: 1px dashed #d7e2f5; border-radius: 8px; }.workspace-ai-evidence strong { width: 100%; color: #52709e; font-size: 10px; }.workspace-ai-evidence-source { max-width: 100%; overflow: hidden; padding: 3px 5px; color: #687995; text-overflow: ellipsis; white-space: nowrap; background: #eef4ff; font-size: 10px; }.workspace-ai-run-error { margin: 0; color: #b33c49; font-size: 11px; line-height: 1.55; }.workspace-ai-outline { padding: 11px; background: #fff; border: 1px solid #e5ebf4; border-radius: 10px; }.workspace-ai-outline h4 { margin: 3px 0 5px; color: #263f67; font-size: 14px; }.workspace-ai-outline > p:not(.workspace-ai-run-eyebrow) { margin: 0; color: #65748b; font-size: 11px; line-height: 1.55; }.workspace-ai-outline-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 9px; }.workspace-ai-outline-grid > div, .workspace-ai-flow { padding: 8px; background: #f8faff; border-radius: 8px; }.workspace-ai-outline-grid strong, .workspace-ai-flow strong, .workspace-ai-artifacts > strong { display: block; color: #4564a4; font-size: 11px; }.workspace-ai-outline-grid ul { display: grid; gap: 3px; margin: 5px 0 0; padding-left: 16px; color: #66758d; font-size: 10px; line-height: 1.45; }.workspace-ai-flow { display: flex; flex-wrap: wrap; gap: 5px 7px; margin-top: 8px; }.workspace-ai-flow strong { width: 100%; }.workspace-ai-flow span { padding: 3px 5px; color: #677790; background: #fff; border: 1px solid #e4eaf4; border-radius: 5px; font-size: 10px; }.workspace-ai-artifact-actions { display: grid; gap: 7px; }.workspace-ai-artifact-actions p { margin: 0; color: #55677f; font-size: 11px; }.workspace-ai-artifact-actions > div { display: flex; flex-wrap: wrap; gap: 6px; }.workspace-ai-artifacts { display: grid; gap: 6px; padding-top: 2px; }.workspace-ai-artifacts article { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 7px 9px; color: #50627b; background: #fff; border: 1px solid #e3eaf5; border-radius: 8px; font-size: 11px; }
 .workspace-ai-artifacts-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
 .workspace-ai-history { min-height: 230px; max-height: min(540px, 52vh); overflow-y: auto; padding: 16px 18px; }

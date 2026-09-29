@@ -37,6 +37,7 @@ knowledge_base/generated_artifacts/*
 tmp/
 .tmp/
 .workbuddy/
+work_output/
 knowledge_base/chroma_local_mock/
 knowledge_base/chroma_matching_test/
 knowledge_base/generated_artifacts_acceptance/
