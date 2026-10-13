@@ -66,3 +66,37 @@ def test_assignment_rubric_migration_backfills_without_server_default() -> None:
     assert row[0] in ({}, "{}")
     assert column["nullable"] is False
     assert column.get("default") is None
+
+
+def test_assignment_completion_policy_migration_backfills_and_creates_evidence_table() -> None:
+    migration = _load("20261013_01_assignment_completion_policy.py")
+    engine = sa.create_engine("sqlite:///:memory:")
+    metadata = sa.MetaData()
+    sa.Table("users", metadata, sa.Column("id", sa.Integer, primary_key=True))
+    assignments = sa.Table(
+        "teacher_assignments",
+        metadata,
+        sa.Column("id", sa.Integer, primary_key=True),
+        sa.Column("title", sa.String(20), nullable=False),
+    )
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(assignments.insert().values(title="legacy"))
+        _run_upgrade(connection, migration)
+        row = connection.execute(sa.text(
+            "SELECT completion_policy FROM teacher_assignments"
+        )).one()
+        inspector = sa.inspect(connection)
+        column = next(
+            item for item in inspector.get_columns("teacher_assignments")
+            if item["name"] == "completion_policy"
+        )
+        unique_constraints = inspector.get_unique_constraints("assignment_requirement_progress")
+
+    assert row[0] in ({}, "{}")
+    assert column["nullable"] is False
+    assert column.get("default") is None
+    assert any(
+        item["column_names"] == ["assignment_id", "user_id", "requirement_key"]
+        for item in unique_constraints
+    )

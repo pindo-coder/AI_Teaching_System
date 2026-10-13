@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.models.user import User
 from app.schemas.assignment import (
     AssignmentCreate,
+    AssignmentCompletionPolicyUpdate,
     AssignmentRubricConfirm,
     AssignmentRecipientRead,
     AssignmentStudentItem,
@@ -71,3 +72,23 @@ def confirm_assignment_rubric(
     assignment = AssignmentService(db).confirm_rubric(assignment_id, user, payload.rubric)
     item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
     return ApiResponse(message="批改量规已确认", data=TeacherAssignmentRead(**item))
+
+
+@router.put("/{assignment_id}/completion-policy", response_model=ApiResponse[TeacherAssignmentRead])
+def update_assignment_completion_policy(
+    assignment_id: int,
+    payload: AssignmentCompletionPolicyUpdate,
+    user: User = Depends(manager),
+    db: Session = Depends(get_db),
+) -> ApiResponse[TeacherAssignmentRead]:
+    assignment = AssignmentService(db).update_completion_policy(
+        assignment_id,
+        user,
+        payload.completion_policy,
+    )
+    item = next(
+        item
+        for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin")
+        if item["id"] == assignment.id
+    )
+    return ApiResponse(message="任务完成条件已更新并重新统计", data=TeacherAssignmentRead(**item))

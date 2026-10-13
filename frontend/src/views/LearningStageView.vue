@@ -48,7 +48,7 @@ const practiceReferenceError = ref('')
 const practiceSavingToNotes = ref(false)
 const practiceSavedToNotes = ref(false)
 const annotationReader = ref<InstanceType<typeof TextbookAnnotationReader> | null>(null)
-let lastReadingPercent = 0
+const lastReadingPercent = ref(0)
 const contentBlocks = computed(() => formatTextbookParagraphs(chapter.value?.content))
 const savedNoteText = computed(() => notePlainText(savedNote.value?.content || ''))
 const savedNoteHtml = computed(() => sanitizeNoteHtml(savedNote.value?.content || ''))
@@ -139,10 +139,13 @@ const navigationHint = computed(() => {
 })
 
 async function recordEvent(event_type: Parameters<typeof learningApi.recordEvent>[0]['event_type'], event_data: Record<string, unknown> = {}) {
-  if (!course.value || !chapter.value) return
+  if (!course.value || !chapter.value) return false
   try {
     footprint.value = (await learningApi.recordActivity({ course_id: courseId.value, chapter_id: chapterId.value, learning_stage: stage.value, event_type, event_data })).data.data
-  } catch { /* 行为统计失败不阻塞学习内容 */ }
+    return true
+  } catch {
+    return false
+  }
   }
 
 async function loadFootprint() {
@@ -163,9 +166,21 @@ function trackReading(event?: Event) {
     const total = Math.max(element.offsetHeight, window.innerHeight)
     percent = Math.min(100, Math.round(((Math.max(0, -rect.top) + visible) / total) * 100))
   }
-  if (percent >= lastReadingPercent + 10 || (percent >= 80 && lastReadingPercent < 80)) {
-    lastReadingPercent = percent
+  if (percent >= lastReadingPercent.value + 10 || (percent >= 80 && lastReadingPercent.value < 80)) {
+    lastReadingPercent.value = percent
     void recordEvent('reading_progress', { percent })
+  }
+}
+
+async function confirmReadingComplete() {
+  if (lastReadingPercent.value >= 100) return
+  const previous = lastReadingPercent.value
+  lastReadingPercent.value = 100
+  if (await recordEvent('reading_progress', { percent: 100 })) {
+    ElMessage.success('已确认完成本阶段教材阅读')
+  } else {
+    lastReadingPercent.value = previous
+    ElMessage.error('阅读进度保存失败，请稍后重试')
   }
 }
 
@@ -178,7 +193,7 @@ async function load() {
     savedNote.value = (await studyApi.note(chapterId.value)).data.data
     noteEditing.value = false
     noteDraft.value = sanitizeNoteHtml(savedNote.value?.content || '')
-    lastReadingPercent = 0
+    lastReadingPercent.value = 0
     await recordEvent('chapter_opened')
     await loadFootprint()
   } finally { loading.value = false }
@@ -344,7 +359,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
     <section v-if="stage === 'review'" class="review-goal-grid"><div v-for="(goal, index) in config.goals" :key="goal" class="preview-goal-item"><span class="preview-goal-index">0{{ index + 1 }}</span><div class="preview-goal-copy"><strong>{{ goal }}</strong><small>{{ reviewGuideActions[index].description }}</small></div><button type="button" class="preview-goal-ai" :aria-label="`向 AI ${reviewGuideActions[index].label}`" @click="askGuideAi(reviewGuideActions[index])"><el-icon><MagicStick /></el-icon><span>问 AI</span></button></div></section>
 
     <section v-if="stage === 'preview'" class="stage-workspace preview-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文预读滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文预读滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /><div v-if="contentBlocks.length" class="reading-confirm"><span>读完后请确认，避免短页面或触控滚动未被统计。</span><el-button type="primary" plain :disabled="lastReadingPercent >= 100" @click="confirmReadingComplete">{{ lastReadingPercent >= 100 ? '已完成阅读' : '确认已读完' }}</el-button></div></el-card>
       <aside class="preview-side" aria-label="专题导览与活动记录">
         <el-card shadow="never" class="workspace-card preview-guide-card">
           <template #header><div class="content-heading"><span>专题导览</span><el-tag>课前先读</el-tag></div></template>
@@ -361,7 +376,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
     </section>
 
     <section v-else-if="stage === 'review'" class="stage-workspace preview-workspace review-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card review-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材重点回看" reader-hint="选中文字即可添加标注" reader-label="教材重点回看滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card review-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材重点回看" reader-hint="选中文字即可添加标注" reader-label="教材重点回看滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /><div v-if="contentBlocks.length" class="reading-confirm"><span>完成重点回看后请确认阅读进度。</span><el-button type="primary" plain :disabled="lastReadingPercent >= 100" @click="confirmReadingComplete">{{ lastReadingPercent >= 100 ? '已完成阅读' : '确认已读完' }}</el-button></div></el-card>
       <aside class="preview-side review-side" aria-label="章节笔记">
         <el-card shadow="never" class="workspace-card note-workspace review-note-card">
         <template #header>
@@ -391,7 +406,7 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
     </section>
 
     <section v-else class="stage-workspace preview-workspace exam-workspace">
-      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文冲刺滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /></el-card>
+      <el-card shadow="never" class="workspace-card textbook-card preview-textbook-card"><TextbookAnnotationReader v-if="contentBlocks.length" ref="annotationReader" :course-id="courseId" :chapter-id="chapterId" :learning-stage="stage" :blocks="contentBlocks" reader-title="教材原文" reader-hint="选中文字即可添加标注" reader-label="教材原文冲刺滚动区" @scroll="trackReading" /><el-empty v-else description="当前专题没有教材正文" /><div v-if="contentBlocks.length" class="reading-confirm"><span>完成核心原文速览后请确认阅读进度。</span><el-button type="primary" plain :disabled="lastReadingPercent >= 100" @click="confirmReadingComplete">{{ lastReadingPercent >= 100 ? '已完成阅读' : '确认已读完' }}</el-button></div></el-card>
       <aside class="preview-side exam-side" aria-label="冲刺训练框架与活动记录">
         <el-card shadow="never" class="workspace-card preview-guide-card exam-framework-card">
           <template #header><div class="content-heading"><span>冲刺训练框架</span><el-tag type="danger">输出与检测</el-tag></div></template>
@@ -854,6 +869,18 @@ onUnmounted(() => window.removeEventListener('scroll', trackReading))
   border-top: 1px solid #f0e5e5;
   font-size: 12px;
   line-height: 1.6;
+}
+
+.reading-confirm {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  color: #89777a;
+  border-top: 1px solid #f0e5e5;
+  font-size: 12px;
 }
 
 .exam-framework-card :deep(.el-card__header) {

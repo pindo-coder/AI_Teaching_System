@@ -17,6 +17,7 @@ REQUIRED_TABLES = (
     "agent_runs",
     "news_items",
     "teacher_assignments",
+    "assignment_requirement_progress",
 )
 KNOWN_LEGACY_CANONICAL_URL_INDEX_NAME = "ix_material_candidates_canonical_url"
 
@@ -110,6 +111,10 @@ def compatibility_issues(db_engine: Engine) -> list[str]:
             continue
         if marker_column not in _table_columns(inspector, table_name):
             issues.append(f"{table_name} 缺少字段：{marker_column}")
+
+    if "teacher_assignments" in existing_tables:
+        if "completion_policy" not in _table_columns(inspector, "teacher_assignments"):
+            issues.append("teacher_assignments 缺少字段：completion_policy")
 
     if "material_candidates" in existing_tables:
         candidate_columns = _table_columns(inspector, "material_candidates")

@@ -5,6 +5,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Calendar, Download, Plus, Promotion, Refresh, Search, UserFilled } from '@element-plus/icons-vue'
 import {
   assignmentApi,
+  type AssignmentCompletionPolicy,
+  type AssignmentCompletionRequirement,
   type AssignmentRecipientDetail,
   type AssignmentStudent,
   type AssignmentTaskKind,
@@ -34,6 +36,10 @@ const publishing = ref(false)
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailRefreshing = ref(false)
+const policyDialogVisible = ref(false)
+const policySaving = ref(false)
+const requirementDetailVisible = ref(false)
+const requirementDetailTask = ref<StudentAssignment | null>(null)
 const selectedTask = ref<TeacherAssignment | null>(null)
 const taskRecipients = ref<AssignmentRecipientDetail[]>([])
 const recipientKeyword = ref('')
@@ -49,10 +55,23 @@ const form = reactive({
   target_scope: 'all_students' as 'all_students' | 'selected_students' | 'selected_groups',
   student_ids: [] as number[],
   group_ids: [] as number[],
+  requirement_keys: ['reading'] as string[],
+  requirement_targets: { reading: 80, ai: 1, note: 30, quiz: 1, discussion: 1, reply: 1, activity: 1 } as Record<string, number>,
   rubric: { items: [] as Array<{ label: string; weight: number; description: string }>, feedback_template: '' },
 })
 const stageLabels: Record<LearningStage, string> = { preview: '课前预习', review: '课后巩固', exam: '考前冲刺' }
-const kindLabels: Record<AssignmentTaskKind, string> = { reading: '教材阅读', ai_assist: 'AI 学习辅助', note: '章节笔记' }
+const kindLabels: Record<AssignmentTaskKind, string> = { reading: '教材阅读', ai_assist: 'AI 学习辅助', note: '章节笔记', composite: '组合任务' }
+const requirementOptions = [
+  { key: 'reading', label: '阅读教材原文', event: 'reading_progress', metric: 'percent', target: 80, unit: '%', stage: 'assignment' },
+  { key: 'ai', label: '使用 AI 学习辅助', event: 'ai_assist_used', metric: 'count', target: 1, unit: '次', stage: 'any' },
+  { key: 'note', label: '保存个人笔记', event: 'note_saved', metric: 'length', target: 30, unit: '字', stage: 'any' },
+  { key: 'quiz', label: '完成复习练习', event: 'quiz_completed', metric: 'count', target: 1, unit: '次', stage: 'any' },
+  { key: 'discussion', label: '发布讨论主题', event: 'discussion_created', metric: 'count', target: 1, unit: '次', stage: 'any' },
+  { key: 'reply', label: '回复课堂讨论', event: 'discussion_reply_created', metric: 'count', target: 1, unit: '次', stage: 'any' },
+  { key: 'activity', label: '提交课堂活动', event: 'activity_submitted', metric: 'count', target: 1, unit: '次', stage: 'any' },
+] as const
+const policyRequirementKeys = ref<string[]>([])
+const policyRequirementTargets = reactive<Record<string, number>>({})
 const activeTeacherTasks = computed(() => teacherTasks.value.filter((item) => item.status === 'published'))
 const filteredRecipients = computed(() => {
   const keyword = recipientKeyword.value.trim().toLowerCase()
@@ -72,7 +91,7 @@ const recipientCounts = computed(() => ({
   overdue: taskRecipients.value.filter((item) => item.status === 'overdue').length,
 }))
 
-function taskPath(task: StudentAssignment) { return `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
+function taskPath(task: StudentAssignment) { return task.next_path || `/courses/${task.course_id}/chapters/${task.chapter_id}/${task.learning_stage}` }
 function formatTime(value: string) { return formatBeijingTime(value, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) }
 function statusLabel(status: StudentAssignment['status']) { return status === 'completed' ? '已完成' : status === 'overdue' ? '已逾期' : status === 'in_progress' ? '进行中' : '未开始' }
 function statusTagType(status: AssignmentRecipientDetail['status']) {
@@ -85,6 +104,16 @@ function deadlineClass(task: StudentAssignment) {
   if (task.status === 'completed') return 'completed'
   if (task.status === 'overdue') return 'overdue'
   return beijingTimestamp(task.due_time) - Date.now() < 24 * 3600 * 1000 ? 'urgent' : ''
+}
+function completedRequirementCount(task: StudentAssignment) {
+  return task.requirements.filter((item) => item.status === 'completed').length
+}
+function nextRequirement(task: StudentAssignment) {
+  return task.requirements.find((item) => item.status !== 'completed')
+}
+function openRequirementDetails(task: StudentAssignment) {
+  requirementDetailTask.value = task
+  requirementDetailVisible.value = true
 }
 async function load() {
   loading.value = true
@@ -111,7 +140,30 @@ watch(() => form.teaching_class_id, async (classId) => {
     students.value = studentResponse.data.data; groups.value = groupResponse.data.data
   } else { students.value = []; groups.value = [] }
 })
-watch(() => form.learning_stage, (stage) => { if (form.task_kind === 'note' && stage !== 'review') form.task_kind = 'reading' })
+function buildCompletionPolicy(keys: string[], targets: Record<string, number>): AssignmentCompletionPolicy {
+  const selected = requirementOptions.filter((item) => keys.includes(item.key))
+  const baseWeight = Math.floor(100 / selected.length)
+  const remainder = 100 - baseWeight * selected.length
+  return {
+    mode: 'all_required',
+    items: selected.map((item, index) => ({
+      key: item.key,
+      label: item.label,
+      event: item.event,
+      metric: item.metric,
+      target: Math.max(1, Number(targets[item.key] || item.target)),
+      weight: baseWeight + (index < remainder ? 1 : 0),
+      required: true,
+      stage: item.stage,
+      task_types: [],
+    } as AssignmentCompletionRequirement)),
+  }
+}
+function syncTaskKind() {
+  const keys = form.requirement_keys
+  form.task_kind = keys.length > 1 ? 'composite' : keys[0] === 'ai' ? 'ai_assist' : keys[0] === 'note' ? 'note' : keys[0] === 'reading' ? 'reading' : 'composite'
+}
+watch(() => form.requirement_keys.slice(), syncTaskKind)
 function openCreate() {
   dialogVisible.value = true
   if (teachingClasses.value.length && !form.teaching_class_id) form.teaching_class_id = teachingClasses.value[0].id
@@ -126,11 +178,18 @@ async function publish() {
   if (!form.teaching_class_id || !form.course_id || !form.chapter_id || !form.title.trim() || !form.due_time) return ElMessage.warning('请完整填写教学班、教材、章节、任务名称和截止时间')
   if (form.target_scope === 'selected_students' && !form.student_ids.length) return ElMessage.warning('请选择至少一名学生')
   if (form.target_scope === 'selected_groups' && !form.group_ids.length) return ElMessage.warning('请选择至少一个学习小组')
+  if (!form.requirement_keys.length) return ElMessage.warning('请至少选择一个可验证的完成条件')
   const dueTime = beijingLocalToUtcIso(form.due_time)
   if (!dueTime) return ElMessage.warning('请选择有效的截止时间')
   publishing.value = true
   try {
-    await assignmentApi.create({ ...form, course_id: form.course_id, chapter_id: form.chapter_id, due_time: dueTime })
+    await assignmentApi.create({
+      ...form,
+      course_id: form.course_id,
+      chapter_id: form.chapter_id,
+      due_time: dueTime,
+      completion_policy: buildCompletionPolicy(form.requirement_keys, form.requirement_targets),
+    })
     dialogVisible.value = false
     form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []; form.rubric = { items: [], feedback_template: '' }
     await load()
@@ -146,7 +205,16 @@ function applyAgentDraft() {
       draft?: Partial<typeof form> | null
       rubric?: typeof form.rubric | null
     }
-    if (payload.draft) Object.assign(form, payload.draft)
+    if (payload.draft) {
+      Object.assign(form, payload.draft)
+      for (const option of requirementOptions) {
+        if (!form.requirement_targets[option.key]) form.requirement_targets[option.key] = option.target
+      }
+      const legacyKind = payload.draft.task_kind
+      if (legacyKind === 'reading') form.requirement_keys = ['reading']
+      if (legacyKind === 'ai_assist') form.requirement_keys = ['ai']
+      if (legacyKind === 'note') form.requirement_keys = ['note']
+    }
     if (payload.rubric) form.rubric = payload.rubric
     dialogVisible.value = true
     ElMessage.success(payload.rubric ? '已带入 Agent 量规草案，请确认后发布' : '已带入 Agent 任务草案，请确认后发布')
@@ -184,6 +252,35 @@ async function openTaskDetails(task: TeacherAssignment) {
   recipientStatus.value = 'all'
   detailVisible.value = true
   await loadRecipientDetails()
+}
+function openPolicyEditor(task: TeacherAssignment) {
+  selectedTask.value = task
+  const items = task.completion_policy?.items || []
+  policyRequirementKeys.value = items.length ? items.map((item) => item.key) : [
+    task.task_kind === 'ai_assist' ? 'ai' : task.task_kind === 'note' ? 'note' : 'reading',
+  ]
+  for (const option of requirementOptions) {
+    policyRequirementTargets[option.key] = items.find((item) => item.key === option.key)?.target || option.target
+  }
+  policyDialogVisible.value = true
+}
+async function saveCompletionPolicy() {
+  if (!selectedTask.value) return
+  if (!policyRequirementKeys.value.length) return ElMessage.warning('请至少选择一个完成条件')
+  policySaving.value = true
+  try {
+    await assignmentApi.updateCompletionPolicy(
+      selectedTask.value.id,
+      buildCompletionPolicy(policyRequirementKeys.value, policyRequirementTargets),
+    )
+    policyDialogVisible.value = false
+    await load()
+    ElMessage.success('完成条件已更新，所有学生进度已重新统计')
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '完成条件更新失败'))
+  } finally {
+    policySaving.value = false
+  }
 }
 function csvCell(value: string | number | null) {
   let text = value === null ? '' : String(value)
@@ -228,11 +325,26 @@ onBeforeUnmount(stopDetailRefresh)
     <template v-if="!auth.isTeacher">
       <section class="student-assignment-list">
         <article v-for="task in studentTasks" :key="task.id" class="student-assignment-card" :class="deadlineClass(task)">
-          <div class="assignment-status-line"><el-tag :type="task.status === 'completed' ? 'success' : task.status === 'overdue' ? 'danger' : task.status === 'in_progress' ? 'warning' : 'primary'">{{ statusLabel(task.status) }}</el-tag><span>{{ stageLabels[task.learning_stage] }} · {{ kindLabels[task.task_kind] }}</span></div>
-          <h2>{{ task.title }}</h2><p>{{ task.description || `完成“${task.chapter_title}”相关学习任务。` }}</p>
-          <div class="assignment-meta"><span>{{ task.course_name }} · {{ task.chapter_title }}</span><strong>截止 {{ formatTime(task.due_time) }}</strong><span>教师：{{ task.teacher_name }}</span></div>
-          <el-progress :percentage="task.progress_value" :status="task.status === 'completed' ? 'success' : undefined" />
-          <el-button v-if="task.status !== 'completed'" type="primary" :icon="Promotion" @click="router.push(taskPath(task))">{{ task.status === 'not_started' ? '开始任务' : '继续完成' }}</el-button>
+          <div class="student-task-content">
+            <div class="assignment-status-line"><el-tag :type="task.status === 'completed' ? 'success' : task.status === 'overdue' ? 'danger' : task.status === 'in_progress' ? 'warning' : 'primary'">{{ statusLabel(task.status) }}</el-tag><span>{{ stageLabels[task.learning_stage] }} · {{ kindLabels[task.task_kind] }}</span></div>
+            <h2>{{ task.title }}</h2>
+            <p class="student-task-description">{{ task.description || `完成“${task.chapter_title}”相关学习任务。` }}</p>
+            <div class="assignment-meta"><span>{{ task.course_name }} · {{ task.chapter_title }}</span><strong>截止 {{ formatTime(task.due_time) }}</strong><span>教师：{{ task.teacher_name }}</span></div>
+          </div>
+          <div class="student-task-progress">
+            <div class="student-task-progress-heading"><span>任务进度</span><strong>{{ task.progress_value }}%</strong></div>
+            <el-progress :percentage="task.progress_value" :status="task.status === 'completed' ? 'success' : undefined" :show-text="false" />
+            <button v-if="task.requirements.length" class="requirement-summary" type="button" @click="openRequirementDetails(task)">
+              <span><strong>{{ completedRequirementCount(task) }}/{{ task.requirements.length }}</strong> 项完成条件已达标</span>
+              <em>查看详情</em>
+            </button>
+            <small v-if="nextRequirement(task)" class="next-requirement">下一项：{{ nextRequirement(task)?.evidence_summary }}</small>
+            <small v-else-if="task.requirements.length" class="next-requirement completed">全部完成条件均已达标</small>
+          </div>
+          <div class="student-task-action">
+            <el-button v-if="task.status !== 'completed'" type="primary" :icon="Promotion" @click="router.push(taskPath(task))">{{ task.status === 'not_started' ? '开始任务' : '继续完成' }}</el-button>
+            <el-button v-else plain @click="openRequirementDetails(task)">完成详情</el-button>
+          </div>
         </article>
         <el-empty v-if="!studentTasks.length" description="目前没有教师布置的学习任务" />
       </section>
@@ -244,9 +356,11 @@ onBeforeUnmount(stopDetailRefresh)
         <el-card v-for="task in teacherTasks" :key="task.id" shadow="never" class="teacher-assignment-card" :class="{ cancelled: task.status === 'cancelled' }">
           <div class="assignment-status-line"><el-tag :type="task.status === 'published' ? 'success' : 'info'">{{ task.status === 'published' ? '已发布' : '已撤回' }}</el-tag><span>{{ stageLabels[task.learning_stage] }} · {{ kindLabels[task.task_kind] }}</span></div>
           <h2>{{ task.title }}</h2><p>{{ task.course_name }} · {{ task.chapter_title }}</p><p class="muted">{{ task.description || '未填写补充要求' }}</p>
+          <div v-if="task.completion_policy?.items.length" class="teacher-policy-tags"><span v-for="item in task.completion_policy.items" :key="item.key">{{ item.label }} ≥ {{ item.target }}{{ item.metric === 'percent' ? '%' : item.metric === 'length' ? '字' : '次' }}</span></div>
           <div class="teacher-task-metrics"><span>完成 <strong>{{ task.completed_count }}/{{ task.total_count }}</strong></span><span>进行中 <strong>{{ task.in_progress_count }}</strong></span><span>逾期 <strong>{{ task.overdue_count }}</strong></span><span><el-icon><Calendar /></el-icon> {{ formatTime(task.due_time) }}</span></div>
           <div class="teacher-task-actions">
             <el-button :icon="UserFilled" type="primary" plain @click="openTaskDetails(task)">查看完成详情</el-button>
+            <el-button v-if="task.status === 'published'" @click="openPolicyEditor(task)">调整完成条件</el-button>
             <el-button v-if="task.status === 'published'" type="danger" plain @click="cancelTask(task)">撤回任务</el-button>
           </div>
         </el-card>
@@ -254,11 +368,36 @@ onBeforeUnmount(stopDetailRefresh)
       </section>
     </template>
 
+    <el-dialog v-model="requirementDetailVisible" title="任务完成详情" width="min(620px, 92vw)" class="student-requirement-dialog">
+      <div v-if="requirementDetailTask" class="student-requirement-detail">
+        <header>
+          <div><strong>{{ requirementDetailTask.title }}</strong><span>{{ requirementDetailTask.course_name }} · {{ requirementDetailTask.chapter_title }}</span></div>
+          <b>{{ requirementDetailTask.progress_value }}%</b>
+        </header>
+        <div class="assignment-requirements">
+          <div v-for="item in requirementDetailTask.requirements" :key="item.key" class="assignment-requirement" :class="item.status">
+            <span class="requirement-mark">{{ item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '◐' : '○' }}</span>
+            <div><strong>{{ item.label }}</strong><small>{{ item.evidence_summary }}</small></div>
+            <span>{{ item.progress_value }}%</span>
+          </div>
+        </div>
+      </div>
+      <template #footer><el-button @click="requirementDetailVisible = false">关闭</el-button></template>
+    </el-dialog>
+
     <el-dialog v-model="dialogVisible" title="发布学习任务" width="680px">
       <el-form label-position="top" class="assignment-form">
         <el-form-item label="所属教学班"><el-select v-model="form.teaching_class_id" style="width:100%" placeholder="任务必须发布到具体教学班"><el-option v-for="item in teachingClasses" :key="item.id" :label="`${item.name} · ${item.term_name}`" :value="item.id" /></el-select></el-form-item>
         <div class="assignment-form-grid"><el-form-item label="教材"><el-select v-model="form.course_id" style="width:100%"><el-option v-for="course in courses.filter((item) => teachingClasses.find((klass) => klass.id === form.teaching_class_id)?.material_ids.includes(item.id))" :key="course.id" :label="course.name" :value="course.id" /></el-select></el-form-item><el-form-item label="专题章节"><el-select v-model="form.chapter_id" filterable style="width:100%"><el-option v-for="chapter in chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" /></el-select></el-form-item></div>
-        <div class="assignment-form-grid"><el-form-item label="学习阶段"><el-select v-model="form.learning_stage" style="width:100%"><el-option label="课前预习" value="preview" /><el-option label="课后巩固" value="review" /><el-option label="考前冲刺" value="exam" /></el-select></el-form-item><el-form-item label="完成条件"><el-select v-model="form.task_kind" style="width:100%"><el-option v-for="(label, value) in kindLabels" :key="value" :label="label" :value="value" :disabled="value === 'note' && form.learning_stage !== 'review'" /></el-select></el-form-item></div>
+        <el-form-item label="学习阶段"><el-select v-model="form.learning_stage" style="width:100%"><el-option label="课前预习" value="preview" /><el-option label="课后巩固" value="review" /><el-option label="考前冲刺" value="exam" /></el-select></el-form-item>
+        <el-form-item label="完成条件（所选项目全部达标后任务才完成）">
+          <el-checkbox-group v-model="form.requirement_keys" class="requirement-picker">
+            <label v-for="item in requirementOptions" :key="item.key" class="requirement-picker-item">
+              <el-checkbox :value="item.key">{{ item.label }}</el-checkbox>
+              <span v-if="form.requirement_keys.includes(item.key)" class="requirement-target">达到 <el-input-number v-model="form.requirement_targets[item.key]" :min="1" :max="item.metric === 'percent' ? 100 : 30000" size="small" controls-position="right" /> {{ item.unit }}</span>
+            </label>
+          </el-checkbox-group>
+        </el-form-item>
         <el-form-item label="任务名称"><el-input v-model="form.title" maxlength="160" show-word-limit placeholder="例如：完成第十七章课后巩固" /></el-form-item>
         <el-form-item label="任务要求"><el-input v-model="form.description" type="textarea" :rows="3" maxlength="3000" show-word-limit placeholder="说明学习重点和具体要求" /></el-form-item>
         <section v-if="form.rubric.items.length" class="assignment-rubric-editor">
@@ -275,6 +414,17 @@ onBeforeUnmount(stopDetailRefresh)
         <el-form-item v-if="form.target_scope === 'selected_groups'" label="选择学习小组"><el-select v-model="form.group_ids" multiple collapse-tags style="width:100%"><el-option v-for="group in groups" :key="group.id" :label="`${group.name}（${group.user_ids.length}人）`" :value="group.id" /></el-select></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" :loading="publishing" @click="publish">发布任务</el-button></template>
+    </el-dialog>
+
+    <el-dialog v-model="policyDialogVisible" title="调整任务完成条件" width="620px">
+      <p class="policy-dialog-tip">保存后会按真实学习记录重新统计所有学生进度；任务描述本身不再作为完成依据。</p>
+      <el-checkbox-group v-model="policyRequirementKeys" class="requirement-picker">
+        <label v-for="item in requirementOptions" :key="item.key" class="requirement-picker-item">
+          <el-checkbox :value="item.key">{{ item.label }}</el-checkbox>
+          <span v-if="policyRequirementKeys.includes(item.key)" class="requirement-target">达到 <el-input-number v-model="policyRequirementTargets[item.key]" :min="1" :max="item.metric === 'percent' ? 100 : 30000" size="small" controls-position="right" /> {{ item.unit }}</span>
+        </label>
+      </el-checkbox-group>
+      <template #footer><el-button @click="policyDialogVisible = false">取消</el-button><el-button type="primary" :loading="policySaving" @click="saveCompletionPolicy">保存并重新统计</el-button></template>
     </el-dialog>
 
     <el-drawer v-model="detailVisible" size="min(920px, 96vw)" class="assignment-detail-drawer">
@@ -300,6 +450,14 @@ onBeforeUnmount(stopDetailRefresh)
           </div>
         </div>
         <el-table :data="filteredRecipients" stripe class="recipient-table">
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div v-if="row.requirements.length" class="recipient-requirements">
+                <div v-for="item in row.requirements" :key="item.key"><el-tag size="small" :type="item.status === 'completed' ? 'success' : item.status === 'in_progress' ? 'warning' : 'info'">{{ item.status === 'completed' ? '已完成' : item.status === 'in_progress' ? '进行中' : '未开始' }}</el-tag><strong>{{ item.label }}</strong><span>{{ item.evidence_summary }}</span></div>
+              </div>
+              <p v-else class="recipient-privacy-note">该历史任务沿用原有单项统计规则。</p>
+            </template>
+          </el-table-column>
           <el-table-column label="学生" min-width="150">
             <template #default="{ row }"><div class="recipient-student"><strong>{{ row.username }}</strong><span>{{ row.identity_no || '未填写学号' }}</span></div></template>
           </el-table-column>
@@ -324,6 +482,261 @@ onBeforeUnmount(stopDetailRefresh)
 </template>
 
 <style scoped>
+.student-assignment-card {
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px) 116px;
+  height: 220px;
+  min-height: 220px;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.student-task-content,
+.student-task-progress,
+.student-task-action {
+  min-width: 0;
+}
+
+.student-task-content {
+  display: flex;
+  flex-direction: column;
+}
+
+.student-task-content h2 {
+  margin: 10px 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-task-description {
+  display: -webkit-box;
+  min-height: 42px;
+  overflow: hidden;
+  line-height: 1.6;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.student-task-content .assignment-meta {
+  margin-top: auto;
+}
+
+.student-task-content .assignment-meta span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-task-progress {
+  display: flex;
+  justify-content: center;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border-right: 1px solid var(--line-soft);
+  border-left: 1px solid var(--line-soft);
+}
+
+.student-task-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.student-task-progress-heading strong {
+  color: var(--ink-700);
+  font-size: 18px;
+}
+
+.requirement-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  margin-top: 4px;
+  padding: 9px 11px;
+  color: var(--ink-500);
+  background: var(--bg-page);
+  border: 0;
+  border-radius: var(--radius-input);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.requirement-summary:hover {
+  background: var(--blue-50);
+}
+
+.requirement-summary strong {
+  color: var(--ink-800);
+}
+
+.requirement-summary em {
+  flex: 0 0 auto;
+  color: var(--blue-600);
+  font-size: var(--fs-meta);
+  font-style: normal;
+}
+
+.next-requirement {
+  overflow: hidden;
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.next-requirement.completed {
+  color: var(--green-600, #16a36a);
+}
+
+.student-task-action {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.student-task-action .el-button {
+  width: 100%;
+  margin: 0;
+}
+
+.student-requirement-detail {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.student-requirement-detail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-3);
+  background: var(--bg-page);
+  border-radius: var(--radius-input);
+}
+
+.student-requirement-detail > header div {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.student-requirement-detail > header strong,
+.student-requirement-detail > header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-requirement-detail > header span {
+  color: var(--ink-400);
+  font-size: var(--fs-meta);
+}
+
+.student-requirement-detail > header b {
+  color: var(--green-600, #16a36a);
+  font-size: 24px;
+}
+
+.assignment-requirements,
+.recipient-requirements,
+.requirement-picker {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.assignment-requirements {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.assignment-requirement {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-500);
+}
+
+.assignment-requirement.completed,
+.assignment-requirement.completed .requirement-mark {
+  color: var(--green-600, #16a36a);
+}
+
+.assignment-requirement div,
+.assignment-requirement small {
+  display: grid;
+}
+
+.assignment-requirement small {
+  margin-top: 2px;
+  color: var(--ink-400);
+  font-weight: var(--fw-regular);
+}
+
+.requirement-picker-item {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-page);
+  border-radius: var(--radius-input);
+}
+
+.requirement-target {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-500);
+  font-size: var(--fs-meta);
+}
+
+.requirement-target .el-input-number {
+  width: 100px;
+}
+
+.teacher-policy-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.teacher-policy-tags span {
+  padding: 4px 9px;
+  color: var(--blue-700);
+  background: var(--blue-50);
+  border-radius: 999px;
+  font-size: var(--fs-meta);
+}
+
+.policy-dialog-tip {
+  margin: 0 0 var(--space-3);
+  color: var(--ink-500);
+}
+
+.recipient-requirements {
+  padding: var(--space-3) var(--space-6);
+}
+
+.recipient-requirements > div {
+  display: grid;
+  grid-template-columns: 72px 150px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.recipient-requirements span {
+  color: var(--ink-400);
+}
+
 .teacher-task-actions {
   display: flex;
   flex-wrap: wrap;
@@ -427,6 +840,20 @@ onBeforeUnmount(stopDetailRefresh)
 }
 
 @media (max-width: 767px) {
+  .student-assignment-card {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .student-task-progress {
+    padding: var(--space-3) 0;
+    border-top: 1px solid var(--line-soft);
+    border-right: 0;
+    border-bottom: 1px solid var(--line-soft);
+    border-left: 0;
+  }
+
   .recipient-summary {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }

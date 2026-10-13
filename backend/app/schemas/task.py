@@ -15,7 +15,8 @@ class LearningEventCreate(BaseModel):
     learning_stage: Literal["preview", "review", "exam"]
     event_type: Literal[
         "chapter_opened", "reading_progress", "ai_assist_used", "question_submitted",
-        "note_saved", "activity_submitted", "quiz_completed"
+        "note_saved", "activity_submitted", "quiz_completed",
+        "discussion_created", "discussion_reply_created",
     ]
     event_data: dict[str, Any] = Field(default_factory=dict)
 

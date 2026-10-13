@@ -7,6 +7,7 @@ from app.core.security import create_access_token, hash_password
 from app.models.chapter import Chapter
 from app.models.classroom import ClassroomActivity
 from app.models.course import Course
+from app.models.learning_task import LearningEvent
 from app.models.teaching_class import (
     AcademicTerm, ClassGroup, ClassGroupMember, ClassMembership, TeachingClass,
     TeachingClassMaterial, TeachingClassTeacher, CourseSubject,
@@ -79,3 +80,10 @@ def test_classroom_activity_limits_groups_counts_and_reviews(client: TestClient,
     persisted = db.get(ClassroomActivity, activity_id)
     assert persisted is not None
     assert persisted.response_limit == 2
+    evidence_events = db.query(LearningEvent).filter_by(
+        user_id=leader.id,
+        course_id=course.id,
+        chapter_id=chapter.id,
+        event_type="activity_submitted",
+    ).all()
+    assert len(evidence_events) == 2

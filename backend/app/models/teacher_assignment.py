@@ -33,6 +33,9 @@ class TeacherAssignment(Base):
     target_scope: Mapped[str] = mapped_column(String(30), default="all_students", nullable=False)
     target_group_ids: Mapped[list[int]] = mapped_column(JSON, default=list, nullable=False)
     required_task_types: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    # New assignments persist explicit, machine-verifiable completion criteria.
+    # An empty policy keeps the historical single-task-point behaviour intact.
+    completion_policy: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
@@ -47,3 +50,31 @@ class AssignmentRecipient(Base):
     progress_value: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completed_time: Mapped[datetime | None] = mapped_column(DateTime)
     updated_time: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class AssignmentRequirementProgress(Base):
+    __tablename__ = "assignment_requirement_progress"
+    __table_args__ = (
+        UniqueConstraint(
+            "assignment_id",
+            "user_id",
+            "requirement_key",
+            name="uq_assignment_user_requirement",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    assignment_id: Mapped[int] = mapped_column(
+        ForeignKey("teacher_assignments.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    requirement_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    current_value: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    target_value: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    progress_value: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="not_started", nullable=False, index=True)
+    evidence_summary: Mapped[str] = mapped_column(String(255), default="", nullable=False)
+    completed_time: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_time: Mapped[datetime] = mapped_column(
+        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+    )

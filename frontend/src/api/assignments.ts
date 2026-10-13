@@ -1,7 +1,45 @@
 import { http, type ApiResponse } from './http'
 import type { LearningStage } from '@/types'
 
-export type AssignmentTaskKind = 'reading' | 'ai_assist' | 'note'
+export type AssignmentTaskKind = 'reading' | 'ai_assist' | 'note' | 'composite'
+export type AssignmentRequirementEvent =
+  | 'reading_progress'
+  | 'ai_assist_used'
+  | 'note_saved'
+  | 'quiz_completed'
+  | 'question_submitted'
+  | 'activity_submitted'
+  | 'discussion_created'
+  | 'discussion_reply_created'
+
+export interface AssignmentCompletionRequirement {
+  key: string
+  label: string
+  event: AssignmentRequirementEvent
+  metric: 'percent' | 'count' | 'length'
+  target: number
+  weight: number
+  required: boolean
+  stage: 'assignment' | 'any' | LearningStage
+  task_types: string[]
+}
+
+export interface AssignmentCompletionPolicy {
+  mode: 'all_required'
+  items: AssignmentCompletionRequirement[]
+}
+
+export interface AssignmentRequirementProgress {
+  key: string
+  label: string
+  event: AssignmentRequirementEvent
+  current_value: number
+  target_value: number
+  progress_value: number
+  status: 'not_started' | 'in_progress' | 'completed'
+  evidence_summary: string
+  next_path: string
+}
 
 export interface AssignmentStudent {
   id: number
@@ -27,6 +65,11 @@ export interface StudentAssignment {
   completed_time: string | null
   created_time: string
   teacher_name: string
+  completion_policy: AssignmentCompletionPolicy | null
+  requirements: AssignmentRequirementProgress[]
+  next_path: string
+  completion_status: 'not_started' | 'in_progress' | 'completed'
+  is_overdue: boolean
 }
 
 export interface TeacherAssignment {
@@ -49,6 +92,7 @@ export interface TeacherAssignment {
   completed_count: number
   in_progress_count: number
   overdue_count: number
+  completion_policy: AssignmentCompletionPolicy | null
 }
 
 export interface AssignmentRecipientDetail {
@@ -60,6 +104,9 @@ export interface AssignmentRecipientDetail {
   progress_value: number
   completed_time: string | null
   last_activity_time: string | null
+  completion_status: 'not_started' | 'in_progress' | 'completed'
+  is_overdue: boolean
+  requirements: AssignmentRequirementProgress[]
 }
 
 export const assignmentApi = {
@@ -79,9 +126,12 @@ export const assignmentApi = {
     target_scope: 'all_students' | 'selected_students' | 'selected_groups'
     student_ids: number[]
     group_ids: number[]
+    completion_policy: AssignmentCompletionPolicy
   }) => http.post<ApiResponse<TeacherAssignment>>('/assignments', payload),
   recipients: (id: number) => http.get<ApiResponse<AssignmentRecipientDetail[]>>(`/assignments/${id}/recipients`),
   cancel: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/assignments/${id}`),
   confirmRubric: (id: number, rubric: TeacherAssignment['rubric']) =>
     http.post<ApiResponse<TeacherAssignment>>(`/assignments/${id}/rubric/confirm`, { rubric }),
+  updateCompletionPolicy: (id: number, completionPolicy: AssignmentCompletionPolicy) =>
+    http.put<ApiResponse<TeacherAssignment>>(`/assignments/${id}/completion-policy`, { completion_policy: completionPolicy }),
 }

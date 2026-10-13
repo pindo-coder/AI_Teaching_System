@@ -988,7 +988,9 @@ class PlanningAgent:
                 "chapter_id": context.chapter_id,
                 "teaching_class_id": context.teaching_class_id,
                 "learning_stage": "review",
-                "task_kind": "reading",
+                "task_kind": "note",
+                "requirement_keys": ["note"],
+                "requirement_targets": {"note": 300},
                 "title": f"《{context.chapter_title}》观点辨析与学习反思",
                 "description": "写一篇 300—500 字学习反思或观点卡，写明一个核心观点、至少一处教材依据和一条待讨论问题。完成标准：观点相关、依据可核验、表达清楚。",
             }

@@ -9,6 +9,7 @@ from app.core.time import to_utc_naive, utc_now
 from app.db.session import get_db
 from app.models.chapter import Chapter
 from app.models.classroom import ClassroomActivity, ClassroomResponse, DiscussionReply, DiscussionThread
+from app.models.learning_task import LearningEvent
 from app.models.course import Course
 from app.models.user import User
 from app.models.teaching_class import ClassGroup, ClassGroupMember, ClassMembership, TeachingClass, TeachingClassMaterial, TeachingClassTeacher
@@ -190,6 +191,16 @@ def submit_response(activity_id: int, payload: ResponseCreate, current_user: Use
         attempt_no=int(submitted_count) + 1, group_id=group_id,
     )
     db.add(response)
+    db.flush()
+    if current_user.role == "student":
+        db.add(LearningEvent(
+            user_id=current_user.id,
+            course_id=activity.course_id,
+            chapter_id=activity.chapter_id,
+            learning_stage="review",
+            event_type="activity_submitted",
+            event_data={"count": 1, "activity_id": activity.id, "response_id": response.id},
+        ))
     db.commit()
     db.refresh(response)
     return ApiResponse(message="回答提交成功", data=_response_read(response, current_user.username))
@@ -398,6 +409,16 @@ def create_discussion(
         author_id=current_user.id, created_time=now, updated_time=now,
     )
     db.add(thread)
+    db.flush()
+    if current_user.role == "student" and thread.course_id is not None and thread.chapter_id is not None:
+        db.add(LearningEvent(
+            user_id=current_user.id,
+            course_id=thread.course_id,
+            chapter_id=thread.chapter_id,
+            learning_stage="review",
+            event_type="discussion_created",
+            event_data={"count": 1},
+        ))
     db.commit()
     db.refresh(thread)
     return ApiResponse(message="讨论已发布", data=_thread_read(thread, current_user))
@@ -501,9 +522,19 @@ def create_discussion_reply(
         parent_reply_id=payload.parent_reply_id, created_time=now, updated_time=now,
     )
     db.add(reply)
+    db.flush()
     thread.reply_count += 1
     thread.last_replied_time = now
     thread.updated_time = now
+    if current_user.role == "student" and thread.course_id is not None and thread.chapter_id is not None:
+        db.add(LearningEvent(
+            user_id=current_user.id,
+            course_id=thread.course_id,
+            chapter_id=thread.chapter_id,
+            learning_stage="review",
+            event_type="discussion_reply_created",
+            event_data={"count": 1, "thread_id": thread.id},
+        ))
     db.commit()
     db.refresh(reply)
     return ApiResponse(message="回贴成功", data=_reply_read(reply, current_user))
