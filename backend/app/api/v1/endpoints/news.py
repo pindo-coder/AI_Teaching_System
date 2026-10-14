@@ -1,4 +1,7 @@
+import json
+
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
@@ -54,6 +57,35 @@ def search_news(
 def textbook_relations(news_id: int, course_id: int = Query(gt=0),
                        _: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[TextbookRelationItem]]:
     return ApiResponse(data=NewsService(db).textbook_relations(news_id, course_id))
+
+
+@router.post("/{news_id}/ai-summary/stream")
+def stream_ai_summary(
+    news_id: int,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    chunks, model = NewsService(db).stream_ai_summary(user.id, news_id)
+
+    def event_stream():
+        try:
+            yield f"event: meta\ndata: {json.dumps({'grounded': True, 'model': model, 'scope': 'news'}, ensure_ascii=False)}\n\n"
+            for chunk in chunks:
+                yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
+            yield "event: sources\ndata: []\n\n"
+            yield "event: done\ndata: {}\n\n"
+        except Exception as exc:
+            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        finally:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/{news_id}/study-note", response_model=ApiResponse[NewsStudyNoteSaveResult])

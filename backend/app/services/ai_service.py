@@ -73,16 +73,18 @@ class LangChainGenerator:
         user: User | None = None,
         feature: str = "learning_assist",
         max_tokens: int | None = None,
+        system_prompt: str | None = None,
+        user_prompt: str | None = None,
     ) -> None:
         local_teacher = AiProviderConfigService.uses_local_teacher_model(feature)
-        system_prompt = AI_SYSTEM_PROMPT
+        effective_system_prompt = system_prompt or AI_SYSTEM_PROMPT
         if local_teacher:
             # Qwen3 otherwise spends the whole small output budget on hidden
             # reasoning. The soft switch keeps the same model and teaching
             # prompt while returning the answer directly.
-            system_prompt = f"{system_prompt.rstrip()}\n\n/no_think"
+            effective_system_prompt = f"{effective_system_prompt.rstrip()}\n\n/no_think"
         prompt = ChatPromptTemplate.from_messages(
-            [("system", system_prompt), ("human", AI_USER_PROMPT)]
+            [("system", effective_system_prompt), ("human", user_prompt or AI_USER_PROMPT)]
         )
         try:
             model, config = build_chat_model(

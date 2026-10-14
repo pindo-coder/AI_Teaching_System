@@ -36,6 +36,7 @@ const selectedNews = ref<NewsItem | null>(null)
 const aiResult = ref<AiAssistData | null>(null)
 const aiLoading = ref(false)
 const aiMode = ref<'summary' | 'relation'>('summary')
+const aiScopeLabel = ref('')
 const dialogVisible = ref(false)
 const citationVisible = ref(false)
 const selectedSource = ref<AiSource | null>(null)
@@ -209,28 +210,38 @@ async function openAi(item: NewsItem, mode: 'summary' | 'relation') {
   aiStreamController = controller
   selectedNews.value = item
   aiMode.value = mode
+  aiScopeLabel.value = ''
   aiResult.value = null
-  const course = await ensureTextbook()
-  let chapter = course?.chapters[0]
-  if (!course || !chapter) {
-    ElMessage.warning('当前还没有可用的教材专题，请先导入教材并完成章节拆分')
-    return
-  }
   dialogVisible.value = true
   aiLoading.value = true
   try {
-    let relationHint = ''
-    if (mode === 'relation') {
-      const recommended = (await newsApi.textbookRelations(item.id, course.id, { signal: controller.signal })).data.data[0]
-      if (controller.signal.aborted || requestSequence !== aiRequestSequence) return
-      const matched = recommended ? course.chapters.find((candidate) => candidate.id === recommended.chapter_id) : null
-      if (matched) chapter = matched
-      if (recommended) relationHint = `系统初步匹配位置：${recommended.position}；匹配线索：${recommended.reason}。`
-    }
-    const question = mode === 'summary'
-      ? `请用思政教材化表达总结以下时政信息，提炼核心事实、重要观点和学习关键词。标题：${item.title}；摘要：${item.summary || '无'}`
-      : `请分析以下时政信息与当前教材专题的关系，指出对应的教材知识点并说明关联理由。${relationHint}标题：${item.title}；摘要：${item.summary || '无'}`
     aiResult.value = { answer: '', grounded: true, model: '', sources: [] }
+    if (mode === 'summary') {
+      aiScopeLabel.value = '信息范围：仅当前时政材料，不检索教材'
+      await newsApi.summaryStream(item.id, {
+        onMeta: (meta) => { if (aiResult.value) { aiResult.value.grounded = meta.grounded; aiResult.value.model = meta.model } },
+        onChunk: (text) => { if (aiResult.value) aiResult.value.answer += text },
+        onSources: () => {},
+      }, { signal: controller.signal })
+      return
+    }
+
+    const course = await ensureTextbook()
+    let chapter = course?.chapters[0]
+    if (!course || !chapter) {
+      dialogVisible.value = false
+      ElMessage.warning('“关联课本”需要先导入教材并完成章节拆分')
+      return
+    }
+    const recommended = (await newsApi.textbookRelations(item.id, course.id, { signal: controller.signal })).data.data[0]
+    if (controller.signal.aborted || requestSequence !== aiRequestSequence) return
+    const matched = recommended ? course.chapters.find((candidate) => candidate.id === recommended.chapter_id) : null
+    if (matched) chapter = matched
+    const relationHint = recommended
+      ? `系统初步匹配位置：${recommended.position}；匹配线索：${recommended.reason}。`
+      : ''
+    aiScopeLabel.value = `教材范围：${course.name} · ${chapter.title}`
+    const question = `请分析以下时政信息与当前教材专题的关系，指出对应的教材知识点并说明关联理由。${relationHint}标题：${item.title}；摘要：${item.summary || '无'}`
     if (controller.signal.aborted || requestSequence !== aiRequestSequence) return
     await aiApi.assistStream({
       course_id: course.id,
@@ -424,8 +435,9 @@ function openSavedNote() {
     <el-dialog v-model="dialogVisible" :title="aiMode === 'summary' ? 'AI 时政总结' : 'AI 课本关联'" width="720px" @update:model-value="handleAiDialogVisibility">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要' }}</p></div>
       <section v-if="aiResult" class="ai-dialog-result ai-result">
-        <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiResult.grounded ? 'AI 生成内容 · 依据教材资料' : 'AI 生成内容 · 教材资料不足' }}</el-tag><span v-if="aiResult.model">模型：{{ aiResult.model }}</span></div>
+        <div class="answer-meta"><el-tag :type="aiResult.grounded ? 'success' : 'warning'" effect="light">{{ aiMode === 'summary' ? 'AI 生成内容 · 依据时政材料' : (aiResult.grounded ? 'AI 生成内容 · 依据教材资料' : 'AI 生成内容 · 教材资料不足') }}</el-tag><span class="answer-scope">{{ aiScopeLabel }}</span><span v-if="aiResult.model" class="answer-model">模型：{{ aiResult.model }}</span></div>
         <article class="answer-content teaching-document" v-html="renderedAnswer"></article><span v-if="aiLoading" class="stream-cursor" aria-label="正在生成"></span>
+        <div v-if="aiMode === 'summary' && selectedNews" class="news-summary-source"><span>总结依据：{{ selectedNews.source_name }}提供的标题与摘要</span><el-link :href="selectedNews.article_url" target="_blank" type="primary" underline="never">查看时政原文 →</el-link></div>
         <div v-if="aiResult.sources.length" class="answer-sources"><div class="source-heading"><strong>原文依据与引用位置</strong><span>点击引用核对真实来源</span></div><button v-for="(source, index) in aiResult.sources" :key="`${source.source_title}-${index}`" type="button" class="source-item source-item--button" :class="`source-${source.material_type}`" :disabled="!source.source_url && (!source.document_id || !source.pdf_page_start)" @click="openCitation(source)"><div class="source-title"><span>[{{ index + 1 }}] {{ source.source_title }}</span><el-tag size="small" :type="sourceTagType(source)">{{ source.evidence_type }}</el-tag></div><strong class="source-position">{{ source.section_path || source.position }}</strong><span v-if="source.publisher || source.published_date" class="source-publisher">{{ source.publisher }}<template v-if="source.publisher && source.published_date"> · </template>{{ source.published_date }}</span><p>{{ source.excerpt }}</p><span v-if="source.document_id && source.pdf_page_start" class="source-open">查看 PDF 原页 →</span><span v-else-if="source.source_url" class="source-open">查看权威原文 →</span></button></div>
       </section>
       <el-empty v-else-if="!aiLoading" description="暂无生成结果" />

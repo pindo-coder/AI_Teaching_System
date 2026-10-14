@@ -80,7 +80,14 @@ def test_search_news_by_keyword_time_source_and_page(client: TestClient, db: Ses
     assert data["sources"] == ["中国新闻网时政", "中国新闻网国际"]
 
 
-def test_news_api_preserves_legacy_business_wall_time_without_rewriting(client: TestClient, db: Session) -> None:
+def test_news_api_preserves_legacy_business_wall_time_without_rewriting(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+) -> None:
+    # This test validates timezone serialization, not the rolling news window.
+    # Keep its fixed historical examples visible as the calendar advances.
+    monkeypatch.setattr(settings, "news_default_days", 365)
     user = User(username="legacy_news_student", password_hash=hash_password("secure-pass-123"), role="student")
     fetched_time = utc_now()
     db.add_all([
@@ -113,6 +120,61 @@ def test_news_api_preserves_legacy_business_wall_time_without_rewriting(client: 
     assert items["历史时政时间"]["published_time"] == "2026-07-15T00:30:00Z"
     assert items["新时政时间"]["published_time"] == "2026-07-15T00:30:00Z"
     assert "published_time_is_utc" not in items["历史时政时间"]
+
+
+def test_news_ai_summary_stream_does_not_require_course_or_chapter(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+) -> None:
+    user = User(username="news_summary_student", password_hash=hash_password("secure-pass-123"), role="student")
+    news = NewsItem(
+        title="推进高质量发展",
+        summary="权威媒体发布相关时政信息。",
+        source_name="测试媒体",
+        source_url="https://example.com/rss",
+        article_url="https://example.com/news/quality",
+        fetched_time=utc_now(),
+    )
+    db.add_all([user, news])
+    db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(user.id))}"}
+    called: dict[str, int] = {}
+
+    def fake_stream(service: NewsService, user_id: int, news_id: int):
+        called.update(user_id=user_id, news_id=news_id)
+        return iter(("仅依据时政材料生成的总结。",)), "test-model"
+
+    monkeypatch.setattr(NewsService, "stream_ai_summary", fake_stream)
+    response = client.post(f"/api/v1/current-affairs/{news.id}/ai-summary/stream", headers=headers)
+
+    assert response.status_code == 200
+    assert called == {"user_id": user.id, "news_id": news.id}
+    assert '"scope": "news"' in response.text
+    assert "仅依据时政材料生成的总结" in response.text
+    assert "event: sources\ndata: []" in response.text
+
+
+def test_news_ai_summary_mock_uses_news_material_only(db: Session, monkeypatch) -> None:
+    monkeypatch.setattr(settings, "ai_mock_mode", True)
+    news = NewsItem(
+        title="时政标题",
+        summary="这是用于总结的新闻摘要。",
+        source_name="测试媒体",
+        source_url="https://example.com/rss",
+        article_url="https://example.com/news/summary",
+        fetched_time=utc_now(),
+    )
+    db.add(news)
+    db.commit()
+
+    chunks, model = NewsService(db).stream_ai_summary(user_id=1, news_id=news.id)
+    answer = "".join(chunks)
+
+    assert model == "mock"
+    assert "这是用于总结的新闻摘要" in answer
+    assert "本总结仅依据当前新闻标题与摘要" in answer
+    assert "教材" not in answer
 
 
 def test_trim_keeps_news_sources_balanced(db: Session, monkeypatch) -> None:
