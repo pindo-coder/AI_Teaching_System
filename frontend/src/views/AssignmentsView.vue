@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Calendar, Download, Plus, Promotion, Refresh, Search, UserFilled } from '@element-plus/icons-vue'
@@ -14,6 +14,7 @@ import {
   type TeacherAssignment,
 } from '@/api/assignments'
 import { courseApi } from '@/api/courses'
+import { aiApi } from '@/api/ai'
 import { useAuthStore } from '@/stores/auth'
 import type { Chapter, Course, LearningStage } from '@/types'
 import { getErrorMessage } from '@/utils/error'
@@ -33,6 +34,7 @@ const teachingClasses = ref<TeachingClass[]>([])
 const groups = ref<ClassGroup[]>([])
 const dialogVisible = ref(false)
 const publishing = ref(false)
+const agentExecutionId = ref<number | undefined>()
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const detailRefreshing = ref(false)
@@ -181,29 +183,51 @@ async function publish() {
   if (!form.requirement_keys.length) return ElMessage.warning('请至少选择一个可验证的完成条件')
   const dueTime = beijingLocalToUtcIso(form.due_time)
   if (!dueTime) return ElMessage.warning('请选择有效的截止时间')
+  const executionId = agentExecutionId.value
   publishing.value = true
   try {
     await assignmentApi.create({
       ...form,
+      agent_execution_id: executionId,
       course_id: form.course_id,
       chapter_id: form.chapter_id,
       due_time: dueTime,
       completion_policy: buildCompletionPolicy(form.requirement_keys, form.requirement_targets),
     })
-    dialogVisible.value = false
-    form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []; form.rubric = { items: [], feedback_template: '' }
-    await load()
-    ElMessage.success('学习任务已发布')
-  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '任务发布失败')) }
+    await finishAgentPublish()
+  } catch (error: unknown) {
+    // A timed-out response or another tab's submission may already have saved
+    // the assignment. Confirm the durable result instead of publishing again.
+    if (executionId) {
+      try {
+        const execution = (await aiApi.workspaceAgentExecution(executionId)).data.data
+        if (execution.result.saved_resources?.some((item) => item.kind === 'assignment')) {
+          await finishAgentPublish()
+          return
+        }
+      } catch { /* Keep the editable draft when the saved result is unknown. */ }
+    }
+    ElMessage.error(getErrorMessage(error, '发布结果尚未确认，请核对任务列表后再试'))
+  }
   finally { publishing.value = false }
 }
-function applyAgentDraft() {
+async function finishAgentPublish() {
+  dialogVisible.value = false
+  agentExecutionId.value = undefined
+  window.dispatchEvent(new Event('agent-handoff-saved'))
+  form.title = ''; form.description = ''; form.student_ids = []; form.group_ids = []; form.rubric = { items: [], feedback_template: '' }
+  // A list refresh failure must not turn a successful publish into "failed".
+  try { await load() } catch { ElMessage.warning('发布已成功，任务列表暂未刷新，请稍后刷新查看') }
+  ElMessage.success('学习任务已发布')
+}
+async function applyAgentDraft() {
   const encoded = route.query.agent_draft
   if (!encoded || typeof encoded !== 'string' || !auth.isTeacher) return
   try {
     const payload = JSON.parse(decodeURIComponent(encoded)) as {
       draft?: Partial<typeof form> | null
       rubric?: typeof form.rubric | null
+      execution_id?: number
     }
     if (payload.draft) {
       Object.assign(form, payload.draft)
@@ -216,7 +240,10 @@ function applyAgentDraft() {
       if (legacyKind === 'note') form.requirement_keys = ['note']
     }
     if (payload.rubric) form.rubric = payload.rubric
-    dialogVisible.value = true
+    agentExecutionId.value = payload.draft ? payload.execution_id : undefined
+    await nextTick()
+    if (payload.draft?.chapter_id) form.chapter_id = payload.draft.chapter_id
+    openCreate()
     ElMessage.success(payload.rubric ? '已带入 Agent 量规草案，请确认后发布' : '已带入 Agent 任务草案，请确认后发布')
     void router.replace({ path: '/assignments', query: {} })
   } catch {
@@ -314,8 +341,18 @@ watch(detailVisible, (visible) => {
   stopDetailRefresh()
   if (visible) detailRefreshTimer = window.setInterval(() => void loadRecipientDetails(true), 30_000)
 })
-onMounted(async () => { await load(); applyAgentDraft() })
-onBeforeUnmount(stopDetailRefresh)
+function refreshLearningEvidence() {
+  if (!auth.isTeacher) void load().catch(() => ElMessage.warning('任务进度刷新失败，可重新进入页面查看'))
+}
+onMounted(async () => {
+  window.addEventListener('learning-evidence-updated', refreshLearningEvidence)
+  await load(); await applyAgentDraft()
+})
+watch(() => route.query.agent_draft, (value) => { if (value) void applyAgentDraft() })
+onBeforeUnmount(() => {
+  stopDetailRefresh()
+  window.removeEventListener('learning-evidence-updated', refreshLearningEvidence)
+})
 </script>
 
 <template>

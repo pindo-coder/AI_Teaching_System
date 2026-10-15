@@ -75,6 +75,7 @@ class LangChainGenerator:
         max_tokens: int | None = None,
         system_prompt: str | None = None,
         user_prompt: str | None = None,
+        json_output: bool = False,
     ) -> None:
         local_teacher = AiProviderConfigService.uses_local_teacher_model(feature)
         effective_system_prompt = system_prompt or AI_SYSTEM_PROMPT
@@ -99,6 +100,8 @@ class LangChainGenerator:
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="尚未配置 LLM_API_KEY，请启用 AI_MOCK_MODE 或配置模型服务",
             ) from exc
+        if json_output:
+            model = model.bind(response_format={"type": "json_object"})
         self.chain = prompt | model | StrOutputParser()
         self.model_name = config.model_name
         self.stream_key = capability_key(config.base_url, config.model_name)

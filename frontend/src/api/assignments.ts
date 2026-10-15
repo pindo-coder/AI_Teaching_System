@@ -114,6 +114,7 @@ export const assignmentApi = {
   teacher: () => http.get<ApiResponse<TeacherAssignment[]>>('/assignments'),
   students: (teachingClassId?: number) => http.get<ApiResponse<AssignmentStudent[]>>('/assignments/students', { params: teachingClassId ? { teaching_class_id: teachingClassId } : undefined }),
   create: (payload: {
+    agent_execution_id?: number
     teaching_class_id: number | null
     course_id: number
     chapter_id: number

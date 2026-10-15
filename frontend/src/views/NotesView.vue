@@ -57,7 +57,78 @@ const citationVisible = ref(false)
 const selectedSource = ref<AiSource | null>(null)
 const saveStatus = ref<'saved' | 'unsaved' | 'saving' | 'error'>('saved')
 const lastSavedContent = ref('')
+const agentDraftVisible = ref(false)
+const agentDraft = ref('')
+const agentExecutionId = ref<number | null>(null)
+const agentChapterId = ref<number | null>(null)
+const agentSources = ref<AiSource[]>([])
 let autosaveTimer: ReturnType<typeof setTimeout> | undefined
+
+async function loadAgentDraft() {
+  const id = Number(route.query.agent_execution_id)
+  if (!Number.isSafeInteger(id) || id <= 0) return
+  try {
+    const execution = (await aiApi.workspaceAgentExecution(id)).data.data
+    if (execution.chapter_id && execution.result.saved_resources?.some((item) => item.kind === 'note')) {
+      await finishAgentDraftSave(execution.chapter_id)
+      return
+    }
+    const action = execution.result.actions?.find((item) => item.kind === 'open_notes' && item.note_draft)
+    if (execution.status !== 'waiting_user_action' || !action?.note_draft || !execution.chapter_id) {
+      ElMessage.info('该草案已处理或尚未就绪，请查看 Agent 任务中心')
+      return
+    }
+    agentExecutionId.value = id
+    agentChapterId.value = execution.chapter_id
+    agentDraft.value = action.note_draft
+    const result = execution.tool_results.find((item) => item.tool === 'draft_note_improvement')
+    agentSources.value = (result?.data.sources as AiSource[]) || []
+    agentDraftVisible.value = true
+  } catch (error) { ElMessage.error(getErrorMessage(error, 'Agent 笔记草稿读取失败')) }
+}
+
+async function finishAgentDraftSave(chapterId: number) {
+  agentDraftVisible.value = false
+  agentExecutionId.value = null
+  try { await load() } catch { ElMessage.warning('笔记已保存，列表暂未刷新，请稍后重新进入查看') }
+  const saved = notes.value.find((item) => item.chapter_id === chapterId)
+  if (saved) selectNote(saved)
+  await router.replace({ path: '/notes', query: { chapter_id: String(chapterId) } })
+  window.dispatchEvent(new Event('agent-handoff-saved'))
+  window.dispatchEvent(new Event('learning-evidence-updated'))
+  ElMessage.success('草稿已追加保存，Agent 任务状态已更新')
+}
+
+async function saveAgentDraft() {
+  if (!agentChapterId.value || !agentExecutionId.value || !agentDraft.value.trim()) return
+  if (saving.value) return
+  if (autosaveTimer) clearTimeout(autosaveTimer)
+  const chapterId = agentChapterId.value
+  const executionId = agentExecutionId.value
+  saving.value = true
+  try {
+    const current = (await studyApi.note(chapterId)).data.data
+    const original = selected.value?.chapter_id === chapterId && editorContent.value !== lastSavedContent.value
+      ? editorContent.value : (current?.content || '')
+    const addition = sanitizeNoteHtml(renderTeachingDocument(agentDraft.value))
+    const content = `${original}${addition}`
+    if (content.length > 30000) { ElMessage.warning('追加后超过笔记字数上限，请精简草稿'); return }
+    await studyApi.saveNote(chapterId, content, executionId)
+    await finishAgentDraftSave(chapterId)
+  } catch (error) {
+    // A lost/late response does not mean the write failed. Reconcile against the
+    // persisted handoff before inviting a retry that could append the draft twice.
+    try {
+      const execution = (await aiApi.workspaceAgentExecution(executionId)).data.data
+      if (execution.result.saved_resources?.some((item) => item.kind === 'note')) {
+        await finishAgentDraftSave(chapterId)
+        return
+      }
+    } catch { /* Keep the draft available if the server cannot confirm the save. */ }
+    ElMessage.error(getErrorMessage(error, '保存结果尚未确认，请稍后重新打开草稿核对，避免重复追加'))
+  }
+  finally { saving.value = false }
+}
 
 const replaceTasks: QuickActionTask[] = ['note_polish']
 type DiffRow = { type: 'same' | 'remove' | 'add' | 'change'; original?: string; result?: string }
@@ -383,7 +454,8 @@ function onEscape(event: KeyboardEvent) {
     localStorage.setItem('notes_format_bar_open', 'false')
   }
 }
-onMounted(() => { window.addEventListener('keydown', onEscape); void load() })
+onMounted(() => { window.addEventListener('keydown', onEscape); void (async () => { await load(); await loadAgentDraft() })() })
+watch(() => route.query.agent_execution_id, (value) => { if (value) void loadAgentDraft() })
 watch(editorContent, (value) => {
   if (!selected.value || value === lastSavedContent.value) return
   saveStatus.value = 'unsaved'
@@ -397,6 +469,14 @@ onBeforeUnmount(() => {
 
 <template>
   <div v-loading="loading" class="notes-page-replica">
+    <el-dialog v-model="agentDraftVisible" title="审阅 Agent 笔记补充草稿" width="720px">
+      <p>确认后将草稿追加到对应专题笔记，保留已有内容。</p>
+      <el-input v-model="agentDraft" type="textarea" :rows="12" maxlength="25000" show-word-limit />
+      <div v-if="agentSources.length" class="agent-note-sources">
+        <el-button v-for="(source, index) in agentSources" :key="index" text @click="openCitation(source)">[资料{{ index + 1 }}] {{ source.source_title }} · {{ source.position }}</el-button>
+      </div>
+      <template #footer><el-button @click="agentDraftVisible = false">暂不保存</el-button><el-button type="primary" :loading="saving" @click="saveAgentDraft">追加并保存</el-button></template>
+    </el-dialog>
     <header class="notes-page-header">
       <div class="notes-page-heading"><span class="eyebrow">NOTE REVIEW</span><h1>笔记复习</h1><p>{{ selected?.chapter_title || '整理你的教材理解，留下可复习的知识线索。' }}</p></div>
       <el-input v-model="query" class="notes-page-search" :prefix-icon="Search" clearable placeholder="搜索任何内容" @input="semanticSearch" />

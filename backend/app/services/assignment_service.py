@@ -96,7 +96,7 @@ class AssignmentService:
         students = self.db.scalars(statement.order_by(User.username)).all()
         return [{"id": item.id, "username": item.username, "identity_no": item.identity_no} for item in students]
 
-    def create(self, teacher_id: int, payload: AssignmentCreate) -> TeacherAssignment:
+    def create(self, teacher_id: int, payload: AssignmentCreate, *, commit: bool = True) -> TeacherAssignment:
         chapter = self.db.get(Chapter, payload.chapter_id)
         if chapter is None or chapter.course_id != payload.course_id:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="专题与教材不匹配")
@@ -176,8 +176,11 @@ class AssignmentService:
             if len(student_ids) != len(set(payload.student_ids)):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="发布对象中包含无效学生账号")
         self.db.add_all([AssignmentRecipient(assignment_id=assignment.id, user_id=user_id) for user_id in student_ids])
-        self.db.commit()
-        self.db.refresh(assignment)
+        if commit:
+            self.db.commit()
+            self.db.refresh(assignment)
+        else:
+            self.db.flush()
         return assignment
 
     def _sync_legacy_recipient(self, assignment: TeacherAssignment, recipient: AssignmentRecipient) -> None:

@@ -2,7 +2,7 @@ from io import BytesIO
 import logging
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from app.schemas.study import (
 )
 from app.services.study_service import StudyService
 from app.services.task_service import TaskService
+from app.services.agent_execution_service import AgentExecutionService
 from app.schemas.task import LearningEventCreate
 
 
@@ -87,9 +88,25 @@ def get_note(chapter_id: int, user: User = Depends(get_current_user), db: Sessio
 
 
 @router.put("/notes/{chapter_id}", response_model=ApiResponse[StudyNoteRead])
-def save_note(chapter_id: int, payload: StudyNoteUpdate, user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[StudyNoteRead]:
+def save_note(chapter_id: int, payload: StudyNoteUpdate, background_tasks: BackgroundTasks,
+              user: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[StudyNoteRead]:
     service = StudyService(db)
-    note = service.save_note(user.id, chapter_id, payload.content)
+    chapter = service.require_chapter(chapter_id)
+    executions = AgentExecutionService(db, user)
+    try:
+        execution = executions.validate_handoff(payload.agent_execution_id, kind="note", course_id=chapter.course_id,
+                                                 chapter_id=chapter_id, content=payload.content)
+        note = service.save_note(user.id, chapter_id, payload.content, commit=False)
+        executions.finish_handoff(execution, kind="note", resource_id=note.id)
+        db.commit()
+        db.refresh(note)
+    except Exception:
+        db.rollback()
+        raise
+    # Respond after the durable save. External embedding latency must not hold
+    # the handoff lock or cause the browser to misreport a committed save.
+    background_tasks.add_task(StudyService.index_note_vector, note.id, note.content,
+                              user_id=user.id, course_id=note.course_id, chapter_id=note.chapter_id)
     try:
         TaskService(db).record(user.id, LearningEventCreate(
             course_id=note.course_id,

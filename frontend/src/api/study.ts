@@ -93,7 +93,8 @@ export interface ReviewResultItem { practice_id: number; question: string; sourc
 export const studyApi = {
   notes: () => http.get<ApiResponse<StudyNote[]>>('/study/notes'),
   note: (chapterId: number) => http.get<ApiResponse<StudyNote | null>>(`/study/notes/${chapterId}`),
-  saveNote: (chapterId: number, content: string) => http.put<ApiResponse<StudyNote>>(`/study/notes/${chapterId}`, { content }),
+  // Saving also updates the semantic index, which may involve a slow embedding provider.
+  saveNote: (chapterId: number, content: string, agentExecutionId?: number) => http.put<ApiResponse<StudyNote>>(`/study/notes/${chapterId}`, { content, agent_execution_id: agentExecutionId }, { timeout: 60_000 }),
   reviews: () => http.get<ApiResponse<ReviewItem[]>>('/study/reviews/today'),
   activateReview: (chapterId: number) => http.post<ApiResponse<{ id: number; interval_days: number }>>(`/study/reviews/${chapterId}/activate`),
   completeReview: (chapterId: number) => http.post<ApiResponse<{ id: number; interval_days: number }>>(`/study/reviews/${chapterId}/complete`),

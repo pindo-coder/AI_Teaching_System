@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class StudyNoteUpdate(BaseModel):
     content: str = Field(max_length=30000)
+    agent_execution_id: int | None = Field(default=None, ge=1)
 
 
 class StudyNoteRead(BaseModel):

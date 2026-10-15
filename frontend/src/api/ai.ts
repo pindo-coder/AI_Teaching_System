@@ -117,6 +117,8 @@ export interface AiAgentPlan {
 }
 
 export interface AiAgentAction {
+  execution_id?: number
+  note_draft?: string
   kind: string
   label: string
   href?: string
@@ -159,6 +161,9 @@ export interface AiAgentExecution {
     blocking_actions?: AiAgentAction[]
     warnings?: string[]
     verified?: boolean
+    sources?: AiSource[]
+    saved_resources?: Array<{ kind: string; id: number }>
+    goals?: Array<{ key: string; label: string; passed: boolean; status: 'draft_ready' | 'completed' | 'unmet'; resource_id?: number }>
     verification?: { checks: Array<{ key: string; label: string; passed: boolean; detail?: string }> }
   }
   error_message: string | null
@@ -296,6 +301,7 @@ export const aiApi = {
     http.post<ApiResponse<AiWorkspaceContext>>('/ai/workspace/context', payload),
   workspaceAgentExecutions: (limit = 12) =>
     http.get<ApiResponse<AiAgentExecution[]>>('/ai/workspace/agent/executions', { params: { limit } }),
+  workspaceAgentExecution: (id: number) => http.get<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${id}`),
   clearWorkspaceAgentExecutions: () =>
     http.delete<ApiResponse<{ deleted_count: number }>>('/ai/workspace/agent/executions'),
   deleteWorkspaceAgentExecution: (executionId: number) =>

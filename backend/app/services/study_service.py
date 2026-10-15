@@ -115,7 +115,7 @@ class StudyService:
             self.db.delete(message)
         self.db.commit()
 
-    def save_note(self, user_id: int, chapter_id: int, content: str) -> StudyNote:
+    def save_note(self, user_id: int, chapter_id: int, content: str, *, commit: bool = True) -> StudyNote:
         chapter = self.require_chapter(chapter_id)
         note = self.db.scalar(select(StudyNote).where(StudyNote.user_id == user_id, StudyNote.chapter_id == chapter_id))
         if note is None:
@@ -123,18 +123,27 @@ class StudyService:
             self.db.add(note)
         else:
             note.content = content.strip()
-        self.db.commit()
-        self.db.refresh(note)
+        if commit:
+            self.db.commit()
+            self.db.refresh(note)
+            self.index_note_vector(note.id, note.content, user_id=user_id,
+                                   course_id=note.course_id, chapter_id=note.chapter_id)
+        else:
+            self.db.flush()
+        return note
+
+    @staticmethod
+    def index_note_vector(note_id: int, content: str, *, user_id: int, course_id: int, chapter_id: int) -> None:
+        """Best-effort secondary index; takes values, never a request-scoped DB session."""
         # 向量索引失败不影响笔记保存，避免外部 Embedding 服务短暂不可用时丢失用户内容。
         try:
             upsert_study_note_vector(
-                note_id=note.id,
-                content=self.plain_note_content(note.content),
-                metadata={"user_id": user_id, "course_id": note.course_id, "chapter_id": note.chapter_id},
+                note_id=note_id,
+                content=StudyService.plain_note_content(content),
+                metadata={"user_id": user_id, "course_id": course_id, "chapter_id": chapter_id},
             )
         except Exception:
-            logger.exception("study_note_vector_upsert_failed note_id=%s", note.id)
-        return note
+            logger.exception("study_note_vector_upsert_failed note_id=%s", note_id)
 
     def list_textbook_annotations(self, user_id: int, chapter_id: int) -> list[TextbookAnnotation]:
         self.require_chapter(chapter_id)

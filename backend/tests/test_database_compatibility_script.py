@@ -47,6 +47,18 @@ def test_compatibility_check_rejects_empty_database_stamped_at_head() -> None:
     assert "缺少数据表：material_candidates" in issues
     assert "缺少数据表：news_items" in issues
     assert "缺少数据表：teacher_assignments" in issues
+    assert "缺少数据表：agent_executions" in issues
+    assert "缺少数据表：study_notes" in issues
+
+
+def test_compatibility_check_reports_handoff_columns_and_note_unique_key() -> None:
+    test_engine = create_engine("sqlite:///:memory:")
+    with test_engine.begin() as connection:
+        connection.exec_driver_sql("CREATE TABLE agent_executions (id INTEGER PRIMARY KEY)")
+        connection.exec_driver_sql("CREATE TABLE study_notes (id INTEGER PRIMARY KEY, user_id INTEGER, chapter_id INTEGER)")
+    issues = compatibility_issues(test_engine)
+    assert any(item.startswith("agent_executions 缺少字段：") and "result" in item for item in issues)
+    assert "study_notes 缺少唯一约束：(user_id, chapter_id)" in issues
 
 
 def test_compatibility_check_requires_learning_progress_unique_key() -> None:

@@ -74,6 +74,7 @@ class AssignmentRequirementProgressRead(BaseModel):
 
 
 class AssignmentCreate(BaseModel):
+    agent_execution_id: int | None = Field(default=None, ge=1)
     teaching_class_id: int | None = None
     course_id: int
     chapter_id: int

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ChatDotRound, CircleCheck, Delete, Loading, MagicStick, Promotion, Plus, RefreshRight, Setting, Tickets } from '@element-plus/icons-vue'
@@ -347,6 +347,15 @@ async function loadExecutions() {
   try {
     const response = await aiApi.workspaceAgentExecutions()
     executions.value = response.data.data
+    for (const message of agentMessages.value) {
+      const updated = executions.value.find((item) => item.id === message.execution?.id)
+      if (updated) {
+        message.execution = updated
+        message.actions = updated.result.actions || []
+        message.sources = updated.result.sources || message.sources
+      }
+    }
+    persistHistory()
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '任务中心暂时无法加载')
   } finally {
@@ -390,6 +399,9 @@ function restoreExecutionMessages(execution: AiAgentExecution) {
   const existing = agentMessages.value.find((message) => message.role === 'assistant' && message.execution?.id === execution.id)
   if (existing) {
     existing.execution = execution
+    existing.actions = execution.result.actions || []
+    existing.sources = execution.result.sources || existing.sources
+    existing.content = execution.result.summary || existing.content
     persistHistory()
   } else {
     const messageId = Date.now()
@@ -411,7 +423,7 @@ function restoreExecutionMessages(execution: AiAgentExecution) {
         role: 'assistant',
         content: summary,
         grounded: Boolean(execution.course_id && execution.chapter_id),
-        sources: [],
+        sources: execution.result.sources || [],
         plan,
         actions: execution.result?.actions || [],
         execution,
@@ -427,7 +439,9 @@ function restoreExecutionMessages(execution: AiAgentExecution) {
 async function continueExecution(execution: AiAgentExecution) {
   if (loadingByMode.value.agent || !canContinueExecution(execution.status)) return
   restoreExecutionMessages(execution)
-  continuationExecutionId.value = execution.id
+  // Saved tasks remain immutable. A new message starts a fresh execution with
+  // current learning data rather than resurrecting the old draft's actions.
+  continuationExecutionId.value = execution.status === 'completed' ? null : execution.id
   agentQuestion.value = ''
   await nextTick()
   composerInput.value?.focus()
@@ -526,7 +540,7 @@ function progressLabel(progress: { title: string; status: string; iteration?: nu
     : progress.title
 }
 function completedPlanStepCount(plan: AiAgentPlan) {
-  return plan.steps.filter((step) => step.status === 'completed').length
+  return plan.steps.filter((step) => ['completed', 'advice_ready', 'waiting_user_action'].includes(step.status)).length
 }
 function toggleActivitySteps(messageId: number) {
   const next = new Set(expandedActivityIds.value)
@@ -672,8 +686,13 @@ async function watchRun(messageId: number, runId: number) {
 }
 async function executeAction(messageId: number, action: AiAgentAction) {
   if (action.kind !== 'approve_evidence' || !action.run_id) {
+    if (action.kind === 'open_notes' && action.execution_id && action.note_draft) {
+      const target = new URL(action.href || '/notes', window.location.origin)
+      void router.push({ path: '/notes', query: { chapter_id: target.searchParams.get('chapter_id'), agent_execution_id: action.execution_id } })
+      return
+    }
     if (action.kind === 'open_assignments' && (action.draft || action.rubric)) {
-      const payload = encodeURIComponent(JSON.stringify({ draft: action.draft || null, rubric: action.rubric || null }))
+      const payload = encodeURIComponent(JSON.stringify({ draft: action.draft || null, rubric: action.rubric || null, execution_id: action.execution_id }))
       void router.push({ path: '/assignments', query: { agent_draft: payload } })
       return
     }
@@ -856,6 +875,7 @@ async function send(executionId?: number | Event) {
     }
     persistHistory()
     if (requestMode === 'agent') void loadExecutions()
+    window.dispatchEvent(new Event('learning-evidence-updated'))
   } catch (error: unknown) {
     updateAssistantMessage(assistantMessage.id, (message) => {
       message.content = error instanceof Error ? error.message : 'AI 暂时无法连接，请稍后重试。'
@@ -893,7 +913,9 @@ async function applyExternalRequest(request: WorkspaceAiRequest) {
 }
 
 watch(storageScopeKey, loadHistory, { immediate: true })
-onMounted(() => { void loadTemplates() })
+function refreshAfterHandoff() { void loadExecutions() }
+onMounted(() => { void loadTemplates(); window.addEventListener('agent-handoff-saved', refreshAfterHandoff) })
+onBeforeUnmount(() => window.removeEventListener('agent-handoff-saved', refreshAfterHandoff))
 
 defineExpose({ applyExternalRequest })
 </script>
@@ -986,6 +1008,9 @@ defineExpose({ applyExternalRequest })
             <strong>执行校验</strong>
             <span v-for="check in verificationChecks(message)" :key="check.key" :class="{ failed: !check.passed }">{{ check.passed ? '✓' : '!' }} {{ check.label }}<small v-if="check.detail">{{ check.detail }}</small></span>
           </section>
+          <div v-if="message.execution?.result?.goals?.length" class="workspace-ai-goals">
+            <span v-for="goal in message.execution.result.goals" :key="goal.key">{{ goal.status === 'completed' ? '✓' : goal.status === 'draft_ready' ? '○' : '!' }} {{ goal.label }} · {{ goal.status === 'completed' ? '已完成' : goal.status === 'draft_ready' ? '待审阅保存' : '未交付' }}</span>
+          </div>
           <section v-if="message.role === 'assistant' && message.execution?.result?.warnings?.length" class="workspace-ai-warning-list">
             <strong>需要留意</strong><span v-for="warning in message.execution.result.warnings" :key="warning">{{ warning }}</span>
           </section>
@@ -1164,6 +1189,7 @@ defineExpose({ applyExternalRequest })
 .workspace-ai-task-item { display: grid; gap: 6px; padding: 11px; background: #fff; border: 1px solid #e2e9f5; border-radius: 10px; }
 .workspace-ai-task-item > div:first-child { display: flex; align-items: center; gap: 6px; color: #8090a9; font-size: 10px; }.workspace-ai-task-item strong { overflow: hidden; color: #30425f; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }.workspace-ai-task-item small { display: -webkit-box; overflow: hidden; color: #78879c; font-size: 10px; line-height: 1.45; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .workspace-ai-task-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.workspace-ai-goals { display: grid; gap: 5px; margin-top: 12px; color: #64748b; font-size: 11px; line-height: 1.6; }
 .workspace-ai-verification, .workspace-ai-warning-list { display: grid; gap: 4px; margin-top: 8px; padding: 8px 10px; border-radius: 8px; font-size: 10px; }.workspace-ai-verification { color: #397758; background: #f2fbf6; border: 1px solid #d6efdf; }.workspace-ai-verification > strong, .workspace-ai-warning-list > strong { font-size: 11px; }.workspace-ai-verification span { display: flex; flex-wrap: wrap; gap: 4px; }.workspace-ai-verification span.failed { color: #a46b14; }.workspace-ai-verification small { color: #7e8ca2; }.workspace-ai-warning-list { color: #94631d; background: #fff9ed; border: 1px solid #f2dfb9; }
 
 .workspace-ai-composer { padding: 12px 18px 9px; background: rgba(255,255,255,.95); border-top: 1px solid #e5ebf5; }

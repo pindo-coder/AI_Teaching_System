@@ -18,6 +18,9 @@ REQUIRED_TABLES = (
     "news_items",
     "teacher_assignments",
     "assignment_requirement_progress",
+    "agent_executions",
+    "study_notes",
+    "assignment_recipients",
 )
 KNOWN_LEGACY_CANONICAL_URL_INDEX_NAME = "ix_material_candidates_canonical_url"
 
@@ -80,6 +83,19 @@ def compatibility_issues(db_engine: Engine) -> list[str]:
     for table_name in REQUIRED_TABLES:
         if table_name not in existing_tables:
             issues.append(f"缺少数据表：{table_name}")
+
+    for table_name, required_columns in {
+        "agent_executions": {"user_id", "status", "course_id", "chapter_id", "teaching_class_id",
+                             "context_snapshot", "plan", "tool_results", "result", "finished_time"},
+        "study_notes": {"user_id", "course_id", "chapter_id", "content"},
+        "assignment_recipients": {"assignment_id", "user_id"},
+    }.items():
+        if table_name in existing_tables:
+            missing = required_columns - _table_columns(inspector, table_name)
+            if missing:
+                issues.append(f"{table_name} 缺少字段：" + ", ".join(sorted(missing)))
+    if "study_notes" in existing_tables and not _has_unique_columns(inspector, "study_notes", ("user_id", "chapter_id")):
+        issues.append("study_notes 缺少唯一约束：(user_id, chapter_id)")
 
     if "users" in existing_tables:
         user_columns = _table_columns(inspector, "users")
@@ -171,6 +187,15 @@ def compatibility_issues(db_engine: Engine) -> list[str]:
             charset = connection.scalar(text("SELECT @@character_set_database"))
             if str(charset).lower() != "utf8mb4":
                 issues.append(f"数据库字符集不是 utf8mb4：{charset}")
+            for table_name in ("agent_executions", "study_notes", "teacher_assignments", "assignment_recipients"):
+                if table_name not in existing_tables:
+                    continue
+                storage_engine = connection.scalar(text(
+                    "SELECT ENGINE FROM information_schema.TABLES "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table_name"
+                ), {"table_name": table_name})
+                if str(storage_engine).lower() != "innodb":
+                    issues.append(f"{table_name} 需要 InnoDB 以保障事务与并发防重，当前为 {storage_engine}")
 
     return issues
 

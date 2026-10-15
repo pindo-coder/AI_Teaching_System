@@ -15,6 +15,7 @@ from app.schemas.assignment import (
 )
 from app.schemas.common import ApiResponse
 from app.services.assignment_service import AssignmentService
+from app.services.agent_execution_service import AgentExecutionService
 
 
 router = APIRouter(prefix="/assignments", tags=["teacher-assignments"])
@@ -42,7 +43,18 @@ def teacher_assignments(user: User = Depends(manager), db: Session = Depends(get
 
 @router.post("", response_model=ApiResponse[TeacherAssignmentRead], status_code=status.HTTP_201_CREATED)
 def create_assignment(payload: AssignmentCreate, user: User = Depends(manager), db: Session = Depends(get_db)) -> ApiResponse[TeacherAssignmentRead]:
-    assignment = AssignmentService(db).create(user.id, payload)
+    executions = AgentExecutionService(db, user)
+    try:
+        execution = executions.validate_handoff(payload.agent_execution_id, kind="assignment", course_id=payload.course_id,
+                                                 chapter_id=payload.chapter_id, rubric=payload.rubric,
+                                                 teaching_class_id=payload.teaching_class_id)
+        assignment = AssignmentService(db).create(user.id, payload, commit=False)
+        executions.finish_handoff(execution, kind="assignment", resource_id=assignment.id)
+        db.commit()
+        db.refresh(assignment)
+    except Exception:
+        db.rollback()
+        raise
     item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
     return ApiResponse(message="学习任务已发布", data=TeacherAssignmentRead(**item))
 

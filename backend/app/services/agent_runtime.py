@@ -183,7 +183,8 @@ class AgentRuntime:
         fallback: list[ToolCall],
     ) -> list[ToolCall]:
         """每轮优先让模型观察已完成结果；不可用时回退剩余安全计划。"""
-        if settings.agent_planner_use_llm and not settings.ai_mock_mode:
+        if (settings.agent_planner_use_llm and not settings.ai_mock_mode
+                and not planner.requested_goals(question, role)):
             history = "\n".join(
                 f"{call.name}: {result.status} - {result.text[:500]}"
                 for call, result in results[-6:]
@@ -206,6 +207,18 @@ class AgentRuntime:
         execution: Any,
         execution_service: AgentExecutionService,
     ) -> Iterator[RuntimeEvent]:
+        if execution.status == "completed":
+            # Reopening a completed task is a read-only replay, not a new run.
+            # In particular, never rebuild draft_ready goals over saved resources.
+            result = execution.result or {}
+            yield "execution", execution_data(execution)
+            if execution.plan:
+                yield "plan", execution.plan
+            yield "chunk", {"text": result.get("summary", "该任务已经完成。")}
+            yield "sources", result.get("sources", [])
+            yield "progress", {"title": "已展示完成结果；如需按最新进度重新规划，请发起新任务", "status": "completed"}
+            yield "done", {}
+            return
         planner = PlanningAgent(self.db, self.user)
         try:
             candidates = planner.plan(question, role, context)
@@ -236,7 +249,14 @@ class AgentRuntime:
         execution_service.set_plan(execution, plan)
         yield "plan", plan
 
-        results: list[tuple[ToolCall, ToolResult]] = []
+        # Resumed executions must verify and summarize the previously produced
+        # deliverables as well as tools executed during this connection.
+        results: list[tuple[ToolCall, ToolResult]] = [
+            (ToolCall(item["tool"], item.get("title", ""), arguments=item.get("arguments") or {}),
+             ToolResult(item.get("summary", ""), action=item.get("action") or None,
+                        data=item.get("data") or {}, status=item["status"]))
+            for item in persisted_results if item.get("status") in {"completed", "advice_ready", "waiting_user_action"}
+        ]
         # execution_id 续跑时沿用已持久化的成功步骤，避免重复副作用。
         completed: set[str] = {
             str(item.get("tool")) for item in persisted_results
@@ -279,6 +299,8 @@ class AgentRuntime:
                 if result.status != "failed" or not result.retryable or attempts > settings.agent_tool_max_retries:
                     break
             assert result is not None
+            if result.action:
+                result.action["execution_id"] = execution.id
             results.append((call, result))
             tool_contract = result.contract(call)
             tool_contract["tool_call_id"] = f"{execution.id}:{call.name}"
@@ -295,7 +317,8 @@ class AgentRuntime:
                 "warnings": result.warnings or [],
                 "retryable": result.retryable,
             }
-            if result.action:
+            composite_assignment = {"assignment", "rubric"}.issubset(planner.requested_goals(question, role))
+            if result.action and not (composite_assignment and result.action.get("kind") == "open_assignments"):
                 yield "action", result.action
             plan = {
                 "intent": "planner_v2",
@@ -356,8 +379,22 @@ class AgentRuntime:
         yield "progress", {"title": "正在整理执行结果和下一步操作", "status": "running"}
         summary_parts = list(planner.synthesize_stream(question=question, role=role, context=context, results=results))
         summary = "".join(summary_parts)
-        verification = AgentVerifier().verify(context=context, results=results, summary=summary, role=role)
+        verification = AgentVerifier().verify(context=context, results=results, summary=summary, role=role, question=question)
         actions = [result.action for _, result in results if result.action]
+        if {"assignment", "rubric"}.issubset(planner.requested_goals(question, role)):
+            assignment_actions = [action for action in actions if action.get("kind") == "open_assignments"]
+            if assignment_actions:
+                combined = {"kind": "open_assignments", "href": "/assignments", "requires_confirmation": True,
+                            "execution_id": execution.id, "label": "审阅任务草案与评分量规"}
+                for action in assignment_actions:
+                    for key in ("draft", "rubric"):
+                        if action.get(key):
+                            combined[key] = action[key]
+                actions = [action for action in actions if action.get("kind") != "open_assignments"] + [combined]
+                if verification.verified:
+                    yield "action", combined
+        sources = [source for _call, result in results for source in (result.data or {}).get("sources", [])
+                   if source.get("course_id") and source.get("chapter_id")]
         final_result = {
             "summary": summary,
             "actions": actions,
@@ -366,6 +403,10 @@ class AgentRuntime:
             "verified": verification.verified,
             "verification": {"checks": verification.checks},
             "blocking_actions": verification.blocking_actions,
+            "goals": [dict(check, status=("draft_ready" if check["key"] in {"goal_note", "goal_assignment", "goal_rubric"}
+                                         else "completed") if check["passed"] else "unmet")
+                      for check in verification.checks if check["key"].startswith("goal_")],
+            "sources": sources,
         }
         pending_steps = [
             step for step in steps
@@ -380,6 +421,8 @@ class AgentRuntime:
             execution_service.request_cancel(execution)
         elif deadline_exceeded:
             execution_service.fail(execution, "Agent 执行超过整体时限，请稍后重试", final_result)
+        elif verification.status == "failed":
+            execution_service.fail(execution, "请求的产物尚未全部生成，请查看目标验收结果", final_result)
         elif verification.status == "waiting_confirmation":
             execution_service.wait_for_confirmation(execution, final_result)
         elif verification.status == "waiting_input":
@@ -399,9 +442,10 @@ class AgentRuntime:
                 "计划已执行，等待你补充信息" if execution.status == "waiting_input"
                 else "计划已执行，等待你确认下一步" if execution.status == "waiting_confirmation"
                 else "计划执行出现异常，请查看未完成步骤" if execution.status == "failed"
+                else "草案已生成，等待你在业务页面审阅保存" if execution.status == "waiting_user_action"
                 else "计划执行完成，可按提示继续"
             ),
             "status": "failed" if execution.status == "failed" else "needs_input" if execution.status in {"waiting_input", "waiting_confirmation"} else "completed",
         }
-        yield "sources", []
+        yield "sources", sources
         yield "done", {}

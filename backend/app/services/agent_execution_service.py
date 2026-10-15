@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from typing import Any
+import hashlib
 
-from sqlalchemy import Engine, delete, select
+from fastapi import HTTPException
+
+from sqlalchemy import Engine, delete, select, update
 from sqlalchemy.orm import Session
 
 from app.core.time import utc_iso, utc_now
@@ -65,6 +68,91 @@ class AgentExecutionService:
     def append_tool_result(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
         history = [*list(execution.tool_results or []), result]
         return self.update(execution, tool_results=history)
+
+    def validate_handoff(self, execution_id: int | None, *, kind: str, course_id: int,
+                         chapter_id: int, content: str = "", rubric: dict | None = None,
+                         teaching_class_id: int | None = None) -> AgentExecution | None:
+        if execution_id is None:
+            return None
+        # Claim with a conditional write, not a check followed by a write. MySQL
+        # row locks and SQLite's writer lock serialize competing submissions.
+        # "saving" is transaction-local: callers must commit the business record
+        # and finish_handoff together, or roll both back on any failure.
+        claimed = self.db.execute(
+            update(AgentExecution).where(
+                AgentExecution.id == execution_id,
+                AgentExecution.user_id == self.user.id,
+                AgentExecution.status == "waiting_user_action",
+            ).values(status="saving").execution_options(synchronize_session=False)
+        )
+        if claimed.rowcount != 1:
+            self.db.rollback()
+            if self.get(execution_id) is None:
+                raise HTTPException(404, "关联 Agent 任务不存在")
+            raise HTTPException(409, "该草案已保存或正在处理，请核对任务结果，勿重复提交")
+        execution = self.db.scalar(select(AgentExecution).where(
+            AgentExecution.id == execution_id,
+        ).execution_options(populate_existing=True))
+        assert execution is not None
+        return self._validate_claimed_handoff(execution, kind=kind, course_id=course_id,
+                                             chapter_id=chapter_id, content=content, rubric=rubric,
+                                             teaching_class_id=teaching_class_id)
+
+    def _validate_claimed_handoff(self, execution: AgentExecution, *, kind: str, course_id: int,
+                                  chapter_id: int, content: str, rubric: dict | None,
+                                  teaching_class_id: int | None) -> AgentExecution:
+        if execution.course_id != course_id or execution.chapter_id != chapter_id:
+            raise HTTPException(400, "保存范围与 Agent 草案不一致")
+        expected = "draft_note_improvement" if kind == "note" else "draft_assignment"
+        tool = next((item for item in reversed(execution.tool_results or [])
+                     if item.get("tool") == expected and item.get("status") in {"advice_ready", "waiting_user_action"}), None)
+        if tool is None:
+            raise HTTPException(400, "Agent 未生成对应业务草案")
+        if kind == "note":
+            from app.services.study_service import StudyService
+            plain = StudyService.plain_note_content(content)
+            baseline = (tool.get("data") or {}).get("baseline_hash")
+            if not plain.strip() or hashlib.sha256(plain.encode()).hexdigest() == baseline:
+                raise HTTPException(400, "请审阅并修改笔记后再保存 Agent 草案")
+        else:
+            if execution.teaching_class_id is not None and execution.teaching_class_id != teaching_class_id:
+                raise HTTPException(400, "发布教学班与 Agent 草案不一致")
+            goals = (execution.result or {}).get("goals", [])
+            if any(item.get("key") == "goal_rubric" for item in goals):
+                items = (rubric or {}).get("items", [])
+                if not items or sum(float(item.get("weight", 0)) for item in items) != 100:
+                    raise HTTPException(400, "任务要求评分量规，请确认各项权重合计为 100%")
+        return execution
+
+    def finish_handoff(self, execution: AgentExecution | None, *, kind: str, resource_id: int) -> None:
+        """Stage completion in the caller's transaction; never commit independently."""
+        if execution is None:
+            return
+        result = dict(execution.result or {})
+        saved_keys = {"goal_note"} if kind == "note" else {"goal_assignment", "goal_rubric"}
+        goals = [dict(item) for item in result.get("goals", [])]
+        for goal in goals:
+            if goal.get("key") in saved_keys:
+                goal.update(status="completed", resource_id=resource_id)
+        result["goals"] = goals
+        result["saved_resources"] = [*result.get("saved_resources", []), {"kind": kind, "id": resource_id}]
+        summary = result.get("summary", "")
+        if kind == "note":
+            summary = summary.replace("草稿尚未保存，请在笔记空间审阅后追加。",
+                                      "草稿已审阅处理，实际保存内容以笔记空间为准。")
+        result["summary"] = summary + ("\n\n笔记修改已保存。" if kind == "note" else "\n\n任务与量规已确认并发布。")
+        if all(item.get("status") == "completed" for item in goals):
+            result["actions"] = []
+            result["next_actions"] = []
+            execution.status = "completed"
+            execution.finished_time = utc_now()
+        else:
+            execution.status = "waiting_user_action"
+            execution.finished_time = None
+        execution.result = result
+        execution.error_message = None
+        self.db.add(execution)
+        self.db.flush()
 
     def complete(self, execution: AgentExecution, result: dict[str, Any]) -> AgentExecution:
         return self.update(execution, status="completed", result=result, finished_time=utc_now())

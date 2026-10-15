@@ -41,6 +41,7 @@ class AgentVerifier:
         results: list[tuple[ToolCall, ToolResult]],
         summary: str,
         role: str = "student",
+        question: str = "",
     ) -> VerificationResult:
         checks: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -85,10 +86,39 @@ class AgentVerifier:
         })
 
         verified = bool(summary.strip()) and not failed and context_ok
+        from app.services.planning_agent import PlanningAgent
+        contracts = {
+            "note": ("draft_note_improvement", "笔记修改草稿与教材依据"),
+            "study_plan": ("draft_study_plan", "按实际缺口安排的学习计划"),
+            "assignment": ("draft_assignment", "可编辑任务草案"),
+            "rubric": ("prepare_grading_rubric", "评分量规"),
+        }
+        by_tool = {call.name: result for call, result in results}
+        for goal in PlanningAgent.requested_goals(question, role):
+            tool, label = contracts[goal]
+            result = by_tool.get(tool)
+            data = (result.data or {}) if result else {}
+            passed = bool(result and result.status in {"completed", "advice_ready", "waiting_user_action"})
+            if goal == "note":
+                passed = passed and bool(data.get("draft_content") and data.get("sources"))
+            elif goal == "study_plan":
+                passed = passed and bool(data.get("steps"))
+            elif goal == "assignment":
+                draft = data.get("draft") or {}
+                passed = passed and bool(draft.get("title") and draft.get("description"))
+            elif goal == "rubric":
+                items = (data.get("rubric") or {}).get("items", [])
+                passed = passed and bool(items) and sum(item.get("weight", 0) for item in items) == 100
+            checks.append({"key": "goal_" + goal, "label": label, "passed": bool(passed)})
+            if not passed:
+                verified = False
+                warnings.append(f"尚未交付：{label}")
         status = (
             "waiting_confirmation" if blocking_actions
             else "waiting_input" if needs_input
             else "waiting_user_action" if advice_ready
             else "completed"
         )
+        if not verified and not needs_input and not blocking_actions:
+            status = "failed"
         return VerificationResult(verified, status, checks, list(dict.fromkeys(warnings)), blocking_actions)
