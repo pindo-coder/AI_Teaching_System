@@ -97,6 +97,8 @@ const citationVisible = ref(false)
 const selectedSource = ref<AiSource | null>(null)
 const messageList = ref<HTMLElement | null>(null)
 const composerInput = ref<{ focus: () => void } | null>(null)
+const externalRequestHint = ref('')
+const isBusy = computed(() => loadingByMode.value.chat || loadingByMode.value.agent || mediaBusy.value)
 const role = computed<AiWorkspaceRole>(() => auth.user?.role || 'student')
 const roleLabel = computed(() => ({ student: '学生学习助手', teacher: '教师备课助手', admin: '平台治理助手' }[role.value]))
 const contextLabel = computed(() => {
@@ -253,6 +255,7 @@ function scrollToBottom(targetMode: AiWorkspaceMode = mode.value) {
   })
 }
 function selectQuickAction(prompt: string, selectedMode: AiWorkspaceMode = mode.value, taskType?: AiTaskType) {
+  externalRequestHint.value = ''
   switchMode(selectedMode)
   continuationExecutionId.value = null
   if (selectedMode === 'chat') {
@@ -263,6 +266,7 @@ function selectQuickAction(prompt: string, selectedMode: AiWorkspaceMode = mode.
   else agentQuestion.value = prompt
 }
 function resetChatTaskType() {
+  externalRequestHint.value = ''
   if (mode.value === 'chat') {
     chatTaskType.value = 'question_answer'
     chatQuestionIsUserAuthored.value = true
@@ -773,6 +777,7 @@ async function send(executionId?: number | Event) {
     : []
   const content = rawContent || (selectedImages.length ? '请结合当前教材分析这些图片。' : '')
   if (!content || loadingByMode.value[requestMode]) return
+  externalRequestHint.value = ''
   if (requestMode === 'chat' && mediaBusy.value) {
     ElMessage.warning('图片或语音仍在处理中，请稍候再发送')
     return
@@ -896,6 +901,7 @@ async function send(executionId?: number | Event) {
 
 async function applyExternalRequest(request: WorkspaceAiRequest) {
   const requestMode = request.mode || 'chat'
+  if (isBusy.value) throw new Error('AI 正在处理已有请求，请等待完成后重试。')
   switchMode(requestMode)
   continuationExecutionId.value = null
   if (requestMode === 'agent') {
@@ -907,6 +913,7 @@ async function applyExternalRequest(request: WorkspaceAiRequest) {
   chatQuestionIsUserAuthored.value = false
   historyVisible.value = false
   taskCenterVisible.value = false
+  externalRequestHint.value = request.autoSend ? '' : '问题已填入，可编辑后点击“发送”向 AI 提问。'
   await nextTick()
   composerInput.value?.focus()
   if (request.autoSend) await send()
@@ -917,7 +924,7 @@ function refreshAfterHandoff() { void loadExecutions() }
 onMounted(() => { void loadTemplates(); window.addEventListener('agent-handoff-saved', refreshAfterHandoff) })
 onBeforeUnmount(() => window.removeEventListener('agent-handoff-saved', refreshAfterHandoff))
 
-defineExpose({ applyExternalRequest })
+defineExpose({ applyExternalRequest, isBusy })
 </script>
 
 <template>
@@ -1080,6 +1087,7 @@ defineExpose({ applyExternalRequest })
     </div>
 
     <div class="workspace-ai-composer">
+      <p v-if="externalRequestHint" class="workspace-ai-external-hint" role="status">{{ externalRequestHint }}</p>
       <el-input ref="composerInput" v-model="question" type="textarea" :rows="2" resize="none" maxlength="2000" :placeholder="composerPlaceholder" @input="resetChatTaskType" @keydown.ctrl.enter.prevent="send()" @keydown.meta.enter.prevent="send()" />
       <AiMediaComposer v-if="mode === 'chat'" v-model="mediaAssets" :course-id="props.context?.course_id || props.courseId || null" :chapter-id="props.context?.chapter_id || props.chapterId || null" :disabled="loading" @transcribed="appendTranscription" @busy-changed="mediaBusy = $event" />
       <div class="workspace-ai-composer-footer"><div class="workspace-ai-mode-switch" role="tablist" aria-label="AI 工作模式"><button type="button" role="tab" :aria-selected="mode === 'chat'" :class="{ active: mode === 'chat' }" @click="switchMode('chat')"><el-icon><ChatDotRound /></el-icon>Chat<i v-if="loadingByMode.chat"></i></button><button type="button" role="tab" :aria-selected="mode === 'agent'" :class="{ active: mode === 'agent' }" @click="switchMode('agent')"><el-icon><MagicStick /></el-icon>Agent<i v-if="loadingByMode.agent"></i></button></div><span class="workspace-ai-hint">{{ modeHint }}</span><el-button type="primary" :loading="loading" :disabled="mode === 'chat' && mediaBusy" :icon="Promotion" aria-label="发送" @click="send()">发送</el-button></div>
@@ -1090,6 +1098,7 @@ defineExpose({ applyExternalRequest })
 </template>
 
 <style scoped>
+.workspace-ai-external-hint { margin: 0 0 8px; color: #64748b; font-size: 12px; }
 .workspace-ai-assistant {
   display: flex;
   min-height: 0;

@@ -6,7 +6,7 @@ import { Lock, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { getErrorMessage } from '@/utils/error'
 import BrandLockup from '@/components/ui/BrandLockup.vue'
-import loginVisualImage from '@/assets/login-visual.jpg'
+import loginVisualImage from '@/assets/login-city-visual.png'
 import loginRobotImage from '@/assets/login-robot.png'
 
 const formRef = ref<FormInstance>()
@@ -42,7 +42,7 @@ async function submit() {
     <section class="login-form-panel" aria-labelledby="login-title">
       <img class="login-robot" :src="loginRobotImage" alt="" aria-hidden="true" />
       <div class="login-form-heading">
-        <h2 id="login-title">欢迎回来，思政红芯教育平台</h2>
+        <h2 id="login-title">欢迎回来，思政红芯智慧教育平台</h2>
         <p>欢迎回来，请填写您的详细信息</p>
       </div>
       <el-form ref="formRef" class="login-form" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
