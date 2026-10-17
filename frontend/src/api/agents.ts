@@ -11,6 +11,8 @@ export type AgentStatus =
   | 'cancelled'
 
 export interface PptPreferences {
+  title?: string | null
+  image_frame_shape?: 'roundRect' | 'circle'
   scenario: 'classroom' | 'open_lesson' | 'presentation'
   visual_style: 'serious' | 'modern' | 'youthful'
   content_density: 'concise' | 'standard' | 'detailed'
@@ -90,17 +92,29 @@ export interface AgentRun {
   evidence_snapshot: AiSource[]
   output_data: {
     outline?: LessonOutline
+    artifact_errors?: Partial<Record<'ppt' | 'lesson_plan' | 'classroom_activities', string>>
+    ppt_image_job?: { id: string; status: 'queued' | 'running' | 'failed' | 'completed' | 'cancelled'; slide_index: number; stage?: string; error?: string }
+    artifact_attempt?: { id?: string; status: 'queued' | 'running' | 'failed' | 'partial' | 'completed';
+      resume?: boolean; requested_types?: string[]; started_time?: string; finished_time?: string }
     artifact_bundle?: {
       ppt?: {
+        skill?: { name: string; version: string; commit: string; integration: string }
+        pipeline_version?: string
+        revision_id?: string
+        preferences?: PptPreferences
         title: string
         subtitle?: string
         design?: {
           name: string
           concept: string
-          mood: string
-          status: 'personalized' | 'fallback'
-          designed_pages: number
-          palette: Record<string, string>
+          topic_keywords?: string[]
+          visual_motif?: string
+          image_style?: string
+          image_frame_shape?: 'roundRect' | 'circle'
+          mood?: string
+          status?: 'personalized' | 'fallback'
+          designed_pages?: number
+          palette?: Record<string, string>
           fonts?: Record<string, string>
           template_reference?: {
             id: number
@@ -109,10 +123,12 @@ export interface AgentRun {
           }
         }
         quality_report?: {
-          score: number
+          score?: number
           passed: boolean
           summary: string
           reviewer: string
+          visual_review?: 'teacher_required'
+          checks?: string[]
           issues: Array<{
             slide_index: number | null
             severity: 'high' | 'medium' | 'low'
@@ -122,10 +138,15 @@ export interface AgentRun {
           }>
         }
         slides: Array<{
+          preview_available?: boolean
           layout: string
           title: string
           takeaway: string
           bullets: string[]
+          diagram_labels?: string[]
+          visual_prompt?: string
+          visual_brief?: { kind: 'illustration' | 'diagram' | 'none'; purpose: string; content_anchors: string[];
+            scene_family?: string; key_elements?: string[]; difference?: string; avoid?: string[] } | null
           keyword?: string
           left?: {
             title: string
@@ -162,18 +183,22 @@ export interface AgentRun {
             file_name: string
             media_type: string
             model: string
+            prompt?: string
+            review?: { status: 'passed' | 'rejected' | 'unreviewed'; reason: string; model?: string;
+              matched_elements?: string[]; missing_elements?: string[] }
           }
           speaker_notes: string
           evidence_refs: string[]
         }>
         multimodal?: {
-          status: 'completed' | 'fallback' | 'unavailable'
+          status: 'completed' | 'partial' | 'fallback' | 'unavailable'
           generated_count: number
           requested_count?: number
           selected_slides?: number[]
           model?: string
           message: string
           errors?: string[]
+          semantic_review?: { passed: number; unreviewed: number }
         }
       }
       lesson_plan?: {
@@ -203,7 +228,11 @@ export interface AgentRun {
       media_type: string
       slide_count?: number
       activity_count?: number
-      preview: unknown
+      preview?: unknown
+      generated_time?: string
+      attempt_id?: string
+      revision_id?: string
+      requires_previous_confirmation?: boolean
     }>
     ppt_versions?: Array<{
       version_id: string
@@ -212,6 +241,11 @@ export interface AgentRun {
       title: string
       slide_count: number
       design_name?: string
+      restorable?: boolean
+      revision_id?: string
+      generated_time?: string
+      unavailable_reason?: string | null
+      is_current?: boolean
     }>
   }
   model_name: string | null
@@ -224,6 +258,14 @@ export interface AgentRun {
   created_time: string
   updated_time: string
   steps: AgentStep[]
+}
+
+export type PptDeck = NonNullable<NonNullable<AgentRun['output_data']['artifact_bundle']>['ppt']>
+export type AgentArtifact = NonNullable<AgentRun['output_data']['artifacts']>[string]
+export type PptVersion = NonNullable<AgentRun['output_data']['ppt_versions']>[number]
+export interface PptVersionPreview extends PptVersion {
+  ppt: PptDeck
+  artifact: Partial<AgentArtifact>
 }
 
 export interface CreateLessonPrepRun {
@@ -267,6 +309,10 @@ export interface LessonPublication {
 }
 
 export const agentApi = {
+  pptSlidePreview: (id: number, slideIndex: number, versionId?: string, expectedRevision?: string, signal?: AbortSignal) =>
+    http.get<Blob>(`/agent/runs/${id}/ppt/slides/${slideIndex}/preview`, {
+      responseType: 'blob', params: { version_id: versionId, expected_revision: expectedRevision }, signal,
+    }),
   capabilities: () =>
     http.get<ApiResponse<AgentCapabilities>>('/agent/capabilities'),
   create: (payload: CreateLessonPrepRun) =>
@@ -281,10 +327,12 @@ export const agentApi = {
     id: number,
     outputTypes: Array<'lesson_plan' | 'ppt' | 'classroom_activities'>,
     pptPreferences?: PptPreferences,
+    resume = false,
   ) =>
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/artifacts`, {
       output_types: outputTypes,
       ppt_preferences: outputTypes.includes('ppt') ? pptPreferences : undefined,
+      resume,
     }),
   revisePptSlide: (
     id: number,
@@ -296,12 +344,18 @@ export const agentApi = {
       instruction,
       mode,
     }, { timeout: 180_000 }),
-  restorePptVersion: (id: number, versionId: string) =>
+  previewPptVersion: (id: number, versionId: string, signal?: AbortSignal) =>
+    http.get<ApiResponse<PptVersionPreview>>(`/agent/runs/${id}/ppt/versions/${encodeURIComponent(versionId)}`, { signal }),
+  restorePptVersion: (id: number, versionId: string, expectedRevision?: string) =>
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/ppt/versions/restore`, {
-      version_id: versionId,
+      version_id: versionId, expected_revision: expectedRevision,
     }, { timeout: 120_000 }),
   listPptTemplates: () =>
     http.get<ApiResponse<PresentationTemplate[]>>('/agent/ppt-templates'),
+  replacePptImage: (id: number, slideIndex: number, prompt: string, expectedRevision: string) =>
+    http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/ppt/slides/${slideIndex}/image`, {
+      prompt, expected_revision: expectedRevision,
+    }),
   uploadPptTemplate: (form: FormData) =>
     http.post<ApiResponse<PresentationTemplate>>('/agent/ppt-templates', form, {
       timeout: 120_000,
@@ -316,6 +370,8 @@ export const agentApi = {
     publish_discussions: boolean
     discussion_indices: number[]
     confirmed: boolean
+    expected_ppt_revision?: string
+    allow_previous_ppt?: boolean
   }) =>
     http.post<ApiResponse<LessonPublication>>(`/agent/runs/${id}/publish`, payload),
   publications: (teachingClassId?: number) =>
@@ -324,9 +380,10 @@ export const agentApi = {
     }),
   downloadPublicationPpt: (id: number) =>
     http.get<Blob>(`/agent/publications/${id}/ppt`, { responseType: 'blob' }),
-  downloadArtifact: (id: number, artifactKey: string) =>
+  downloadArtifact: (id: number, artifactKey: string, versionId?: string, expectedRevision?: string) =>
     http.get<Blob>(`/agent/runs/${id}/artifacts/${artifactKey}/download`, {
       responseType: 'blob',
+      params: { version_id: versionId, expected_revision: expectedRevision },
     }),
   cancel: (id: number) =>
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/cancel`),

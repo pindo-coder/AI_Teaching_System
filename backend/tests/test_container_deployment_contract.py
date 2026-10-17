@@ -13,11 +13,12 @@ def _read(relative_path: str) -> str:
 def test_backend_image_contains_presentation_runtime() -> None:
     dockerfile = _read("backend/Dockerfile")
 
-    assert "FROM node:24-bookworm-slim AS presentation-builder" in dockerfile
+    assert "FROM python:3.12-slim-bookworm" in dockerfile
     assert "ffmpeg" in dockerfile
-    assert "pnpm install --prod --frozen-lockfile" in dockerfile
-    assert "COPY presentation_runtime/render_pptx.mjs" in dockerfile
-    assert "COPY --from=presentation-builder --chown=app:app /runtime ./presentation_runtime" in dockerfile
+    assert "fonts-noto-cjk libreoffice-impress poppler-utils" in dockerfile
+    assert "python scripts/install_ppt_master.py" in dockerfile
+    assert "presentation_runtime/ppt-master.lock.json" in dockerfile
+    assert "pptxgenjs" not in dockerfile
     assert "RUN python scripts/verify_presentation_runtime.py" in dockerfile
 
 
@@ -27,8 +28,7 @@ def test_compose_persists_generated_artifacts_at_configured_path() -> None:
     artifact_path = "/app/knowledge/generated_artifacts"
     assert f"GENERATED_ARTIFACT_DIRECTORY: {artifact_path}" in compose
     assert f"- generated_artifacts:{artifact_path}" in compose
-    assert "PRESENTATION_NODE_BINARY: /usr/local/bin/node" in compose
-    assert "PRESENTATION_NODE_MODULES: /app/presentation_runtime/node_modules" in compose
+    assert "PPT_MASTER_DIRECTORY: /app/presentation_runtime/vendor/ppt-master" in compose
     assert "  generated_artifacts:" in compose
 
 

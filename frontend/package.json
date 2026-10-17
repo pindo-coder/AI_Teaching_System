@@ -8,7 +8,9 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc -b",
-    "test:workspace-ai": "node --experimental-strip-types --test tests/workspaceAiRequests.test.mjs"
+    "test:workspace-ai": "node --experimental-strip-types --test tests/workspaceAiRequests.test.mjs",
+    "test:artifact-progress": "node --experimental-strip-types --test tests/lessonArtifactProgress.test.mjs",
+    "test:lesson-publication": "node --experimental-strip-types --test tests/lessonPublication.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

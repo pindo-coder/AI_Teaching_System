@@ -30,7 +30,7 @@ from app.models.teacher_assignment import TeacherAssignment
 from app.models.teaching_class import TeachingClass
 from app.models.user import User
 from app.models.review_practice import ReviewPractice
-from app.schemas.agent import AgentRunCreate, LessonPrepInput
+from app.schemas.agent import AgentRunCreate, LessonPrepInput, PptPreferences
 from app.schemas.ai import AiWorkspaceContextData
 from app.rag.retriever import retrieve
 from app.services.agent_service import AgentService
@@ -140,7 +140,7 @@ class PlanningAgent:
         "prepare_follow_up": "根据未完成任务生成不自动发送的提醒与跟进建议",
         "check_material_health": "检查当前教材、中央材料和索引是否具备可用依据",
         "generate_lesson_outline": "沿用备课工作流生成课纲",
-        "generate_ppt": "沿用备课工作流生成 PPT",
+        "generate_ppt": "生成 PPT；arguments 可选 ppt_preferences 对象（slide_count 6-30，include_interaction，include_visuals，visual_style，content_density）；页数必须符合用户原话",
         "generate_lesson_plan": "沿用备课工作流生成教案",
         "generate_classroom_activity": "沿用备课工作流生成课堂互动",
         "generate_all_artifacts": "沿用备课工作流生成 PPT、教案和课堂互动",
@@ -1373,6 +1373,17 @@ class PlanningAgent:
                 "classroom_activities": "课堂活动",
             }
             output_label = "、".join(output_labels.get(item, item) for item in output_types)
+            ppt_preferences = None
+            if "ppt" in output_types:
+                preferences = dict((latest.input_data or {}).get("ppt_preferences") or {})
+                preferences.update(call.arguments.get("ppt_preferences") or {})
+                count_match = re.search(r"(?<!\d)(\d{1,2})\s*[页張张]", question)
+                if count_match:
+                    preferences["slide_count"] = int(count_match.group(1))
+                try:
+                    ppt_preferences = PptPreferences.model_validate(preferences).model_dump()
+                except ValidationError:
+                    return ToolResult("PPT 页数需为 6–30 页，请调整要求。", status="needs_input")
             return ToolResult(
                 f"已找到当前专题的已确认课纲，准备生成：{output_label}。",
                 action={
@@ -1381,6 +1392,7 @@ class PlanningAgent:
                     "href": "",
                     "run_id": latest.id,
                     "output_types": output_types,
+                    "ppt_preferences": ppt_preferences,
                     "requires_confirmation": False,
                 },
                 data={"run_id": latest.id, "output_types": output_types},

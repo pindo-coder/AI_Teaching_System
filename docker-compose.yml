@@ -55,8 +55,8 @@ services:
       CHROMA_PERSIST_DIRECTORY: /app/knowledge/chroma
       KNOWLEDGE_UPLOAD_DIRECTORY: /app/knowledge/uploads
       GENERATED_ARTIFACT_DIRECTORY: /app/knowledge/generated_artifacts
-      PRESENTATION_NODE_BINARY: /usr/local/bin/node
-      PRESENTATION_NODE_MODULES: /app/presentation_runtime/node_modules
+      PPT_MASTER_DIRECTORY: /app/presentation_runtime/vendor/ppt-master
+      PPT_OFFICE_BINARY: soffice
       LOG_LEVEL: INFO
     volumes:
       - app_data:/app/data

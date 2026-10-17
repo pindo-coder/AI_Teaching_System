@@ -1,5 +1,6 @@
 import { http, type ApiResponse } from './http'
 import type { LearningStage } from '@/types'
+import type { PptPreferences } from './agents'
 
 export type AiTaskType =
   | 'question_answer'
@@ -125,6 +126,7 @@ export interface AiAgentAction {
   run_id?: number | null
   requires_confirmation: boolean
   output_types?: Array<'ppt' | 'lesson_plan' | 'classroom_activities'>
+  ppt_preferences?: PptPreferences
   status?: 'ready' | 'running' | 'completed' | 'failed'
   draft?: Record<string, unknown>
   rubric?: { items: Array<{ label: string; weight: number; description: string }>; feedback_template: string }

@@ -1,7 +1,8 @@
 from datetime import datetime
+import re
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
 
 from app.schemas.learning import LearningStage
 from app.schemas.ai import AiSource
@@ -42,15 +43,28 @@ class AgentConfirmRequest(BaseModel):
 
 
 class PptPreferences(BaseModel):
+    title: str | None = Field(default=None, max_length=60)
     scenario: Literal["classroom", "open_lesson", "presentation"] = "classroom"
     visual_style: Literal["serious", "modern", "youthful"] = "modern"
     content_density: Literal["concise", "standard", "detailed"] = "standard"
-    min_slides: int = Field(default=9, ge=6, le=30)
-    max_slides: int = Field(default=12, ge=6, le=30)
+    min_slides: int = Field(default=10, ge=6, le=30)
+    max_slides: int = Field(default=10, ge=6, le=30)
     slide_count: int | None = Field(default=None, ge=6, le=30)
     include_interaction: bool = True
     include_visuals: bool = False
+    image_frame_shape: Literal["roundRect", "circle"] = "roundRect"
     template_id: int | None = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def normalize_title(cls, value):
+        if not isinstance(value, str):
+            return value
+        value = re.sub(r"\s+", " ", value).strip()
+        value = re.sub(r"\.pptx$", "", value, flags=re.I).strip()
+        if re.search(r"[\x00-\x1f]|[\[【]\s*资料\s*\d+\s*[\]】]", value):
+            raise ValueError("PPT 名称不能包含控制字符或资料引用标记")
+        return value or None
 
     @model_validator(mode="after")
     def normalize_slide_count(self):
@@ -68,6 +82,7 @@ class AgentArtifactRequest(BaseModel):
         max_length=3,
     )
     ppt_preferences: PptPreferences | None = None
+    resume: bool = False
 
 
 class PptSlideRevisionRequest(BaseModel):
@@ -75,8 +90,22 @@ class PptSlideRevisionRequest(BaseModel):
     mode: Literal["content", "design", "both"] = "both"
 
 
+class PptImageRevisionRequest(BaseModel):
+    prompt: str = Field(min_length=10, max_length=1200)
+    expected_revision: str = Field(min_length=1, max_length=80)
+
+    @field_validator("prompt")
+    @classmethod
+    def nonempty_prompt(cls, value):
+        value = value.strip()
+        if len(value) < 10:
+            raise ValueError("请用至少 10 个字描述画面")
+        return value
+
+
 class PptVersionRestoreRequest(BaseModel):
     version_id: str = Field(min_length=1, max_length=80)
+    expected_revision: str | None = Field(default=None, max_length=80)
 
 
 class PresentationTemplateData(BaseModel):
@@ -108,6 +137,8 @@ class LessonPublishRequest(BaseModel):
     publish_discussions: bool = True
     discussion_indices: list[int] = Field(default_factory=list, max_length=20)
     confirmed: bool = False
+    expected_ppt_revision: str | None = Field(default=None, max_length=80)
+    allow_previous_ppt: bool = False
 
     @model_validator(mode="after")
     def validate_publication(self):
