@@ -28,9 +28,8 @@ cd backend
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cd presentation_runtime
-pnpm install
-cd ..
+# 启用课件生成时还需 LibreOffice、Poppler、中文字体，详见下方 PPT 运行时章节。
+python scripts/install_ppt_master.py
 cp .env.example .env
 # 已有 SQLite 数据库升级代码后，先执行迁移；新库也可以直接执行。
 PYTHONPATH=. alembic upgrade head
@@ -119,50 +118,63 @@ AI_ASR_MODEL=qwen3-asr-flash
 
 教师备课工作区采用“设置任务—构建证据—生成课纲—生成成果—预览发布”流程，每次只展示一个阶段，避免把任务、证据、课纲和成果挤在同一窗口。证据快照需要教师确认后才能生成课纲；课纲确认后可以生成可编辑的 PPTX、Word 教案和课堂活动设计。成果生成后仍保持草稿，只有教师在最后一步勾选确认，才会发布到指定教学班。
 
-PPTX 由公开可部署的 PptxGenJS 运行时生成，需要受支持的 Node.js 24+：
+PPT 使用单一的 **PPT Master SVG 工作流**：已确认课纲和证据 → 严格逐页方案 → 逐页 SVG 设计与有限修复 → 原生可编辑 PPTX → 最终文件渲染预览。已移除旧 PptxGenJS/自由画布导出链路，不在失败时偷偷切回旧引擎。
 
-```bash
-cd backend/presentation_runtime
-pnpm install --frozen-lockfile --prod
-```
-
-运行时依赖由 `backend/presentation_runtime/package.json` 和
-`pnpm-lock.yaml` 管理，当前固定为 `pptxgenjs@4.0.1`。非 Docker 部署时，必须在
-服务器的 `backend/presentation_runtime` 目录执行上面的安装命令，生成
-`node_modules` 后才能渲染 PPT；不要直接复制其他操作系统或其他 Node.js 环境的
-`node_modules`。网络受限时可以临时指定镜像，但仍须保留锁文件校验：
-
-```bash
-pnpm install --frozen-lockfile --prod \
-  --registry=https://registry.npmmirror.com
-```
-
-安装后在后端目录执行运行时检查：
+完整依赖由 `backend/presentation_runtime/ppt-master.lock.json` 锁定（MIT、版本 6.7.0、提交与完整目录哈希）。安装器保留上游完整分发及署名检查，不在请求期间下载或执行模型生成的程序。
 
 ```bash
 cd backend
+pip install -r requirements.txt
+# Ubuntu/Debian（仅安装依赖，不影响数据库）：
+sudo apt-get install libreoffice-impress poppler-utils fonts-noto-cjk
+python scripts/install_ppt_master.py
 PYTHONPATH=. python scripts/verify_presentation_runtime.py
 ```
 
-检查结果必须确认 Node.js、`render_pptx.mjs`、`pptxgenjs` 和教学成果目录均可用。
-Docker 部署会在镜像构建阶段自动安装并检查这些依赖，非 Docker 部署则需要将上述
-安装和验证步骤纳入每次发布流程。补装或更新 PPT 运行时依赖不会修改 MySQL、知识库
-或用户数据。
+GitHub 不通时，在可信机器下载锁文件指定提交的完整源码包，上传后离线安装：
 
-如果后端服务进程找不到 `node`，在 `backend/.env` 中配置绝对路径：
+```bash
+python scripts/install_ppt_master.py --archive /path/to/ppt-master-source.tgz
+```
+
+注意：`presentation_runtime/vendor/` 被 Git 忽略，单独上传 git archive **不会包含运行时**。发布前必须在目标环境按锁文件安装或使用经校验的离线包，再运行检查。Docker 镜像构建时自动完成安装；镜像应在本地/CI 构建，小规格生产服务器只接收产物。已有 node_modules 不再被新课件使用，不要为本次升级贸然删除其他服务依赖。
+
+课件继续使用当前文本模型配置，无需新增文本 API Key。6～30 页精确页数、教师确认发布、教材引用备注、Word 教案与课堂活动入口均保留。上传 PPTX 模板目前作为**配色风格参考**，并非原母版、字体或复杂布局的逐项复刻。
+
+新预览来自最终 PPTX 经 LibreOffice 渲染的 PNG，需登录并通过任务所有权校验后读取。系统检查内容覆盖、原生文字、页数、SVG 结构和非空渲染；这些不是视觉美观或教学事实的自动保证，仍需教师核验。失败时保留已成功成果和旧文件，不填空白页、不静默删要点。单页修改生成独立版本，最近 10 个带文件的版本可直接恢复；历史旧版继续下载，仅有 JSON 而无文件的快照不可恢复。
+
+图解标签必须在逐页方案的 `diagram_labels` 中声明，并逐字取自本页标题、结论或正文；设计阶段允许使用这些标签，不允许自行新增事实。图片默认使用圆角矩形原生裁剪；教师也可选圆形，此时采用方形图源并居中裁剪，图片与边框共用同一几何形状，避免矩形图片叠在圆形装饰框上。
+
+“继续生成未完成部分”会核对任务所有者、输入、证据、模型及提示词指纹，仅复用同一输入下已校验的页面和已下载插图，再重试缺失部分或导出；输入变化、首次升级前的旧草稿或没有可用检查点时会安全重建。主动“重新生成”仍创建新作业。检查点保存在任务私有产物目录，无需数据库迁移。前端分别展示课纲状态与本次成果状态，失败后保留的文件明确标为“上一版”，不把旧文件当作本次成功。
+
+运行配置：
 
 ```env
 GENERATED_ARTIFACT_DIRECTORY=../knowledge_base/generated_artifacts
-PRESENTATION_NODE_BINARY=/usr/bin/node
+PPT_MASTER_DIRECTORY=presentation_runtime/vendor/ppt-master
+PPT_OFFICE_BINARY=soffice
+# 若本地无系统 Noto 字体，可指定包含官方 NotoSansCJKsc-Regular.otf 的目录：
+# PPT_FONT_DIRECTORY=/absolute/path/to/fonts
+PPT_EXPORT_TIMEOUT_SECONDS=120
+PPT_PAGE_REPAIR_ATTEMPTS=2
+PPT_JOB_TIMEOUT_SECONDS=1800
 ```
 
-课纲、PPT 内容、教案和课堂活动共用现有 `LLM_API_KEY`；教材检索继续使用现有 Embedding 配置，不需要新增 API Key。PPT 可见页面不展示资料编号或“资料依据”，来源信息仅保留在演讲者备注和后台元数据中，供教师核验。
+小规格实例保持后端单 worker，进程内同一时间只处理一套 PPT，避免多个 LibreOffice/模型作业争抢内存；多进程/多实例部署需要外部队列。每页设计失败最多修复 2 次，整套作业 30 分钟预算；取消在阶段和页面边界生效，不强行中断已发送的模型请求。
 
-PPT 采用“教学内容策划 Agent + 视觉设计 Agent”二阶段生成。第一阶段形成逐页教学叙事，第二阶段根据本次专题提炼独有视觉母题、配色和自由画布坐标，再由 PptxGenJS 使用 PowerPoint 原生图形生成可编辑文件。固定版式仅在视觉设计结果校验失败时作为安全回退；程序仍会控制字数、边界和合法颜色，避免自由生成造成文件损坏。
+上线前还应运行 `PYTHONPATH=. python scripts/verify_presentation_runtime.py --render-smoke`，以临时公开合成内容实际完成中文 PPTX → PDF → PNG 检查；不调用付费模型、不写数据库，临时文件自动清理。仅检查工具安装不等于渲染链路已通过。正式切换流程见 [PPT 上线检查清单](docs/ppt-release-checklist.md)。
 
-教师还可以在生成前设置使用场景、视觉风格、内容密度、精确页数和课堂互动偏好。页数支持 6～30 页加减或直接输入，内容 Agent 与服务端会共同保证最终文件页数准确。系统在内容与视觉生成后继续执行质量审查，标记文字拥挤、内容遗漏、画布异常等问题；教师可只修改指定页面，或恢复最近 10 个 PPT 版本，不必每次整套重做。
+新版发布请求绑定 `expected_ppt_revision`；版本已变化时返回 409，必须重新核验。重生成失败后保留的上一版必须另行确认 `allow_previous_ppt`，补生成教案不会清除这项标记。原有无版本号的旧格式课件仍兼容发布；已发布课件使用独立副本，学生下载保留教师指定文件名。选择历史版本只是预览，不直接发布；需先设为当前版本。一个任务仍只允许向同一教学班发布一次，不静默覆盖已经发布给学生的内容。
 
-可选的阿里云百炼多模态能力会为 1～3 个适合视觉表达的正文页生成无文字辅助插图，并在模型调用后立即把临时图片下载到本地课件目录。标题页、总结页、政策文件原文页和政治人物肖像不参与自动配图；任何单页生成失败都会自动回退为 PowerPoint 原生图形，不阻断整套课件。配置示例：
+成果存储维护默认仅输出候选清单：`PYTHONPATH=. python scripts/maintain_ppt_artifacts.py --days 30`。只有先停止后端且不存在活动任务，才可传入 `--apply --offline`，把超过保留期且未被数据库引用的原生版本、非最新检查点移入 `.ppt-quarantine/<批次号>`。当前版本、历史引用、发布副本、旧格式文件、公共配图及最新检查点均不清理；符号链接和损坏检查点保守跳过。可用 `--restore <批次号> --offline` 恢复，拒绝覆盖原路径。不自动执行、不永久删除；**同盘隔离不会立即释放磁盘空间**，确认备份与保留期后再由管理员另行处理隔离区。
+
+课件风格先从教学专题提炼关键词、视觉意象与配色缘由，再统一整套图文画风，不把“现代课堂蓝”当作通用默认风格。每页先声明 `visual_brief`：教学意图、逐字来自正文的概念依据、插图/图解/文字的选择。流程、分类与抽象关系优先使用可编辑图解，具体情境使用插图，并列出必需可见元素与区别于其他图的场景。按页数设定最多 1～3 张插图的预算（6 页最多 2 张），不是必须用满的配额。
+
+配图只填充已校验且不遮挡正文的槽位。默认复用已配置的 `vision` 能力对生成图做教学语义复核；明确不符合时不嵌入，保留文字课件并提示原因。不配置视觉能力、复核异常或关闭复核时显示“待教师核验”，不冒称通过。复核属于模型辅助判断，不能证明理论、历史事实或素材授权正确。插图和裁剪边框分别由图像模型与应用负责，避免把图片容器画进图源。
+
+教师在逐页预览的“配图设置”中可查看实际发送的提示词、编辑场景描述并仅重生成一张图。这是后台异步任务，原课件保留至新图及成品验证成功，再创建可恢复的新版本；正文、SVG 版式与其他图片不变。旧版本冲突、取消、服务重启或出图失败不会覆盖原文件。此入口只处理已有插图槽位，不把图解自动改为插画。
+
+不配置或配图失败时显示明确提示，导出时移除未填充空槽，保留同一 SVG 工作流。已生成图片进入私有检查点；部分配图失败后可仅补未完成插图，不重复请求已经成功的图片。配置示例：
 
 ```env
 PPT_MULTIMODAL_ENABLED=true
@@ -172,6 +184,7 @@ PPT_MULTIMODAL_BASE_URL=https://dashscope.aliyuncs.com/api/v1
 PPT_MULTIMODAL_MODEL=wan2.7-image-pro
 PPT_MULTIMODAL_MAX_IMAGES=3
 PPT_MULTIMODAL_TIMEOUT_SECONDS=180
+PPT_IMAGE_REVIEW_ENABLED=true
 ```
 
 最后一步支持一次确认后同时发布 PPT 和选定课堂讨论。PPT 会复制到独立发布目录，学生可从课堂互动页下载；讨论会成为该教学班的课堂活动。发布接口不会被 Agent 自动调用，重复向同一教学班发布同一个备课任务会被拒绝。

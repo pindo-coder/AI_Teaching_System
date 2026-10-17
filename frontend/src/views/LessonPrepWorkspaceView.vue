@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch, type CSSProperties } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -9,23 +9,35 @@ import {
   type LessonPublication,
   type PptPreferences,
   type PresentationTemplate,
+  type PptVersion,
+  type PptVersionPreview,
+  type AgentArtifact,
 } from '@/api/agents'
 import { courseApi } from '@/api/courses'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import EvidenceCard from '@/components/ui/EvidenceCard.vue'
+import PptSlidePreview from '@/components/PptSlidePreview.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiEmptyState from '@/components/ui/UiEmptyState.vue'
 import type { Course, CourseDetail, LearningStage } from '@/types'
 import { formatBeijingDateTime } from '@/utils/time'
+import { lessonArtifactProgress } from '@/utils/lessonArtifactProgress'
+import { createAgentRunMonitor } from '@/utils/agentRunMonitor'
+import { pptPublicationState } from '@/utils/lessonPublication'
 import logoUrl from '@/assets/logo1.svg'
 import progressBackgroundUrl from '@/assets/lesson-prep-progress-bg.png'
 import contextBackgroundUrl from '@/assets/lesson-prep-context-bg.png'
+import designBriefBackgroundUrl from '@/assets/challenge-cup-topbar.png'
 
 const router = useRouter()
 const route = useRoute()
 const loading = ref(true)
 const acting = ref(false)
+const submittingArtifacts = ref(false)
+const progressNow = ref(Date.now())
+const progressSyncWarning = ref('')
+let progressClock: ReturnType<typeof setInterval> | undefined
 const courses = ref<Course[]>([])
 const course = ref<CourseDetail | null>(null)
 const selectedCourseId = ref<number>()
@@ -51,6 +63,7 @@ const publishPpt = ref(true)
 const publishDiscussions = ref(true)
 const selectedDiscussionIndices = ref<number[]>([])
 const publicationConfirmed = ref(false)
+const previousPptConfirmed = ref(false)
 const artifactTypes = ref<Array<'lesson_plan' | 'ppt' | 'classroom_activities'>>([
   'ppt',
   'lesson_plan',
@@ -58,6 +71,7 @@ const artifactTypes = ref<Array<'lesson_plan' | 'ppt' | 'classroom_activities'>>
 ])
 const artifactPreview = ref<'ppt' | 'lesson_plan' | 'classroom_activities'>('ppt')
 const pptPreferences = ref<PptPreferences>({
+  title: '',
   scenario: 'classroom',
   visual_style: 'modern',
   content_density: 'standard',
@@ -67,6 +81,7 @@ const pptPreferences = ref<PptPreferences>({
   include_interaction: true,
   // 已配置百炼多模态时默认生成少量语义插图；教师仍可取消以控制额度。
   include_visuals: true,
+  image_frame_shape: 'roundRect',
   template_id: null,
 })
 const pptTemplates = ref<PresentationTemplate[]>([])
@@ -79,7 +94,19 @@ const revisingSlideIndex = ref(0)
 const revisionInstruction = ref('')
 const revisionMode = ref<'content' | 'design' | 'both'>('both')
 const selectedVersionId = ref('')
+const versionPreview = ref<PptVersionPreview | null>(null)
+const versionLoading = ref(false)
+const versionError = ref('')
+let versionRequest = 0
+let versionController: AbortController | undefined
+const versionCache = new Map<string, PptVersionPreview>()
 const hydratingRun = ref(false)
+const imageDialogVisible = ref(false)
+const imageSlideIndex = ref(0)
+const imagePrompt = ref('')
+const imageRevision = ref('')
+const imagePage = computed(() => artifactBundle.value?.ppt?.slides[imageSlideIndex.value])
+const imageJob = computed(() => currentRun.value?.output_data.ppt_image_job)
 
 const steps = ['设置任务', '构建证据', '生成课纲', '生成成果', '预览发布']
 const learningStageOptions: Array<{ value: LearningStage; label: string }> = [
@@ -94,7 +121,53 @@ const outline = computed(() => currentRun.value?.output_data.outline)
 const artifactBundle = computed(() => currentRun.value?.output_data.artifact_bundle)
 const artifacts = computed(() => currentRun.value?.output_data.artifacts || {})
 const pptVersions = computed(() => currentRun.value?.output_data.ppt_versions || [])
-const pptQuality = computed(() => artifactBundle.value?.ppt?.quality_report)
+const historyVersions = computed(() => [...pptVersions.value].reverse().filter(item => !item.is_current))
+const isBrowsingHistory = computed(() => Boolean(selectedVersionId.value))
+const displayedPpt = computed(() => isBrowsingHistory.value ? versionPreview.value?.ppt : artifactBundle.value?.ppt)
+const displayedArtifacts = computed(() => {
+  const result: Record<string, AgentArtifact> = { ...artifacts.value }
+  if (isBrowsingHistory.value) {
+    delete result.ppt
+    if (versionPreview.value) result.ppt = {
+      kind: 'ppt', title: versionPreview.value.ppt.title, file_name: '', media_type: '',
+      ...versionPreview.value.artifact, slide_count: versionPreview.value.ppt.slides.length,
+    }
+  }
+  return result
+})
+const pptQuality = computed(() => displayedPpt.value?.quality_report)
+const canRestoreVersion = computed(() => Boolean(isBrowsingHistory.value && !versionLoading.value
+  && versionPreview.value?.version_id === selectedVersionId.value && versionPreview.value.restorable
+  && !acting.value && !isExecuting.value))
+function versionLabel(item: PptVersion) {
+  return `${formatBeijingDateTime(item.generated_time || item.created_time)} · ${item.slide_count} 页 · ${item.title || '教学 PPT'}`
+}
+function versionReason(item: PptVersion) {
+  return /^恢复版本.*前$/.test(item.reason) ? '切换版本前自动保存' : item.reason
+}
+const artifactAttempt = computed(() => currentRun.value?.output_data.artifact_attempt)
+const artifactGenerationProgress = computed(() => lessonArtifactProgress(currentRun.value, {
+  submitting: submittingArtifacts.value, now: progressNow.value,
+}))
+function isHistoricalArtifact(key: string) {
+  if (!artifacts.value[key]) return false
+  if (typeof artifacts.value[key]?.requires_previous_confirmation === 'boolean') return artifacts.value[key]!.requires_previous_confirmation
+  const attempt = artifactAttempt.value
+  if (attempt?.requested_types?.includes(key) && ['queued', 'running', 'failed'].includes(attempt.status)) return artifacts.value[key]?.attempt_id !== attempt.id
+  return Boolean(currentRun.value?.output_data.artifact_errors?.[key as ArtifactKey])
+}
+const pptProgress = computed(() => {
+  if (isExecuting.value && imageJob.value && ['queued', 'running'].includes(imageJob.value.status)) return `正在更新第 ${imageJob.value.slide_index + 1} 页配图，原课件保留至新图验证完成`
+  if (!isExecuting.value && !failedArtifactStep.value) return ''
+  const value = currentRun.value?.steps.find(step => step.step_key === 'generate_artifacts')?.output_data.ppt_workflow as
+    { stage: string; completed_pages: number; total_pages: number; resume?: { requested?: boolean; resumed?: boolean; reused_pages?: number; reused_images?: number; pending_images?: number; generated_images?: number } } | undefined
+  if (!value) return ''
+  const labels: Record<string, string> = { waiting_slot: '等待课件生成资源', planning: '编排逐页教学内容', designing: '设计课件页面', illustrating: '准备辅助插图', exporting: '导出与渲染成品', completed: '成品检查完成' }
+  const reused = value.resume?.reused_pages || 0
+  if (value.stage === 'planning' && value.resume?.requested && !value.resume.resumed) return '没有匹配当前输入和版本的检查点，正在安全重建'
+  if (value.stage === 'illustrating' && value.resume?.resumed && reused === value.total_pages) return `页面设计全部复用 · 已有 ${value.resume.reused_images || 0} 张插图 · 已补 ${value.resume.generated_images || 0} 张 · 待补 ${value.resume.pending_images ?? '—'} 张`
+  return `${!isExecuting.value ? '本次停在：' : ''}${labels[value.stage] || '正在生成'}${value.total_pages ? ` · ${value.completed_pages}/${value.total_pages} 页` : ''}${reused ? `（已复用 ${reused} 页）` : ''}`
+})
 const isExecuting = computed(() => ['queued', 'running'].includes(currentRun.value?.status || ''))
 const canStart = computed(() => Boolean(selectedCourseId.value && selectedChapterId.value) && !isExecuting.value)
 const eligibleTeachingClasses = computed(() => teachingClasses.value.filter(
@@ -119,14 +192,26 @@ const failedArtifactStep = computed(() => currentRun.value?.steps.find(
 const requestedArtifactKeys = computed(() => artifactKeys(currentRun.value?.input_data.artifact_output_types))
 const artifactStatusRows = computed(() => {
   const keys = [...new Set([...requestedArtifactKeys.value, ...artifactKeys(Object.keys(artifacts.value))])]
-  return keys.map((key) => ({ key, label: artifactLabels[key], ready: Boolean(artifacts.value[key]) }))
+  return keys.map((key) => ({ key, label: artifactLabels[key], ready: Boolean(artifacts.value[key]) && !isHistoricalArtifact(key), historical: isHistoricalArtifact(key) }))
 })
-const incompleteArtifactKeys = computed(() => artifactStatusRows.value.filter((item) => !item.ready).map((item) => item.key))
+const incompleteArtifactKeys = computed(() => [...new Set([
+  ...artifactStatusRows.value.filter((item) => !item.ready).map((item) => item.key),
+  ...artifactKeys(Object.keys(currentRun.value?.output_data.artifact_errors || {})),
+  ...(failedArtifactStep.value ? requestedArtifactKeys.value : []),
+])])
+const publicationPpt = computed(() => pptPublicationState(currentRun.value))
 const canPublish = computed(() => Boolean(
   currentRun.value
+  && currentRun.value.status === 'completed' && currentRun.value.current_step >= 3
+  && !acting.value
+  && !isExecuting.value
+  && !isBrowsingHistory.value
   && selectedTeachingClassId.value
   && publicationConfirmed.value
-  && ((publishPpt.value && artifacts.value.ppt) || (publishDiscussions.value && classroomActivities.value.length)),
+  && publishTitle.value.trim().length >= 2
+  && (!publishPpt.value || (publicationPpt.value.valid && (!publicationPpt.value.previous || previousPptConfirmed.value)))
+  && (!publishDiscussions.value || (classroomActivities.value.length && selectedDiscussionIndices.value.length))
+  && (publishPpt.value || publishDiscussions.value),
 ))
 const maxAvailableStage = computed(() => {
   if (!currentRun.value) return 1
@@ -136,6 +221,9 @@ const maxAvailableStage = computed(() => {
   return 1
 })
 const runStatus = computed(() => {
+  if (imageJob.value?.status === 'failed') return '配图更新失败，已保留原课件'
+  if (failedArtifactStep.value || artifactAttempt.value?.status === 'failed') return '课纲已完成，本次成果生成失败'
+  if (artifactAttempt.value?.status === 'partial') return '课件已生成，部分成果或插图未完成'
   if (currentRun.value?.status === 'completed' && currentRun.value.current_step >= 3) {
     return '教学成果已生成'
   }
@@ -150,64 +238,13 @@ const runStatus = computed(() => {
   return labels[currentRun.value?.status || ''] || '尚未开始'
 })
 const runStatusType = computed(() => {
+  if (imageJob.value?.status === 'failed') return 'warning'
+  if (failedArtifactStep.value || artifactAttempt.value?.status === 'partial' || artifactAttempt.value?.status === 'failed') return 'warning'
   if (currentRun.value?.status === 'failed') return 'danger'
   if (currentRun.value?.status === 'completed') return 'success'
   if (currentRun.value?.status === 'waiting_confirmation') return 'warning'
   return 'info'
 })
-
-type ArtifactPpt = NonNullable<NonNullable<AgentRun['output_data']['artifact_bundle']>['ppt']>
-type PptSlide = ArtifactPpt['slides'][number]
-type CanvasElement = NonNullable<PptSlide['canvas']>[number]
-
-function canvasSource(slide: PptSlide, source: string, index: number) {
-  if (source === 'title') return slide.title
-  if (source === 'takeaway') return slide.takeaway
-  if (source === 'keyword') return slide.keyword || ''
-  if (source === 'page_number') return String(index + 1).padStart(2, '0')
-  let match = source.match(/^bullet:(\d+)$/)
-  if (match) return slide.bullets[Number(match[1])] || ''
-  match = source.match(/^(left|right)\.title$/)
-  if (match) return slide[match[1] as 'left' | 'right']?.title || ''
-  match = source.match(/^(left|right)\.point:(\d+)$/)
-  if (match) return slide[match[1] as 'left' | 'right']?.points[Number(match[2])] || ''
-  match = source.match(/^step:(\d+)\.(title|description)$/)
-  if (match) return slide.steps?.[Number(match[1])]?.[match[2] as 'title' | 'description'] || ''
-  match = source.match(/^timeline:(\d+)\.(label|title)$/)
-  if (match) return slide.timeline?.[Number(match[1])]?.[match[2] as 'label' | 'title'] || ''
-  return ''
-}
-
-function canvasElementStyle(element: CanvasElement, ppt: ArtifactPpt): CSSProperties {
-  const palette = ppt.design?.palette || {}
-  const fontSizes: Record<string, string> = {
-    hero: 'clamp(15px, 2.35vw, 30px)',
-    title: 'clamp(13px, 1.65vw, 23px)',
-    subtitle: 'clamp(11px, 1.2vw, 18px)',
-    body: 'clamp(9px, .92vw, 14px)',
-    label: 'clamp(8px, .72vw, 11px)',
-    number: 'clamp(17px, 2.25vw, 31px)',
-    quote: 'clamp(13px, 1.45vw, 21px)',
-  }
-  return {
-    left: `${element.x}%`,
-    top: `${element.y}%`,
-    width: `${element.w}%`,
-    height: `${element.h}%`,
-    color: `#${palette[element.color] || '172033'}`,
-    backgroundColor: element.fill ? `#${palette[element.fill] || 'FFFFFF'}` : undefined,
-    borderColor: element.type !== 'text' ? `#${palette[element.color] || '172033'}` : undefined,
-    borderRadius: element.shape === 'ellipse' ? '50%' : element.shape === 'roundRect' ? '12px' : undefined,
-    fontSize: fontSizes[element.style],
-    fontWeight: element.bold ? '700' : undefined,
-    textAlign: element.align,
-  }
-}
-
-function canvasBackground(slide: PptSlide, ppt: ArtifactPpt) {
-  const role = slide.canvas_background || 'background'
-  return `#${ppt.design?.palette?.[role] || 'F7F4EE'}`
-}
 
 async function loadCourse(courseId: number, preferredChapterId?: number | null) {
   const response = await courseApi.detail(courseId)
@@ -220,6 +257,7 @@ async function loadCourse(courseId: number, preferredChapterId?: number | null) 
 function resetRun() {
   if (isExecuting.value) return
   currentRun.value = null
+  pptPreferences.value.title = ''
   activeStage.value = 1
   publishedResult.value = null
 }
@@ -239,13 +277,12 @@ async function applyRun(run: AgentRun) {
     completionCondition.value = String(run.input_data.completion_condition || '教材阅读')
     teachingGoal.value = String(run.input_data.teaching_goal || '')
     if (run.input_data.ppt_preferences) {
-      pptPreferences.value = { ...pptPreferences.value, ...(run.input_data.ppt_preferences as Partial<PptPreferences>) }
+      const savedPreferences = run.input_data.ppt_preferences as Partial<PptPreferences>
+      pptPreferences.value = { ...pptPreferences.value, ...savedPreferences, title: savedPreferences.title || '' }
       setSlideCount(pptPreferences.value.slide_count || pptPreferences.value.min_slides || 10)
-    }
-    if (Object.keys(run.output_data.artifacts || {}).length) activeStage.value = 4
-    else if (run.output_data.outline) activeStage.value = 3
-    else if (run.evidence_snapshot.length) activeStage.value = 2
-    else activeStage.value = 1
+    } else pptPreferences.value.title = ''
+    syncArtifactInput(run)
+    syncRunStage(run)
     if (['queued', 'running'].includes(run.status)) void listenToRun(run.id)
   } finally {
     hydratingRun.value = false
@@ -291,25 +328,51 @@ function changeLessonHours(delta: number) {
   lessonHours.value = Math.max(1, Math.min(8, lessonHours.value + delta))
 }
 
-async function listenToRun(id: number) {
-  try {
-    await agentApi.stream(id, {
-      onSnapshot: (run) => {
-        currentRun.value = run
-        if (run.output_data.artifacts && Object.keys(run.output_data.artifacts).length) activeStage.value = 4
-        else if (run.output_data.outline) activeStage.value = 3
-      },
-      onDone: async () => {
-        const response = await agentApi.detail(id)
-        currentRun.value = response.data.data
-        if (Object.keys(response.data.data.output_data.artifacts || {}).length) activeStage.value = 4
-        else if (response.data.data.output_data.outline) activeStage.value = 3
-      },
-    })
-  } catch {
-    const response = await agentApi.detail(id)
-    currentRun.value = response.data.data
+function syncArtifactInput(run: AgentRun) {
+  if (run.current_step < 3) return
+  const actual = run.input_data.ppt_preferences as Partial<PptPreferences> | undefined
+  if (actual) {
+    pptPreferences.value = { ...pptPreferences.value, ...actual, title: actual.title || '' }
+    setSlideCount(actual.slide_count || actual.min_slides || 10)
   }
+  const requested = artifactKeys(run.input_data.artifact_output_types)
+  if (requested.length) artifactTypes.value = requested
+}
+
+const progressMonitor = createAgentRunMonitor<AgentRun>({
+  fetchRun: async (id, signal) => (await agentApi.detail(id, signal)).data.data,
+  stream: (id, handlers, signal) => agentApi.stream(id, handlers, signal),
+  onSnapshot: (run) => {
+    if (currentRun.value?.id !== run.id) return
+    const previous = currentRun.value
+    const phaseChanged = previous.status !== run.status || previous.current_step !== run.current_step
+      || previous.output_data.ppt_image_job?.status !== run.output_data.ppt_image_job?.status
+    progressSyncWarning.value = ''
+    currentRun.value = run
+    syncArtifactInput(run)
+    // Polling identical state must not pull a teacher out of a page they are
+    // reviewing. Only a task phase/terminal transition changes the active tab.
+    if (phaseChanged) syncRunStage(run)
+  },
+  onError: (_error, fatal) => {
+    progressSyncWarning.value = fatal ? '无法同步当前任务，请检查登录状态或重新打开任务。'
+      : '进度同步暂时中断，正在自动恢复；后台任务不受影响。'
+  },
+})
+function syncRunStage(run: AgentRun) {
+  const executing = ['queued', 'running'].includes(run.status)
+  if (run.output_data.ppt_image_job && ['queued', 'running'].includes(run.output_data.ppt_image_job.status)) activeStage.value = 5
+  else if (!executing && Object.keys(run.output_data.artifacts || {}).length) activeStage.value = 5
+  else if (run.current_step >= 3) activeStage.value = 4
+  else if (run.output_data.outline) activeStage.value = 3
+  else if (run.evidence_snapshot.length) activeStage.value = 2
+  else activeStage.value = 1
+}
+function listenToRun(id: number) {
+  progressMonitor.start(id)
+}
+function refreshVisibleProgress() {
+  if (!document.hidden) progressMonitor.refresh()
 }
 
 async function startAgent() {
@@ -369,24 +432,30 @@ async function generateArtifacts() {
     ElMessage.warning('请至少选择一种教学成果')
     return
   }
+  setSlideCount(pptPreferences.value.slide_count)
+  const selectedTypes = [...artifactTypes.value]
+  const selectedPreferences = { ...pptPreferences.value, title: pptPreferences.value.title?.trim() || null }
+  const requestSummary = selectedTypes.map(key => key === 'ppt'
+    ? `教学 PPT${selectedPreferences.title ? `《${selectedPreferences.title}》` : ''}（${selectedPreferences.slide_count} 页）` : artifactLabels[key]).join('、')
   await ElMessageBox.confirm(
-    '将根据当前已确认课纲生成教学成果草稿。生成后仍需教师预览核验，不会自动发布。',
+    `将根据当前已确认课纲生成：${requestSummary}。生成后仍需教师预览核验，不会自动发布。`,
     '生成教学成果',
     { confirmButtonText: '开始后台生成', cancelButtonText: '取消', type: 'warning' },
   )
   acting.value = true
+  submittingArtifacts.value = true
   try {
-    setSlideCount(pptPreferences.value.slide_count)
     const response = await agentApi.generateArtifacts(
       currentRun.value.id,
-      artifactTypes.value,
-      pptPreferences.value,
+      selectedTypes,
+      selectedPreferences,
     )
     currentRun.value = response.data.data
     activeStage.value = 4
     ElMessage.success('教学成果已进入后台生成，可以离开本页面')
     void listenToRun(currentRun.value.id)
   } finally {
+    submittingArtifacts.value = false
     acting.value = false
   }
 }
@@ -394,19 +463,22 @@ async function generateArtifacts() {
 async function retryArtifact(key: ArtifactKey) {
   if (!currentRun.value || isExecuting.value) return
   acting.value = true
+  submittingArtifacts.value = true
   try {
     const response = await agentApi.generateArtifacts(
       currentRun.value.id,
       [key],
       key === 'ppt' ? pptPreferences.value : undefined,
+      key === 'ppt',
     )
     currentRun.value = response.data.data
     activeStage.value = 4
-    ElMessage.success(`${artifactLabels[key]}已重新进入后台生成`)
+    ElMessage.success(key === 'ppt' ? '已继续生成未完成部分；输入变化时会安全重建' : `${artifactLabels[key]}已重新进入后台生成`)
     void listenToRun(currentRun.value.id)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : `${artifactLabels[key]}重试失败，请稍后重试`)
   } finally {
+    submittingArtifacts.value = false
     acting.value = false
   }
 }
@@ -419,6 +491,7 @@ function preparePublication() {
   publishPpt.value = Boolean(artifacts.value.ppt)
   publishDiscussions.value = Boolean(classroomActivities.value.length)
   publicationConfirmed.value = false
+  previousPptConfirmed.value = false
   activeStage.value = 5
 }
 
@@ -431,24 +504,39 @@ async function publishLesson() {
     ElMessage.warning('请选择发布内容并完成最终确认')
     return
   }
-  await ElMessageBox.confirm(
-    '发布后，学生可下载课件，所选讨论会直接出现在课堂互动中。是否继续？',
+  // Bind the confirmation dialog to a snapshot, not reactive state that can
+  // change while the teacher is deciding in another tab or during polling.
+  const runId = currentRun.value.id
+  const payload = {
+    teaching_class_id: selectedTeachingClassId.value,
+    title: publishTitle.value.trim(),
+    description: publishDescription.value.trim(),
+    publish_ppt: publishPpt.value,
+    publish_discussions: publishDiscussions.value,
+    discussion_indices: publishDiscussions.value ? [...selectedDiscussionIndices.value] : [],
+    confirmed: true,
+    expected_ppt_revision: publishPpt.value ? publicationPpt.value.revision : undefined,
+    allow_previous_ppt: publishPpt.value && publicationPpt.value.previous && previousPptConfirmed.value,
+  }
+  const confirmed = await ElMessageBox.confirm(
+    `${payload.allow_previous_ppt ? '本次将发布保留的上一版 PPT。' : ''}发布后，学生可下载课件，所选讨论会直接出现在课堂互动中。是否继续？`,
     '确认发布教学成果',
     { confirmButtonText: '确认发布', cancelButtonText: '返回核验', type: 'warning' },
-  )
+  ).then(() => true, () => false)
+  if (!confirmed) return
+  if (!canPublish.value || currentRun.value?.id !== runId) {
+    ElMessage.warning('待发布内容已变化，请重新核验并确认')
+    return
+  }
   acting.value = true
   try {
-    const response = await agentApi.publish(currentRun.value.id, {
-      teaching_class_id: selectedTeachingClassId.value,
-      title: publishTitle.value.trim(),
-      description: publishDescription.value.trim(),
-      publish_ppt: publishPpt.value,
-      publish_discussions: publishDiscussions.value,
-      discussion_indices: publishDiscussions.value ? selectedDiscussionIndices.value : [],
-      confirmed: true,
-    })
+    const response = await agentApi.publish(runId, payload)
     publishedResult.value = response.data.data
     ElMessage.success('教学成果已发布，学生端可以访问')
+  } catch (error) {
+    publicationConfirmed.value = false
+    previousPptConfirmed.value = false
+    ElMessage.error(versionFailure(error, '发布失败，课件已保留，请重新核验后重试'))
   } finally {
     acting.value = false
   }
@@ -488,13 +576,40 @@ async function uploadPptTemplate() {
 }
 
 function openSlideRevision(index: number) {
+  if (isBrowsingHistory.value) return
   revisingSlideIndex.value = index
   revisionInstruction.value = ''
   revisionMode.value = 'both'
   slideRevisionVisible.value = true
 }
 
+function openImageRevision(index: number) {
+  if (isBrowsingHistory.value) return
+  imageSlideIndex.value = index
+  imagePrompt.value = artifactBundle.value?.ppt?.slides[index]?.visual_prompt || ''
+  imageRevision.value = artifactBundle.value?.ppt?.revision_id || ''
+  imageDialogVisible.value = true
+}
+
+async function replaceImage() {
+  if (isBrowsingHistory.value) return
+  if (!currentRun.value || imagePrompt.value.trim().length < 10) {
+    ElMessage.warning('请用至少 10 个字描述需要的画面')
+    return
+  }
+  acting.value = true
+  try {
+    const response = await agentApi.replacePptImage(currentRun.value.id, imageSlideIndex.value,
+      imagePrompt.value.trim(), imageRevision.value)
+    currentRun.value = response.data.data
+    imageDialogVisible.value = false
+    ElMessage.success('仅更新这一张配图，文字、版式和其他图片保持不变')
+    void listenToRun(currentRun.value.id)
+  } finally { acting.value = false }
+}
+
 async function reviseSlide() {
+  if (isBrowsingHistory.value) return
   if (!currentRun.value || !revisionInstruction.value.trim()) {
     ElMessage.warning('请说明希望如何修改本页')
     return
@@ -515,19 +630,74 @@ async function reviseSlide() {
   }
 }
 
-async function restorePptVersion() {
+function versionFailure(error: unknown, fallback: string) {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof detail === 'string' ? detail : fallback
+}
+
+async function loadVersionPreview() {
+  const request = ++versionRequest
+  versionController?.abort()
+  versionPreview.value = null
+  versionError.value = ''
+  versionLoading.value = false
   if (!currentRun.value || !selectedVersionId.value) return
-  await ElMessageBox.confirm('恢复后当前版本也会自动保存，可以再次切换回来。', '恢复 PPT 版本', {
-    confirmButtonText: '确认恢复',
-    cancelButtonText: '取消',
-    type: 'warning',
-  })
+  const runId = currentRun.value.id
+  const versionId = selectedVersionId.value
+  artifactPreview.value = 'ppt'
+  const cacheKey = `${runId}:${versionId}`
+  if (versionCache.has(cacheKey)) {
+    versionPreview.value = versionCache.get(cacheKey)!
+    return
+  }
+  versionController = new AbortController()
+  versionLoading.value = true
+  try {
+    const response = await agentApi.previewPptVersion(runId, versionId, versionController.signal)
+    if (request !== versionRequest) return
+    versionPreview.value = response.data.data
+    versionCache.set(cacheKey, response.data.data)
+    if (versionCache.size > 10) versionCache.delete(versionCache.keys().next().value!)
+  } catch (error) {
+    if (request === versionRequest) versionError.value = versionFailure(error, '历史版本读取失败，请重试；当前版本未被修改')
+  } finally {
+    if (request === versionRequest) versionLoading.value = false
+  }
+}
+
+async function restorePptVersion() {
+  if (!currentRun.value || !canRestoreVersion.value || !versionPreview.value) return
+  const runId = currentRun.value.id
+  const versionId = selectedVersionId.value
+  const revision = artifactBundle.value?.ppt?.revision_id || ''
+  const label = versionLabel(versionPreview.value)
+  try {
+    await ElMessageBox.confirm(`将“${label}”设为当前课件，后续修改、下载和发布均使用此版本。原课件会自动保留在历史版本中。`, '设为当前版本', {
+      confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'warning',
+    })
+  } catch { return }
+  if (currentRun.value?.id !== runId || selectedVersionId.value !== versionId || !canRestoreVersion.value) return
   acting.value = true
   try {
-    const response = await agentApi.restorePptVersion(currentRun.value.id, selectedVersionId.value)
+    const response = await agentApi.restorePptVersion(runId, versionId, revision)
+    if (currentRun.value?.id !== runId) return
     currentRun.value = response.data.data
     selectedVersionId.value = ''
-    ElMessage.success('PPT 版本已恢复')
+    publicationConfirmed.value = false
+    publishedResult.value = null
+    versionCache.clear()
+    ElMessage.success('已设为当前版本，原课件已保留，可随时切回')
+  } catch (error) {
+    ElMessage.error(versionFailure(error, '版本切换失败，当前课件保持不变，请重试'))
+    // Refresh metadata after a concurrent edit or a missing-file error. Do not
+    // silently retry a write against the newly fetched version.
+    try {
+      const refreshed = (await agentApi.detail(runId)).data.data
+      if (currentRun.value?.id !== runId) return
+      currentRun.value = refreshed
+    } catch { /* keep the known state */ }
+    versionCache.clear()
+    void loadVersionPreview()
   } finally {
     acting.value = false
   }
@@ -535,15 +705,20 @@ async function restorePptVersion() {
 
 async function downloadArtifact(key: string) {
   if (!currentRun.value) return
-  const artifact = artifacts.value[key]
+  const artifact = displayedArtifacts.value[key]
   if (!artifact) return
-  const response = await agentApi.downloadArtifact(currentRun.value.id, key)
-  const url = URL.createObjectURL(response.data)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = artifact.file_name
-  link.click()
-  URL.revokeObjectURL(url)
+  if (key === 'ppt' && isBrowsingHistory.value && !versionPreview.value?.restorable) return
+  try {
+    const response = await agentApi.downloadArtifact(currentRun.value.id, key,
+      key === 'ppt' && isBrowsingHistory.value ? selectedVersionId.value : undefined,
+      key === 'ppt' && !isBrowsingHistory.value ? artifactBundle.value?.ppt?.revision_id || '' : undefined)
+    const url = URL.createObjectURL(response.data)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = artifact.file_name
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  } catch { ElMessage.error('下载失败，文件可能已变化，请刷新后重试') }
 }
 
 async function cancelRun() {
@@ -612,8 +787,42 @@ watch(artifacts, (value) => {
   const keys = Object.keys(value) as Array<'ppt' | 'lesson_plan' | 'classroom_activities'>
   if (keys.length && !keys.includes(artifactPreview.value)) artifactPreview.value = keys[0]
 })
+watch([
+  () => currentRun.value?.id, () => publicationPpt.value.revision,
+  () => publicationPpt.value.previous, () => currentRun.value?.output_data.artifact_attempt?.id,
+  selectedTeachingClassId, publishPpt, publishDiscussions,
+  () => selectedDiscussionIndices.value.join(','), publishTitle, publishDescription,
+], () => {
+  publicationConfirmed.value = false
+  previousPptConfirmed.value = false
+}, { flush: 'sync' })
 watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 10))
 watch(() => route.query.run_id, () => { void openRunFromRoute() })
+watch(selectedVersionId, () => { void loadVersionPreview() })
+watch(() => currentRun.value?.id, () => {
+  selectedVersionId.value = ''
+  versionCache.clear()
+  void loadVersionPreview()
+})
+watch(() => [currentRun.value?.id, currentRun.value?.status] as const, ([id, status]) => {
+  if (id && status && ['queued', 'running'].includes(status)) listenToRun(id)
+  else progressMonitor.stop()
+  progressSyncWarning.value = ''
+}, { flush: 'sync' })
+onMounted(() => {
+  document.addEventListener('visibilitychange', refreshVisibleProgress)
+  window.addEventListener('online', refreshVisibleProgress)
+  progressClock = setInterval(() => {
+    if (isExecuting.value || submittingArtifacts.value) progressNow.value = Date.now()
+  }, 1000)
+})
+onBeforeUnmount(() => {
+  progressMonitor.stop()
+  document.removeEventListener('visibilitychange', refreshVisibleProgress)
+  window.removeEventListener('online', refreshVisibleProgress)
+  versionRequest++; versionController?.abort(); versionCache.clear()
+  if (progressClock) clearInterval(progressClock)
+})
 </script>
 
 <template>
@@ -629,6 +838,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
       </div>
       <div class="prep-page-actions">
         <StatusChip :label="runStatus" :status="runStatusType" />
+        <span v-if="pptProgress" role="status">{{ pptProgress }}</span>
         <el-button @click="router.push('/courses')">查看教材专题</el-button>
         <el-button @click="router.push('/knowledge')">管理资料</el-button>
       </div>
@@ -833,7 +1043,6 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
           </div>
           <section v-else class="artifact-builder">
             <h4>生成教学成果</h4>
-            <p>选择需要的成果类型。系统会继续使用当前证据快照，不会重新引入未确认资料。</p>
             <el-checkbox-group v-model="artifactTypes" :disabled="isExecuting">
               <el-checkbox-button value="ppt">教学 PPT</el-checkbox-button>
               <el-checkbox-button value="lesson_plan">完整教案</el-checkbox-button>
@@ -854,7 +1063,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                   :loading="acting"
                   @click="retryArtifact(key)"
                 >
-                  重试{{ artifactLabels[key] }}
+                  {{ key === 'ppt' ? '继续生成未完成部分' : `重试${artifactLabels[key]}` }}
                 </el-button>
               </div>
             </section>
@@ -862,11 +1071,15 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
               <div class="preference-heading">
                 <div>
                   <strong>PPT 生成偏好</strong>
-                  <p>这些条件交给内容策划与视觉设计 Agent，不是切换固定模板。</p>
                 </div>
                 <el-button plain @click="templateDialogVisible = true">上传模板</el-button>
               </div>
               <div class="preference-grid">
+                <el-form-item label="PPT 名称" class="ppt-title-field">
+                  <el-input :model-value="pptPreferences.title || ''" @update:model-value="pptPreferences.title = String($event)"
+                    :disabled="acting || isExecuting" maxlength="60" show-word-limit clearable
+                    placeholder="自定义课件名称，留空则自动命名" />
+                </el-form-item>
                 <el-form-item label="使用场景">
                   <el-select v-model="pptPreferences.scenario">
                     <el-option label="日常课堂" value="classroom" />
@@ -888,6 +1101,12 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                     <el-option label="详细" value="detailed" />
                   </el-select>
                 </el-form-item>
+                <el-form-item label="图片形状">
+                  <el-select v-model="pptPreferences.image_frame_shape" :disabled="isExecuting">
+                    <el-option label="圆角矩形（推荐多人场景）" value="roundRect" />
+                    <el-option label="圆形（主体居中裁切）" value="circle" />
+                  </el-select>
+                </el-form-item>
                 <el-form-item label="风格模板">
                   <el-select v-model="pptPreferences.template_id" clearable placeholder="由 Agent 自主设计">
                     <el-option
@@ -900,10 +1119,11 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                 </el-form-item>
                 <el-form-item label="PPT 页数">
                   <div class="slide-count-control" aria-label="设置 PPT 页数">
-                    <button type="button" :disabled="pptPreferences.slide_count <= 6" @click="changeSlideCount(-1)">−</button>
+                    <button type="button" :disabled="isExecuting || pptPreferences.slide_count <= 6" @click="changeSlideCount(-1)">−</button>
                     <label>
                       <input
-                        :value="pptPreferences.slide_count"
+                        v-model.number="pptPreferences.slide_count"
+                        :disabled="isExecuting"
                         type="number"
                         min="6"
                         max="30"
@@ -912,7 +1132,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                       >
                       <span>页</span>
                     </label>
-                    <button type="button" :disabled="pptPreferences.slide_count >= 30" @click="changeSlideCount(1)">＋</button>
+                    <button type="button" :disabled="isExecuting || pptPreferences.slide_count >= 30" @click="changeSlideCount(1)">＋</button>
                   </div>
                 </el-form-item>
                 <el-form-item label="教学增强">
@@ -934,12 +1154,20 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                 </el-form-item>
               </div>
             </div>
-            <el-progress
-              v-if="isExecuting && currentRun?.current_step === 3"
-              :percentage="58"
-              indeterminate
-              status="success"
-            />
+            <section v-if="artifactGenerationProgress" class="artifact-generation-progress" role="status" aria-label="教学成果生成进度">
+              <div class="generation-progress-heading">
+                <strong>{{ artifactGenerationProgress.label }}</strong>
+                <span>阶段进度 <b>{{ artifactGenerationProgress.percentage }}%</b></span>
+              </div>
+              <el-progress :percentage="artifactGenerationProgress.percentage" :show-text="false" :stroke-width="10"
+                :status="artifactGenerationProgress.status"
+                :color="artifactGenerationProgress.status === 'success' ? '#2aa361' : artifactGenerationProgress.status === 'exception' ? '#d65360' : artifactGenerationProgress.status === 'warning' ? '#d29636' : '#ff6878'" />
+              <div class="generation-progress-footnote">
+                <p class="generation-progress-detail">{{ artifactGenerationProgress.detail }}</p>
+                <span v-if="artifactGenerationProgress.elapsed">{{ artifactGenerationProgress.elapsed }}</span>
+              </div>
+              <p v-if="progressSyncWarning" class="generation-progress-detail">{{ progressSyncWarning }}</p>
+            </section>
             <el-button
               type="primary"
               :loading="acting || (isExecuting && currentRun?.current_step === 3)"
@@ -975,43 +1203,65 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
         class="artifact-results stage-card"
       >
         <template #title>
-          <div><p class="eyebrow">05 · REVIEW & PUBLISH</p><h2>预览与发布</h2></div>
+          <div class="artifact-results-heading"><h2>预览与发布</h2><p class="eyebrow">05 · REVIEW & PUBLISH</p></div>
         </template>
         <template #actions>
           <div class="artifact-actions">
-            <div v-if="pptVersions.length" class="version-switcher">
-              <el-select v-model="selectedVersionId" placeholder="历史版本" size="small">
-                <el-option
-                  v-for="item in pptVersions"
-                  :key="item.version_id"
-                  :label="`${item.reason} · ${formatBeijingDateTime(item.created_time)}`"
-                  :value="item.version_id"
-                />
-              </el-select>
-              <el-button size="small" :disabled="!selectedVersionId" @click="restorePptVersion">恢复</el-button>
-            </div>
             <StatusChip label="待教师核验" status="warning" />
           </div>
         </template>
 
-        <section class="artifact-overview">
-          <div>
-            <p class="eyebrow">成果总览</p>
-            <strong>先看齐全度，再决定发布什么</strong>
-            <span>成果可以单独下载、补生成；发布前仍由教师选择教学班并确认。</span>
+        <section class="artifact-overview" aria-label="成果与课件版本"
+          :style="{ '--artifact-overview-bg': `url(${designBriefBackgroundUrl})` }">
+          <div class="artifact-overview-header">
+            <div class="artifact-overview-heading">
+              <strong>成果总览</strong>
+              <span>草稿可下载、补生成；发布前请核验并确认。</span>
+            </div>
+            <div class="artifact-status-list">
+              <span
+                v-for="item in artifactStatusRows"
+                :key="item.key"
+                :class="['artifact-status-item', { 'is-ready': item.ready }]"
+              >
+                <span class="artifact-status-dot"></span>
+                {{ item.label }} · {{ item.historical ? '保留上一版，非本次成果' : item.ready ? '已就绪' : '待补生成' }}
+              </span>
+            </div>
           </div>
-          <div class="artifact-status-list">
-            <span
-              v-for="item in artifactStatusRows"
-              :key="item.key"
-              :class="['artifact-status-item', { 'is-ready': item.ready }]"
-            >
-              <span class="artifact-status-dot"></span>
-              {{ item.label }} · {{ item.ready ? '已就绪' : '待补生成' }}
-            </span>
+
+          <div v-if="artifacts.ppt || pptVersions.length" class="ppt-version-panel" aria-label="PPT 版本管理">
+            <div class="version-switcher">
+              <strong class="version-caption">{{ isBrowsingHistory ? '历史版本 · 只读预览' : '当前使用的课件' }}</strong>
+              <el-select :model-value="selectedVersionId || 'current'" @update:model-value="selectedVersionId = $event === 'current' ? '' : $event"
+                aria-label="选择 PPT 版本" popper-class="ppt-version-options" :disabled="acting || isExecuting" :loading="versionLoading">
+                <el-option :label="`当前版本 · ${artifactBundle?.ppt?.slides.length || 0} 页 · ${artifactBundle?.ppt?.title || '教学 PPT'}`" value="current" />
+                <el-option v-for="item in historyVersions" :key="item.version_id"
+                  :label="versionLabel(item)" :value="item.version_id">
+                  <div class="version-option">
+                    <span :title="versionLabel(item)">{{ versionLabel(item) }}</span>
+                    <small>{{ versionReason(item) }}{{ item.design_name ? ` · 风格：${item.design_name}` : '' }}{{ item.restorable === false ? ` · ${item.unavailable_reason || '仅内容快照'}` : '' }}</small>
+                  </div>
+                </el-option>
+              </el-select>
+              <small class="version-switch-hint">选择即预览，设为当前才切换；原课件保留。</small>
+            </div>
+            <div v-if="isBrowsingHistory" class="version-preview-state" role="status" aria-live="polite">
+              <span v-if="versionLoading">正在读取历史版本…</span>
+              <span v-else-if="versionError" class="version-error">{{ versionError }}</span>
+              <span v-else-if="versionPreview">
+                正在预览 {{ displayedPpt?.slides.length || 0 }} 页 · {{ displayedPpt?.design?.name || displayedPpt?.title }}，当前课件未改变。
+                <small v-if="!versionPreview.restorable">{{ versionPreview.unavailable_reason }}，可查看内容，不能恢复或下载。</small>
+              </span>
+              <div class="version-preview-actions">
+                <el-button v-if="versionError" size="small" @click="loadVersionPreview">重试</el-button>
+                <el-button size="small" :disabled="acting" @click="selectedVersionId = ''">返回当前版本</el-button>
+                <el-button size="small" type="primary" :disabled="!canRestoreVersion" :loading="acting" @click="restorePptVersion">设为当前版本</el-button>
+              </div>
+            </div>
           </div>
           <div v-if="failedArtifactStep && incompleteArtifactKeys.length" class="artifact-overview-retry">
-            <span>生成步骤有异常，已完成内容不会被覆盖：</span>
+            <span>本次生成未完成：{{ failedArtifactStep.error_message }}。上一版文件仍可查看，不代表本次生成成功。</span>
             <el-button
               v-for="key in incompleteArtifactKeys"
               :key="`overview-${key}`"
@@ -1021,46 +1271,51 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
               :loading="acting"
               @click="retryArtifact(key)"
             >
-              重试{{ artifactLabels[key] }}
+              {{ key === 'ppt' ? '继续生成未完成部分' : `重试${artifactLabels[key]}` }}
             </el-button>
           </div>
         </section>
 
         <div class="artifact-file-grid">
-          <article v-for="(item, key) in artifacts" :key="key" class="artifact-file">
+          <article v-for="(item, key) in displayedArtifacts" :key="key" class="artifact-file">
             <span class="artifact-file-type">
               {{ key === 'ppt' ? 'PPTX' : 'DOCX' }}
             </span>
-            <div>
-              <strong>{{ item.title }}</strong>
+            <div class="artifact-file-info">
+              <strong :title="item.title">{{ item.title }}</strong>
               <p v-if="item.slide_count">{{ item.slide_count }} 页课件</p>
               <p v-else-if="item.activity_count">{{ item.activity_count }} 个课堂活动</p>
               <p v-else>可编辑教学文档</p>
+              <p v-if="key === 'ppt' && isBrowsingHistory">所选历史版本 · 尚未设为当前</p>
+              <p v-else-if="isHistoricalArtifact(String(key))">上一成功版本 · 非本次生成成果</p>
             </div>
-            <el-button type="primary" plain @click="downloadArtifact(String(key))">下载</el-button>
+            <div class="artifact-file-footer">
+              <small v-if="item.generated_time" :title="`生成时间：${new Date(item.generated_time).toLocaleString()}`">
+                {{ new Date(item.generated_time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }) }}
+              </small>
+              <el-button size="small" type="primary" plain :aria-label="`下载${item.title}`" :disabled="key === 'ppt' && isBrowsingHistory && !versionPreview?.restorable" @click="downloadArtifact(String(key))">{{ key === 'ppt' && isBrowsingHistory ? '下载此版本' : isHistoricalArtifact(String(key)) ? '下载上一版' : '下载' }}</el-button>
+            </div>
           </article>
         </div>
 
         <el-tabs v-model="artifactPreview" class="artifact-preview-tabs">
-          <el-tab-pane v-if="artifactBundle?.ppt" label="PPT 逐页预览" name="ppt">
-            <section v-if="pptQuality" class="ppt-quality" :class="{ 'is-passed': pptQuality.passed }">
-              <div class="quality-score">
-                <strong>{{ pptQuality.score }}</strong>
-                <span>质量评分</span>
+          <el-tab-pane v-if="artifactBundle?.ppt || isBrowsingHistory" :label="isBrowsingHistory ? '历史 PPT 预览（只读）' : isHistoricalArtifact('ppt') ? '上一版 PPT 预览（非本次）' : 'PPT 逐页预览'" name="ppt">
+            <div v-if="versionLoading" class="version-loading" v-loading="true" aria-busy="true">正在切换课件预览…</div>
+            <UiEmptyState v-else-if="versionError" title="历史版本读取失败" description="可重试，或返回当前版本继续使用。当前课件未被修改。" />
+            <template v-else-if="displayedPpt">
+            <section v-if="pptQuality && (!pptQuality.passed || pptQuality.issues.length)" class="ppt-quality" role="status">
+              <div class="quality-heading">
+                <strong>课件有待核验项</strong>
+                <span>{{ pptQuality.summary }}</span>
               </div>
-              <div class="quality-content">
-                <div class="quality-heading">
-                  <div>
-                    <small>AUTOMATED REVIEW</small>
-                    <strong>{{ pptQuality.passed ? '已通过自动质检' : '建议修改后再使用' }}</strong>
-                  </div>
-                  <span>{{ pptQuality.summary }}</span>
-                </div>
-                <div v-if="pptQuality.issues.length" class="quality-issues">
+              <details v-if="pptQuality.issues.length" class="quality-details">
+                <summary>查看 {{ pptQuality.issues.length }} 项检查建议</summary>
+                <div class="quality-issues">
                   <button
                     v-for="(issue, issueIndex) in pptQuality.issues"
                     :key="`${issue.slide_index}-${issueIndex}`"
                     type="button"
+                    :disabled="isBrowsingHistory"
                     @click="issue.slide_index !== null && openSlideRevision(issue.slide_index)"
                   >
                     <b>{{ issue.slide_index === null ? '整套' : `第 ${issue.slide_index + 1} 页` }}</b>
@@ -1068,104 +1323,75 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                     <small>{{ issue.suggestion }}</small>
                   </button>
                 </div>
-              </div>
+              </details>
             </section>
-            <div v-if="artifactBundle.ppt.design" class="ppt-design-brief">
+            <div v-if="displayedPpt.design" class="ppt-design-brief"
+              :style="{ backgroundImage: `url(${designBriefBackgroundUrl})` }">
               <div>
                 <small>VISUAL DIRECTION</small>
-                <strong>{{ artifactBundle.ppt.design.name }}</strong>
-                <p>{{ artifactBundle.ppt.design.concept }}</p>
+                <strong>{{ displayedPpt.design.name }}</strong>
+                <p>{{ displayedPpt.design.concept }}</p>
+                <p v-if="displayedPpt.design.topic_keywords?.length">课题关键词：{{ displayedPpt.design.topic_keywords.join('、') }}</p>
+                <p v-if="displayedPpt.design.visual_motif">视觉意象：{{ displayedPpt.design.visual_motif }}</p>
               </div>
               <StatusChip
-                :type="artifactBundle.ppt.design.status === 'personalized' ? 'success' : 'warning'"
-                :label="artifactBundle.ppt.design.status === 'personalized' ? '个性化视觉已生成' : '安全版式回退'"
+                :type="displayedPpt.pipeline_version === 'ppt-master-svg-v2' ? 'success' : 'info'"
+                :label="displayedPpt.pipeline_version === 'ppt-master-svg-v2' ? 'PPT Master · 成品预览' : '历史课件'"
               />
             </div>
             <el-alert
-              v-if="artifactBundle.ppt.multimodal"
-              :title="artifactBundle.ppt.multimodal.message"
-              :description="artifactBundle.ppt.multimodal.generated_count && artifactBundle.ppt.multimodal.selected_slides?.length
-                ? `已生成第 ${artifactBundle.ppt.multimodal.selected_slides.join('、')} 页辅助插图`
-                : undefined"
-              :type="artifactBundle.ppt.multimodal.status === 'completed' ? 'success' : 'warning'"
+              v-if="displayedPpt.multimodal"
+              :title="displayedPpt.multimodal.message"
+              :description="displayedPpt.multimodal.errors?.length
+                ? displayedPpt.multimodal.errors.join('；')
+                : displayedPpt.multimodal.generated_count && displayedPpt.multimodal.selected_slides?.length
+                  ? `已生成第 ${displayedPpt.multimodal.selected_slides.join('、')} 页辅助插图`
+                  : undefined"
+              :type="displayedPpt.multimodal.status === 'completed' ? 'success' : 'warning'"
               :closable="false"
               show-icon
               class="multimodal-status"
             />
+            <el-button v-if="!isBrowsingHistory && displayedPpt.multimodal?.requested_count && displayedPpt.multimodal.generated_count < displayedPpt.multimodal.requested_count"
+              :disabled="isExecuting" :loading="acting" plain @click="retryArtifact('ppt')">仅补生成未完成插图</el-button>
             <div class="slide-preview-list">
-              <article
-                v-for="(slide, index) in artifactBundle.ppt.slides"
-                :key="`${slide.title}-${index}`"
-                class="slide-preview"
-                :class="{ [`is-${slide.layout}`]: !slide.canvas?.length, 'has-canvas': slide.canvas?.length }"
-              >
-                <div class="slide-actions">
-                  <el-button size="small" @click="openSlideRevision(index)">修改本页</el-button>
+              <el-alert v-if="!isBrowsingHistory && imageJob?.status === 'failed'" title="换图未完成，原课件未被覆盖"
+                :description="imageJob.error" type="warning" :closable="false" show-icon />
+              <article v-for="(slide, index) in displayedPpt.slides"
+                :key="`${selectedVersionId}-${displayedPpt.revision_id}-${index}`" class="ppt-native-page">
+                <div class="ppt-native-heading">
+                  <strong>第 {{ index + 1 }} 页 · {{ slide.title }}</strong>
+                  <div v-if="!isBrowsingHistory" class="ppt-page-actions">
+                    <el-button v-if="slide.visual_prompt || slide.visual_asset" size="small" :disabled="acting || isExecuting" @click="openImageRevision(index)">配图设置</el-button>
+                    <el-button size="small" :disabled="displayedPpt.pipeline_version !== 'ppt-master-svg-v2' || acting || isExecuting"
+                      @click="openSlideRevision(index)">修改本页</el-button>
+                  </div>
                 </div>
-                <div
-                  v-if="slide.canvas?.length"
-                  class="canvas-preview"
-                  :style="{ backgroundColor: canvasBackground(slide, artifactBundle.ppt) }"
-                >
-                  <template v-for="(element, elementIndex) in slide.canvas" :key="`${element.source}-${elementIndex}`">
-                    <div
-                      v-if="element.type === 'text'"
-                      class="canvas-element is-text"
-                      :style="canvasElementStyle(element, artifactBundle.ppt)"
-                    >
-                      {{ canvasSource(slide, element.source, index) }}
-                    </div>
-                    <div
-                      v-else
-                      class="canvas-element"
-                      :class="`is-${element.type}`"
-                      :style="canvasElementStyle(element, artifactBundle.ppt)"
-                    />
-                  </template>
-                </div>
-                <template v-else>
-                  <span>{{ String(index + 1).padStart(2, '0') }}</span>
-                  <div>
-                  <small>{{ slide.layout.toUpperCase() }}</small>
-                  <h3>{{ slide.title }}</h3>
+                <PptSlidePreview v-if="slide.preview_available && currentRun"
+                  :run-id="currentRun.id" :slide-index="index"
+                  :revision="displayedPpt.revision_id || ''" :version-id="selectedVersionId || undefined" :title="slide.title" />
+                <div v-else class="legacy-ppt-content">
+                  <p>历史课件暂无成品预览，请下载查看。重新生成后可预览和修改单页。</p>
                   <strong>{{ slide.takeaway }}</strong>
-                  <div v-if="slide.layout === 'concept' && slide.keyword" class="preview-keyword">
-                    {{ slide.keyword }}
-                  </div>
-                  <div
-                    v-if="slide.layout === 'comparison' && (slide.left || slide.right)"
-                    class="preview-comparison"
-                  >
-                    <section>
-                      <b>{{ slide.left?.title }}</b>
-                      <ul><li v-for="item in slide.left?.points" :key="item">{{ item }}</li></ul>
-                    </section>
-                    <section>
-                      <b>{{ slide.right?.title }}</b>
-                      <ul><li v-for="item in slide.right?.points" :key="item">{{ item }}</li></ul>
-                    </section>
-                  </div>
-                  <div v-else-if="slide.steps?.length" class="preview-steps">
-                    <section v-for="(step, stepIndex) in slide.steps" :key="`${step.title}-${stepIndex}`">
-                      <i>{{ stepIndex + 1 }}</i>
-                      <b>{{ step.title }}</b>
-                      <p>{{ step.description }}</p>
-                    </section>
-                  </div>
-                  <div v-else-if="slide.timeline?.length" class="preview-timeline">
-                    <section
-                      v-for="(item, timelineIndex) in slide.timeline"
-                      :key="`${item.label}-${timelineIndex}`"
-                    >
-                      <b>{{ item.label }}</b>
-                      <p>{{ item.title }}</p>
-                    </section>
-                  </div>
-                  <ul v-else><li v-for="item in slide.bullets" :key="item">{{ item }}</li></ul>
-                  </div>
-                </template>
+                  <ul><li v-for="item in slide.bullets" :key="item">{{ item }}</li></ul>
+                </div>
+                <details v-if="slide.visual_brief" class="ppt-page-notes"><summary>视觉教学意图 · {{ { illustration: '情境插图', diagram: '关系图解', none: '文字表达' }[slide.visual_brief.kind] }}</summary>
+                  <p>{{ slide.visual_brief.purpose }}</p>
+                  <p>正文依据：{{ slide.visual_brief.content_anchors.join('、') }}</p>
+                  <p v-if="slide.visual_brief.key_elements?.length">需要表现：{{ slide.visual_brief.key_elements.join('、') }}</p>
+                  <p v-if="slide.visual_brief.difference">本图区别：{{ slide.visual_brief.difference }}</p>
+                </details>
+                <p v-if="slide.visual_asset" class="image-review-status" :class="{ reviewed: slide.visual_asset.review?.status === 'passed' }">
+                  {{ slide.visual_asset.review?.status === 'passed' ? '语义复核通过，仍需教师确认' : '语义复核未完成，待教师核验' }}
+                  <span v-if="slide.visual_asset.review?.reason"> · {{ slide.visual_asset.review.reason }}</span>
+                </p>
+                <details class="ppt-page-notes"><summary>讲稿与教材依据</summary>
+                  <p>{{ slide.speaker_notes }}</p>
+                  <p>{{ slide.evidence_refs.join('、') || '未关联资料，请教师核验' }}</p>
+                </details>
               </article>
             </div>
+            </template>
           </el-tab-pane>
 
           <el-tab-pane v-if="artifactBundle?.lesson_plan" label="教案预览" name="lesson_plan">
@@ -1236,6 +1462,7 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
               <el-button type="primary" @click="router.push('/interaction')">查看课堂互动</el-button>
             </template>
           </el-result>
+          <el-alert v-else-if="isBrowsingHistory" title="正在浏览历史课件，暂不能发布。请先设为当前版本，或返回当前版本。" type="info" :closable="false" show-icon />
           <el-form v-else label-position="top" class="publish-form">
             <div class="publish-form-grid">
               <el-form-item label="发布到教学班">
@@ -1261,6 +1488,11 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
                 发布课堂讨论
               </el-checkbox>
             </div>
+            <el-alert v-if="publishPpt && publicationPpt.previous" title="本次 PPT 尚未成功生成，当前保留的是上一版课件。"
+              type="warning" :closable="false" show-icon />
+            <el-checkbox v-if="publishPpt && publicationPpt.previous" v-model="previousPptConfirmed">
+              我已下载核验上一版 PPT，明确选择发布上一版
+            </el-checkbox>
             <el-checkbox-group
               v-if="publishDiscussions && classroomActivities.length"
               v-model="selectedDiscussionIndices"
@@ -1316,6 +1548,27 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
       </template>
     </el-dialog>
 
+    <el-dialog v-model="imageDialogVisible" :title="`第 ${imageSlideIndex + 1} 页配图设置`" width="min(680px, 94vw)" :close-on-click-modal="false">
+      <p>{{ imagePage?.title }}</p>
+      <p v-if="imagePage?.visual_brief">教学意图：{{ imagePage.visual_brief.purpose }}</p>
+      <p v-if="imagePage?.visual_brief?.key_elements?.length">需保留的关键元素：{{ imagePage.visual_brief.key_elements.join('、') }}</p>
+      <p class="image-dialog-hint">仅替换这一张插图，保留文字、版式和其他图片；完成验证后生成新版本。生成图仅作教学意象，不代表真实史料。</p>
+      <el-form label-position="top">
+        <el-form-item label="场景提示词（可修改）">
+          <el-input v-model="imagePrompt" type="textarea" :rows="6" maxlength="1200" show-word-limit
+            placeholder="描述具体主体、动作和关键物体，说明需要表现的概念，避免仅写围桌讨论。" />
+        </el-form-item>
+      </el-form>
+      <details v-if="imagePage?.visual_asset?.prompt" class="ppt-page-notes"><summary>上次实际发送给图像模型的完整提示词</summary>
+        <p>{{ imagePage.visual_asset.prompt }}</p>
+      </details>
+      <p v-if="imagePage?.visual_asset?.review">语义复核：{{ imagePage.visual_asset.review.reason }}</p>
+      <template #footer>
+        <el-button @click="imageDialogVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="acting" :disabled="isExecuting" @click="replaceImage">仅重新生成这张图</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="slideRevisionVisible" :title="`修改第 ${revisingSlideIndex + 1} 页`" width="min(600px, 92vw)">
       <el-form label-position="top">
         <el-form-item label="修改范围">
@@ -1345,6 +1598,14 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 </template>
 
 <style scoped>
+.ppt-native-page { padding: 16px; border: 1px solid #e8e9ed; border-radius: 12px; min-width: 0; }
+.ppt-native-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 12px; }
+.ppt-page-notes { margin-top: 12px; color: #637084; font-size: 13px; }
+.ppt-page-notes p { white-space: pre-wrap; }
+.ppt-page-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.image-review-status, .image-dialog-hint { font-size: 13px; color: #9a6b28; line-height: 1.6; }
+.image-review-status.reviewed { color: #367d62; }
+.legacy-ppt-content { padding: 16px; background: #f6f7f9; }
 .lesson-prep-workspace { display: grid; gap: clamp(14px, 1.6vw, 20px); }
 .prep-page-header { display: flex; align-items: center; justify-content: space-between; gap: 24px; }
 .prep-page-brand { display: flex; min-width: 0; align-items: center; gap: 16px; }
@@ -1356,7 +1617,9 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 .prep-page-actions { display: flex; flex: none; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .prep-page-actions :deep(.el-button) { min-height: 36px; padding: 0 13px; color: #684d78; background: #fff; border: 1px solid #f2b8bd; border-radius: 9px; box-shadow: 0 4px 8px rgb(71 44 73 / 12%); font-size: 12px; font-weight: 650; }
 .prep-page-actions :deep(.el-button:hover), .prep-page-actions :deep(.el-button:focus) { color: #c52c45; border-color: #ff7e87; background: #fff8f8; }
-.prep-progress-card { overflow: hidden; padding: clamp(18px, 2.1vw, 28px) clamp(20px, 2.7vw, 36px) 14px; background-color: #fff; background-position: center; background-repeat: no-repeat; background-size: cover; border-color: #f4dfe3; border-radius: 15px; box-shadow: 0 7px 13px rgb(68 42 65 / 13%); }
+/* The source artwork has baked-in white bands above and below the pink panel.
+   Crop those bands in CSS without changing the shared background asset. */
+.prep-progress-card { overflow: hidden; padding: 18px clamp(20px, 2.7vw, 36px) 12px; background-color: #fff5f7; background-position: center; background-repeat: no-repeat; background-size: 100% 174%; border-color: #f4dfe3; border-radius: 15px; box-shadow: 0 7px 13px rgb(68 42 65 / 13%); }
 .prep-step-progress { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
 .prep-step-progress li { position: relative; z-index: 0; display: grid; justify-items: center; gap: 7px; color: #7f828a; font-size: clamp(12px, 1vw, 15px); font-weight: 650; text-align: center; }
 .prep-step-progress li::after { position: absolute; z-index: -1; top: 21px; left: 50%; width: 100%; height: 2px; content: ''; background: #d9d9dc; }
@@ -1427,16 +1690,24 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 .flow-item { display: grid; gap: var(--space-1); padding: var(--space-3); background: var(--surface-muted); border-left: 3px solid var(--action-blue); border-radius: var(--radius-input); }
 .flow-item p { font-size: var(--fs-aux); }
 .flow-item small { color: var(--authority-red); }
-.artifact-builder { padding: clamp(18px, 3vw, 36px); background: var(--surface-muted); border-radius: var(--radius-card); }
+.artifact-builder { padding: clamp(18px, 2.2vw, 28px); background: var(--surface-muted); border-radius: var(--radius-card); }
+.artifact-builder > h4 { margin-bottom: 12px; }
+.artifact-generation-progress { display: grid; gap: 8px; margin: 14px 0 12px; }
+.generation-progress-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 6px 16px; }
+.generation-progress-heading strong { color: #63333f; font-size: 14px; }
+.generation-progress-heading > span { color: #806e76; font-size: 12px; }
+.generation-progress-heading b { margin-left: 5px; color: #d64b65; font-size: 22px; font-variant-numeric: tabular-nums; }
+.artifact-generation-progress .generation-progress-detail { min-height: 0; margin: 0; color: #6c6470; font-size: 13px; line-height: 1.5; }
+.generation-progress-footnote { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; color: #8b7f87; font-size: 11px; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .artifact-builder :deep(.el-checkbox-group) { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .artifact-builder :deep(.el-checkbox-button__inner) { border: 1px solid var(--line); border-radius: var(--radius-input); box-shadow: none; }
 .artifact-retry-banner { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); padding: var(--space-3); color: #7a4a00; background: #fff8e8; border: 1px solid #efd48a; border-radius: var(--radius-input); }
 .artifact-retry-banner p { margin: 4px 0 0; color: #876b35; font-size: var(--fs-meta); }
 .artifact-retry-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--space-2); }
-.ppt-preferences { display: grid; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--line); }
-.preference-heading, .quality-heading, .artifact-actions, .version-switcher { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
-.preference-heading p { margin: 4px 0 0; color: var(--ink-400); font-size: var(--fs-meta); }
+.ppt-preferences { display: grid; gap: 12px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.preference-heading, .quality-heading, .artifact-actions { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .preference-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-3); }
+.ppt-title-field { grid-column: 1 / -1; }
 .preference-grid :deep(.el-select), .preference-grid :deep(.el-input-number) { width: 100%; }
 .slide-count-control { display: grid; grid-template-columns: 44px minmax(92px, 1fr) 44px; width: min(230px, 100%); overflow: hidden; border: 1px solid var(--action-blue); border-radius: var(--radius-input); }
 .slide-count-control button { min-height: 42px; color: var(--action-blue); background: #eef5ff; border: 0; font-size: 22px; cursor: pointer; }
@@ -1447,36 +1718,55 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 .slide-count-control label span { color: var(--ink-400); font-size: var(--fs-meta); }
 .preference-switches { display: flex; min-height: 32px; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .artifact-results { grid-column: 1 / -1; }
+.artifact-results :deep(.ui-card__header) { align-items: center; gap: 12px; margin-bottom: 12px; min-height: 0; }
+.artifact-results-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.artifact-results-heading h2 { margin: 0; font-size: 20px; line-height: 1.3; }
+.artifact-results-heading .eyebrow { min-height: 0; margin: 0; font-size: 10px; line-height: 1.4; letter-spacing: .1em; }
 .artifact-actions { flex-wrap: wrap; }
-.version-switcher :deep(.el-select) { width: min(300px, 38vw); }
-.artifact-overview { display: grid; gap: var(--space-3); margin-bottom: var(--space-4); padding: var(--space-4); background: linear-gradient(135deg, #f3f7ff, #fffaf0); border: 1px solid #d8e2f6; border-radius: var(--radius-card); }
-.artifact-overview > div:first-child { display: grid; gap: 4px; }
-.artifact-overview strong { color: var(--ink-900); font-size: var(--fs-card-title); }
-.artifact-overview > div:first-child > span { color: var(--ink-500); font-size: var(--fs-meta); }
-.artifact-status-list { display: flex; flex-wrap: wrap; gap: var(--space-2); }
-.artifact-status-item { display: inline-flex; align-items: center; gap: 6px; padding: 6px 10px; color: var(--ink-500); background: white; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-meta); }
+.ppt-version-panel { min-width: 0; }
+.version-switcher { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(140px, 220px); align-items: center; gap: 12px; }
+.version-caption { margin: 0; color: #63434a; font-size: 13px; font-weight: 650; }
+.version-switch-hint { color: #765d65; font-size: 12px; line-height: 1.5; }
+.version-switcher :deep(.el-select) { width: 100%; min-width: 0; }
+.version-switcher :deep(.el-select__wrapper) { background: rgb(255 255 255 / 88%); }
+.version-option { display: grid; gap: 3px; line-height: 1.5; padding: 6px 0; }
+.version-option small { font-size: 12px; color: #8c7c80; }
+:global(.ppt-version-options .el-select-dropdown__item) { height: auto; min-height: 40px; display: flex; align-items: center; }
+.version-option span { overflow: hidden; text-overflow: ellipsis; }
+.version-preview-state { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid rgb(191 126 140 / 18%); color: var(--ink-600); font-size: var(--fs-meta); }
+.version-preview-state > span { flex: 1 1 240px; }
+.version-preview-state small { display: block; margin-top: 4px; color: #a46d27; }
+.version-preview-actions { display: flex; gap: 8px; }
+.version-preview-actions :deep(.el-button + .el-button) { margin-left: 0; }
+.version-error { color: #b33d45; }
+.version-loading { display: grid; min-height: 240px; place-items: center; color: var(--ink-500); }
+.artifact-overview { display: grid; gap: 10px; margin-bottom: 14px; padding: 14px 18px; background-color: #fff9f8; background-image: linear-gradient(90deg, rgb(255 251 250 / 94%), rgb(255 251 250 / 65%) 60%, rgb(255 251 250 / 38%)), var(--artifact-overview-bg); background-position: center; background-repeat: no-repeat; background-size: cover; border: 1px solid #efdcdf; border-radius: var(--radius-card); }
+.artifact-overview-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.artifact-overview-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.artifact-overview-heading strong { margin: 0; color: #66333e; font-size: 15px; line-height: 1.5; }
+.artifact-overview-heading > span { color: #765d65; font-size: 12px; line-height: 1.5; }
+.artifact-status-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.artifact-status-item { display: inline-flex; align-items: center; gap: 5px; padding: 4px 8px; color: var(--ink-500); background: rgb(255 255 255 / 86%); border: 1px solid var(--line); border-radius: 999px; font-size: 12px; line-height: 1.4; }
 .artifact-status-item.is-ready { color: #167a42; border-color: #b9dfc7; background: #f0faf4; }
 .artifact-status-dot { width: 7px; height: 7px; background: var(--ink-300); border-radius: 50%; }
 .artifact-status-item.is-ready .artifact-status-dot { background: #2aa361; }
-.artifact-overview-retry { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); color: #876b35; font-size: var(--fs-meta); }
-.artifact-file-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
-.artifact-file { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: var(--space-3); padding: var(--space-4); background: var(--surface-muted); border: 1px solid var(--line); border-radius: var(--radius-card); }
-.artifact-file-type { display: grid; width: 48px; height: 48px; place-items: center; color: white; background: var(--authority-red); border-radius: 50%; font-size: 11px; font-weight: var(--fw-bold); }
-.artifact-file strong, .artifact-file p { margin: 0; }
-.artifact-file p { margin-top: 4px; color: var(--ink-400); font-size: var(--fs-meta); }
+.artifact-overview-retry { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); padding-top: 8px; border-top: 1px solid rgb(191 126 140 / 18%); color: #876b35; font-size: var(--fs-meta); }
+.artifact-file-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 10px; }
+.artifact-file { display: grid; grid-template-columns: 32px minmax(0, 1fr); align-content: start; align-items: start; gap: 8px 10px; min-width: 0; padding: 12px; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 12px; }
+.artifact-file-type { display: grid; width: 32px; height: 32px; place-items: center; color: white; background: var(--authority-red); border-radius: 50%; font-size: 9px; font-weight: var(--fw-bold); }
+.artifact-file-info { min-width: 0; }
+.artifact-file-info strong { display: -webkit-box; height: 2.9em; margin: 0; overflow: hidden; color: var(--ink-900); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.artifact-file-info p { min-height: 0; margin: 3px 0 0; color: var(--ink-400); font-size: 12px; line-height: 1.4; }
+.artifact-file-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.artifact-file-footer small { min-width: 0; overflow: hidden; color: #897b83; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.artifact-file-footer :deep(.el-button) { flex: none; margin-left: auto; }
 .artifact-preview-tabs { margin-top: var(--space-5); }
 .multimodal-status { margin-bottom: var(--space-4); }
-.ppt-quality { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: var(--space-4); margin-bottom: var(--space-4); padding: var(--space-4); background: #fff5f3; border: 1px solid #f2c7c0; border-radius: var(--radius-card); }
-.ppt-quality.is-passed { background: #f0faf4; border-color: #b9dfc7; }
-.quality-score { display: grid; align-content: center; justify-items: center; border-right: 1px solid var(--line); }
-.quality-score strong { color: var(--authority-red); font-family: Georgia, serif; font-size: 42px; line-height: 1; }
-.ppt-quality.is-passed .quality-score strong { color: #167a42; }
-.quality-score span { margin-top: 6px; color: var(--ink-400); font-size: var(--fs-meta); }
-.quality-content { min-width: 0; }
-.quality-heading { align-items: flex-start; }
-.quality-heading small { display: block; color: var(--action-blue); letter-spacing: .12em; }
-.quality-heading strong { display: block; margin-top: 4px; }
-.quality-heading > span { max-width: 48%; color: var(--ink-500); font-size: var(--fs-meta); text-align: right; }
+.ppt-quality { display: grid; gap: 6px; margin-bottom: 12px; padding: 10px 12px; background: #fff8ee; border: 1px solid #edd3a7; border-radius: var(--radius-input); }
+.quality-heading { justify-content: flex-start; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
+.quality-heading strong { color: #855514; font-size: 13px; line-height: 1.5; }
+.quality-heading > span { color: #816c51; font-size: 12px; line-height: 1.5; }
+.quality-details summary { color: #855514; font-size: 12px; cursor: pointer; }
 .quality-issues { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2); margin-top: var(--space-3); }
 .quality-issues button { display: grid; gap: 4px; padding: var(--space-3); color: inherit; background: rgb(255 255 255 / 72%); border: 1px solid var(--line); border-radius: var(--radius-input); text-align: left; cursor: pointer; }
 .quality-issues button:hover { border-color: var(--action-blue); }
@@ -1484,19 +1774,13 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 .quality-issues span { font-weight: var(--fw-semibold); }
 .quality-issues small { color: var(--ink-500); line-height: 1.5; }
 .slide-preview-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
-.ppt-design-brief { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); padding: var(--space-4); color: white; background: linear-gradient(125deg, #721b2b, #244f9d); border-radius: var(--radius-card); }
-.ppt-design-brief small { display: block; margin-bottom: var(--space-1); color: #f0d691; letter-spacing: .14em; }
+.ppt-design-brief { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); margin-bottom: var(--space-4); padding: var(--space-4); color: #642a33; background-color: #fff9f8; background-position: center; background-repeat: no-repeat; background-size: cover; border: 1px solid #f0dfe0; border-radius: var(--radius-card); }
+.ppt-design-brief small { display: block; margin-bottom: var(--space-1); color: #ad4757; letter-spacing: .14em; }
 .ppt-design-brief strong { display: block; font-size: var(--fs-h3); }
-.ppt-design-brief p { max-width: 720px; margin: var(--space-2) 0 0; color: #e7edf8; line-height: 1.65; }
+.ppt-design-brief p { max-width: 720px; margin: var(--space-2) 0 0; color: #694d58; line-height: 1.65; }
 .slide-preview { position: relative; display: grid; grid-template-columns: 46px minmax(0, 1fr); gap: var(--space-3); min-height: 220px; padding: var(--space-4); background: linear-gradient(145deg, #fff, var(--surface-muted)); border-left: 5px solid var(--authority-red); border-radius: var(--radius-card); }
 .slide-actions { position: absolute; z-index: 3; top: var(--space-2); right: var(--space-2); opacity: 0; transition: opacity .18s ease; }
 .slide-preview:hover .slide-actions, .slide-preview:focus-within .slide-actions { opacity: 1; }
-.slide-preview.has-canvas { display: block; min-height: 0; padding: 0; overflow: hidden; background: #111827; border: 1px solid var(--border-default); border-left-width: 1px; aspect-ratio: 16 / 9; box-shadow: var(--shadow-card); }
-.canvas-preview { position: relative; width: 100%; height: 100%; overflow: hidden; }
-.canvas-element { position: absolute; box-sizing: border-box; }
-.canvas-element.is-text { display: flex; align-items: center; overflow: hidden; padding: 2px; line-height: 1.28; white-space: normal; }
-.canvas-element.is-shape { border: 1px solid; }
-.canvas-element.is-line { height: 0 !important; border-top: 2px solid; background: transparent !important; }
 .slide-preview > span { color: var(--authority-red); font-family: Georgia, serif; font-size: 24px; }
 .slide-preview h3, .slide-preview p, .slide-preview ul { margin: 0; }
 .slide-preview small { color: var(--ink-400); letter-spacing: .08em; }
@@ -1538,6 +1822,11 @@ watch(() => route.query.run_id, () => { void openRunFromRoute() })
 .dialog-form { margin-top: var(--space-4); }
 .dialog-form input[type="file"] { display: block; width: 100%; padding: var(--space-3); background: var(--surface-muted); border: 1px dashed var(--line); border-radius: var(--radius-input); }
 .dialog-form small { display: block; margin-top: var(--space-2); color: var(--ink-400); }
-@media (max-width: 1199px) { .artifact-file-grid { grid-template-columns: 1fr; } }
-@media (max-width: 767px) { .stage-navigation { display: flex; overflow-x: auto; padding-bottom: var(--space-1); } .stage-navigation button { min-width: 132px; } .prep-grid, .compact-form-row, .slide-preview-list, .preference-grid, .quality-issues, .publish-form-grid { grid-template-columns: 1fr; } .prep-output, .artifact-results { grid-column: auto; } .run-toolbar, .preference-heading, .quality-heading, .publish-heading, .artifact-retry-banner { align-items: flex-start; flex-direction: column; } .artifact-file { grid-template-columns: auto minmax(0, 1fr); } .artifact-file .el-button { grid-column: 1 / -1; } .ppt-quality { grid-template-columns: 1fr; } .quality-score { padding-bottom: var(--space-3); border-right: 0; border-bottom: 1px solid var(--line); } .quality-heading > span { max-width: none; text-align: left; } .slide-actions { opacity: 1; } }
+@media (max-width: 767px) {
+  .artifact-overview { padding: 12px 14px; }
+  .version-switcher { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+  .version-switch-hint { font-size: 11px; }
+  .version-preview-state > span { flex-basis: 100%; }
+}
+@media (max-width: 767px) { .stage-navigation { display: flex; overflow-x: auto; padding-bottom: var(--space-1); } .stage-navigation button { min-width: 132px; } .prep-grid, .compact-form-row, .slide-preview-list, .preference-grid, .quality-issues, .publish-form-grid { grid-template-columns: 1fr; } .prep-output, .artifact-results { grid-column: auto; } .run-toolbar, .preference-heading, .quality-heading, .publish-heading, .artifact-retry-banner { align-items: flex-start; flex-direction: column; } .ppt-quality { grid-template-columns: 1fr; } .quality-score { padding-bottom: var(--space-3); border-right: 0; border-bottom: 1px solid var(--line); } .quality-heading > span { max-width: none; text-align: left; } .slide-actions { opacity: 1; } }
 </style>

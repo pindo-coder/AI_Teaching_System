@@ -1,5 +1,5 @@
 import json
-from time import sleep
+from time import monotonic, sleep
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
@@ -21,6 +21,7 @@ from app.schemas.agent import (
     LessonPublicationData,
     LessonPublishRequest,
     PptSlideRevisionRequest,
+    PptImageRevisionRequest,
     PptVersionRestoreRequest,
     PresentationTemplateData,
 )
@@ -29,6 +30,7 @@ from app.services.agent_service import (
     AgentService,
     execute_lesson_artifacts,
     execute_lesson_outline,
+    execute_ppt_image_revision,
 )
 from app.services.ai_operation_service import AiProviderConfigService
 from app.services.presentation_template_service import PresentationTemplateService
@@ -211,6 +213,31 @@ def revise_ppt_slide(
     return ApiResponse(message="本页已重新生成，并保留上一版本", data=data)
 
 
+@router.post("/runs/{run_id}/ppt/slides/{slide_index}/image", response_model=ApiResponse[AgentRunData])
+def replace_ppt_image(
+    run_id: int, slide_index: int, payload: PptImageRevisionRequest,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(require_roles("teacher", "admin")), db: Session = Depends(get_db),
+) -> ApiResponse[AgentRunData]:
+    data = AgentService(db, user).request_ppt_image_revision(run_id, slide_index, payload)
+    background_tasks.add_task(execute_ppt_image_revision, run_id, data.output_data["ppt_image_job"]["id"], db.get_bind())
+    return ApiResponse(message="单张配图更新已排队，完成前保留原课件", data=data)
+
+
+@router.get("/runs/{run_id}/ppt/slides/{slide_index}/preview")
+def preview_ppt_slide(
+    run_id: int, slide_index: int,
+    version_id: str | None = Query(default=None, min_length=1, max_length=80),
+    expected_revision: str | None = Query(default=None, max_length=80),
+    user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    path = AgentService(db, user).ppt_preview(run_id, slide_index, version_id, expected_revision)
+    return FileResponse(path, media_type="image/png", headers={
+        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+    })
+
+
 @router.post("/runs/{run_id}/ppt/versions/restore", response_model=ApiResponse[AgentRunData])
 def restore_ppt_version(
     run_id: int,
@@ -218,18 +245,28 @@ def restore_ppt_version(
     user: User = Depends(require_roles("teacher", "admin")),
     db: Session = Depends(get_db),
 ) -> ApiResponse[AgentRunData]:
-    data = AgentService(db, user).restore_ppt_version(run_id, payload.version_id)
+    data = AgentService(db, user).restore_ppt_version(run_id, payload.version_id, payload.expected_revision)
     return ApiResponse(message="已恢复所选 PPT 版本", data=data)
+
+
+@router.get("/runs/{run_id}/ppt/versions/{version_id}", response_model=ApiResponse[dict])
+def preview_ppt_version(
+    run_id: int, version_id: str,
+    user: User = Depends(require_roles("teacher", "admin")), db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    return ApiResponse(data=AgentService(db, user).ppt_version(run_id, version_id))
 
 
 @router.get("/runs/{run_id}/artifacts/{artifact_key}/download")
 def download_artifact(
     run_id: int,
     artifact_key: str,
+    version_id: str | None = Query(default=None, min_length=1, max_length=80),
+    expected_revision: str | None = Query(default=None, max_length=80),
     user: User = Depends(require_roles("teacher", "admin")),
     db: Session = Depends(get_db),
 ) -> FileResponse:
-    path, artifact = AgentService(db, user).artifact_download(run_id, artifact_key)
+    path, artifact = AgentService(db, user).artifact_download(run_id, artifact_key, version_id, expected_revision)
     filename = artifact.get("file_name") or path.name
     response = FileResponse(
         path,
@@ -273,6 +310,7 @@ def run_events(
 
     def event_stream():
         previous = ""
+        last_sent = monotonic()
         while True:
             with Session(bind=bind, autoflush=False, expire_on_commit=False) as event_db:
                 run = event_db.get(AgentRun, run_id)
@@ -284,6 +322,13 @@ def run_events(
                 if serialized != previous:
                     yield f"event: snapshot\ndata: {serialized}\n\n"
                     previous = serialized
+                    last_sent = monotonic()
+                elif monotonic() - last_sent >= 10:
+                    # Model calls may have no progress change for minutes.
+                    # Keep proxies from closing an otherwise healthy stream;
+                    # this is not a completed step or a percentage increase.
+                    yield ": keep-alive\n\n"
+                    last_sent = monotonic()
                 if run.status in {"waiting_confirmation", "completed", "failed", "cancelled"}:
                     yield "event: done\ndata: {}\n\n"
                     return

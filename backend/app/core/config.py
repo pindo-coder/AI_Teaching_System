@@ -141,8 +141,13 @@ class Settings(BaseSettings):
     chroma_persist_directory: str = "../knowledge_base/chroma"
     knowledge_upload_directory: str = "../knowledge_base/uploads"
     generated_artifact_directory: str = "../knowledge_base/generated_artifacts"
-    presentation_node_binary: str = "node"
-    presentation_node_modules: str | None = None
+    # Native SVG -> PPTX engine. Downloaded/pinned during setup, never per request.
+    ppt_master_directory: str = "presentation_runtime/vendor/ppt-master"
+    ppt_office_binary: str = "soffice"
+    ppt_font_directory: str | None = None
+    ppt_export_timeout_seconds: int = Field(default=120, ge=30, le=300)
+    ppt_page_repair_attempts: int = Field(default=2, ge=0, le=3)
+    ppt_job_timeout_seconds: int = Field(default=1800, ge=180, le=3600)
     ppt_multimodal_enabled: bool = True
     ppt_multimodal_api_key: str | None = Field(
         default=None,
@@ -151,8 +156,9 @@ class Settings(BaseSettings):
     ppt_multimodal_base_url: str = "https://dashscope.aliyuncs.com/api/v1"
     # Wan2.7 Image Pro 质量更适合课堂配图；如需降低成本可在 .env 改为 wan2.7-image。
     ppt_multimodal_model: str = "wan2.7-image-pro"
-    ppt_multimodal_max_images: int = 3
+    ppt_multimodal_max_images: int = Field(default=3, ge=0, le=3)
     ppt_multimodal_timeout_seconds: int = 180
+    ppt_image_review_enabled: bool = True
     rag_collection_name: str = "ideology_course_kb"
     rag_active_collection: str | None = None
     rag_top_k: int = 4

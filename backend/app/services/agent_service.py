@@ -1,4 +1,5 @@
 from __future__ import annotations
+from uuid import uuid4
 
 from datetime import datetime
 import json
@@ -11,19 +12,13 @@ from fastapi import HTTPException, status
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
-from sqlalchemy import Engine, or_, select
+from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.prompts import (
     LESSON_ARTIFACT_SYSTEM_PROMPT,
     LESSON_ARTIFACT_USER_PROMPT,
-    LESSON_PPT_DESIGN_SYSTEM_PROMPT,
-    LESSON_PPT_DESIGN_USER_PROMPT,
-    LESSON_PPT_REVIEW_SYSTEM_PROMPT,
-    LESSON_PPT_REVIEW_USER_PROMPT,
-    LESSON_PPT_REVISION_SYSTEM_PROMPT,
-    LESSON_PPT_REVISION_USER_PROMPT,
     LESSON_PREP_SYSTEM_PROMPT,
     LESSON_PREP_USER_PROMPT,
     STAGE_INSTRUCTIONS,
@@ -41,13 +36,17 @@ from app.schemas.agent import (
     AgentRunData,
     AgentStepData,
     PptSlideRevisionRequest,
+    PptImageRevisionRequest,
+    PptPreferences,
 )
 from app.schemas.ai import AiAssistData, AiAssistRequest
 from app.services.ai_service import AiService
 from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.presentation_template_service import PresentationTemplateService
-from app.services.ppt_multimodal_service import PptMultimodalService
+from app.services.ppt_workflow_service import PptWorkflowService, PptWorkflowCancelled
+from app.services.ppt_native_service import safe_artifact_path
+from app.services.lesson_artifact_state import requires_previous_confirmation
 
 
 logger = logging.getLogger(__name__)
@@ -72,675 +71,17 @@ def _local_now_iso() -> str:
     return datetime.now().astimezone().isoformat()
 
 
-def _clean_ppt_visible_text(value: Any) -> Any:
-    """PPT 面向学生的可见文本不展示系统引用编号。"""
-    if isinstance(value, str):
-        cleaned = re.sub(r"\[资料\d+\]", "", value)
-        cleaned = re.sub(r"^资料依据[：:]\s*.*$", "", cleaned)
-        return re.sub(r"\s{2,}", " ", cleaned).strip(" ；;、")
-    if isinstance(value, list):
-        return [item for item in (_clean_ppt_visible_text(item) for item in value) if item]
-    return value
-
-
-PPT_LAYOUTS = {
-    "title",
-    "agenda",
-    "question",
-    "content",
-    "concept",
-    "process",
-    "comparison",
-    "timeline",
-    "discussion",
-    "summary",
-}
-
-PPT_COLOR_ROLES = {
-    "background",
-    "surface",
-    "primary",
-    "secondary",
-    "accent",
-    "text",
-    "muted",
-    "inverse",
-}
-PPT_ELEMENT_TYPES = {"text", "shape", "line", "image"}
-PPT_TEXT_STYLES = {"hero", "title", "subtitle", "body", "label", "number", "quote"}
-PPT_SHAPES = {"rect", "roundRect", "ellipse", "arc"}
-PPT_ALIGNMENTS = {"left", "center", "right"}
-PPT_BACKGROUNDS = {"background", "surface", "primary", "secondary"}
-PPT_SOURCE_PATTERN = re.compile(
-    r"^(?:title|takeaway|keyword|page_number|bullet:\d+|"
-    r"(?:left|right)\.(?:title|point:\d+)|"
-    r"step:\d+\.(?:title|description)|timeline:\d+\.(?:label|title))$"
-)
-PPT_DEFAULT_PALETTE = {
-    "background": "F7F4EE",
-    "surface": "FFFFFF",
-    "primary": "9E2335",
-    "secondary": "2459B8",
-    "accent": "D3A23A",
-    "text": "172033",
-    "muted": "758198",
-    "inverse": "FFFFFF",
-}
-
-
-def _fit_ppt_phrase(value: Any, limit: int) -> str:
-    text = str(_clean_ppt_visible_text(value or ""))
-    if len(text) <= limit:
-        return text
-    candidate = text[:limit]
-    for separator in ("。", "；", "，", "、"):
-        position = candidate.rfind(separator)
-        if position >= int(limit * 0.6):
-            return candidate[: position + 1]
-    return f"{candidate.rstrip('，；、 ')}…"
-
-
-def _split_ppt_point(value: Any, limit: int = 48) -> list[str]:
-    text = str(_clean_ppt_visible_text(value or "")).strip()
-    if not text:
-        return []
-    if len(text) <= limit:
-        return [text]
-    parts = [part.strip() for part in re.split(r"(?<=[。；！？])", text) if part.strip()]
-    if len(parts) > 1 and all(len(part) <= limit + 12 for part in parts):
-        return parts
-    return [
-        text[index : index + limit].strip()
-        for index in range(0, len(text), limit)
-        if text[index : index + limit].strip()
-    ]
-
-
-def _normalize_ppt_items(values: Any, *, limit: int = 48, maximum: int = 8) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    normalized: list[str] = []
-    for value in values:
-        normalized.extend(_split_ppt_point(value, limit))
-    return normalized[:maximum]
-
-
-def _sanitize_ppt_visible_content(ppt_data: dict[str, Any]) -> dict[str, Any]:
-    cleaned = json.loads(json.dumps(ppt_data, ensure_ascii=False))
-    cleaned["title"] = _fit_ppt_phrase(cleaned.get("title"), 32)
-    cleaned["subtitle"] = _fit_ppt_phrase(cleaned.get("subtitle"), 42)
-    normalized_slides: list[dict[str, Any]] = []
-    for index, raw_slide in enumerate(cleaned.get("slides") or []):
-        if not isinstance(raw_slide, dict):
-            continue
-        slide = raw_slide
-        layout = str(slide.get("layout") or "content").lower()
-        slide["layout"] = layout if layout in PPT_LAYOUTS else "content"
-        if index == 0:
-            slide["layout"] = "title"
-        slide["title"] = _fit_ppt_phrase(slide.get("title"), 30)
-        slide["takeaway"] = _fit_ppt_phrase(slide.get("takeaway"), 62)
-        slide["keyword"] = _fit_ppt_phrase(slide.get("keyword"), 16)
-        slide["bullets"] = _normalize_ppt_items(slide.get("bullets"), maximum=10)
-        for side in ("left", "right"):
-            block = slide.get(side)
-            if not isinstance(block, dict):
-                block = {}
-            block["title"] = _fit_ppt_phrase(block.get("title"), 16)
-            block["points"] = _normalize_ppt_items(block.get("points"), maximum=4)
-            slide[side] = block
-        steps: list[dict[str, str]] = []
-        for item in (slide.get("steps") or [])[:5]:
-            if not isinstance(item, dict):
-                continue
-            steps.append(
-                {
-                    "title": _fit_ppt_phrase(item.get("title"), 12),
-                    "description": _fit_ppt_phrase(item.get("description"), 34),
-                }
-            )
-        slide["steps"] = steps
-        timeline: list[dict[str, str]] = []
-        for item in (slide.get("timeline") or [])[:5]:
-            if not isinstance(item, dict):
-                continue
-            timeline.append(
-                {
-                    "label": _fit_ppt_phrase(item.get("label"), 10),
-                    "title": _fit_ppt_phrase(item.get("title"), 28),
-                }
-            )
-        slide["timeline"] = timeline
-        bullet_groups = [
-            slide["bullets"][offset : offset + 5]
-            for offset in range(0, len(slide["bullets"]), 5)
-        ] or [[]]
-        slide["bullets"] = bullet_groups[0]
-        normalized_slides.append(slide)
-        if len(bullet_groups) > 1 and slide["layout"] in {"content", "agenda"}:
-            for continuation_index, group in enumerate(bullet_groups[1:], start=2):
-                continuation = json.loads(json.dumps(slide, ensure_ascii=False))
-                continuation["layout"] = "content"
-                continuation["title"] = _fit_ppt_phrase(
-                    f"{slide['title']}（续{continuation_index - 1}）",
-                    30,
-                )
-                continuation["bullets"] = group
-                normalized_slides.append(continuation)
-    cleaned["slides"] = normalized_slides
-    return cleaned
-
-
-def _enforce_ppt_slide_count(
-    ppt_data: dict[str, Any],
-    target: int | None,
-    outline: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """模型轻微偏离页数时做安全收敛，保证教师设置的精确页数可兑现。"""
-    if target is None or not 6 <= target <= 30:
-        return ppt_data
-    slides = list(ppt_data.get("slides") or [])
-    if len(slides) > target:
-        slides = slides[: target - 1] + [slides[-1]]
-    fallback_points = (
-        list((outline or {}).get("key_points") or [])
-        + list((outline or {}).get("difficult_points") or [])
-        + list((outline or {}).get("discussion_questions") or [])
-    )
-    while slides and len(slides) < target:
-        offset = len(slides)
-        point = fallback_points[offset % len(fallback_points)] if fallback_points else "联系教材原文梳理本专题核心观点"
-        supplemental = {
-            "layout": "content",
-            "title": _fit_ppt_phrase(f"深化理解：{point}", 30),
-            "takeaway": _fit_ppt_phrase(point, 62),
-            "bullets": [_fit_ppt_phrase(point, 45)],
-            "keyword": "",
-            "left": {"title": "", "points": []},
-            "right": {"title": "", "points": []},
-            "steps": [],
-            "timeline": [],
-            "speaker_notes": "结合已确认课纲与教材证据补充讲解。",
-            "evidence_refs": list(slides[-1].get("evidence_refs") or []),
-        }
-        slides.insert(max(1, len(slides) - 1), supplemental)
-    ppt_data["slides"] = slides
-    return ppt_data
-
-
-def _sanitize_hex_color(value: Any, fallback: str) -> str:
-    candidate = str(value or "").strip().lstrip("#").upper()
-    return candidate if re.fullmatch(r"[0-9A-F]{6}", candidate) else fallback
-
-
-def _bounded_number(value: Any, minimum: float, maximum: float, fallback: float) -> float:
+def _local_protocol_timestamp(value: Any) -> Any:
+    """Expose legacy agent wall clocks with their host offset, without rewriting rows."""
+    if not isinstance(value, str) or not value:
+        return value
     try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return fallback
-    return round(min(maximum, max(minimum, number)), 2)
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    return (parsed.astimezone() if parsed.tzinfo is None else parsed).isoformat()
 
 
-def _sanitize_ppt_design(
-    design_result: dict[str, Any],
-    slide_count: int,
-) -> tuple[dict[str, Any], dict[int, list[dict[str, Any]]]]:
-    raw_design = design_result.get("design")
-    if not isinstance(raw_design, dict):
-        raw_design = {}
-    raw_palette = raw_design.get("palette")
-    if not isinstance(raw_palette, dict):
-        raw_palette = {}
-    palette = {
-        role: _sanitize_hex_color(raw_palette.get(role), fallback)
-        for role, fallback in PPT_DEFAULT_PALETTE.items()
-    }
-    design = {
-        "name": _fit_ppt_phrase(raw_design.get("name") or "专题视觉叙事", 24),
-        "concept": _fit_ppt_phrase(raw_design.get("concept"), 90),
-        "mood": _fit_ppt_phrase(raw_design.get("mood"), 36),
-        "fonts": {
-            "heading": _fit_ppt_phrase(
-                (raw_design.get("fonts") or {}).get("heading")
-                if isinstance(raw_design.get("fonts"), dict)
-                else "Microsoft YaHei",
-                80,
-            )
-            or "Microsoft YaHei",
-            "body": _fit_ppt_phrase(
-                (raw_design.get("fonts") or {}).get("body")
-                if isinstance(raw_design.get("fonts"), dict)
-                else "Microsoft YaHei",
-                80,
-            )
-            or "Microsoft YaHei",
-        },
-        "palette": palette,
-        "agent": "ppt-visual-designer-v1",
-        "visual_prompts": {},
-    }
-    pages: dict[int, list[dict[str, Any]]] = {}
-    for raw_page in design_result.get("pages") or []:
-        if not isinstance(raw_page, dict):
-            continue
-        try:
-            index = int(raw_page.get("index"))
-        except (TypeError, ValueError):
-            continue
-        if not 0 <= index < slide_count or index in pages:
-            continue
-        background = str(raw_page.get("background") or "background")
-        if background not in PPT_BACKGROUNDS:
-            background = "background"
-        elements: list[dict[str, Any]] = []
-        image_count = 0
-        for raw_element in (raw_page.get("elements") or [])[:12]:
-            if not isinstance(raw_element, dict):
-                continue
-            element_type = str(raw_element.get("type") or "text")
-            if element_type not in PPT_ELEMENT_TYPES:
-                continue
-            source = str(raw_element.get("source") or "")
-            if element_type == "text" and not PPT_SOURCE_PATTERN.fullmatch(source):
-                continue
-            if element_type == "image":
-                if source != "visual_asset" or image_count >= 1:
-                    continue
-                image_count += 1
-            x = _bounded_number(raw_element.get("x"), 0, 96, 8)
-            y = _bounded_number(raw_element.get("y"), 6, 91, 12)
-            w = _bounded_number(raw_element.get("w"), 1, 100 - x, 30)
-            h = _bounded_number(raw_element.get("h"), 1, 94 - y, 10)
-            style = str(raw_element.get("style") or "body")
-            color = str(raw_element.get("color") or "text")
-            fill = str(raw_element.get("fill") or "")
-            shape = str(raw_element.get("shape") or "rect")
-            align = str(raw_element.get("align") or "left")
-            elements.append(
-                {
-                    "type": element_type,
-                    "source": source,
-                    "style": style if style in PPT_TEXT_STYLES else "body",
-                    "x": x,
-                    "y": y,
-                    "w": w,
-                    "h": h,
-                    "color": color if color in PPT_COLOR_ROLES else "text",
-                    "fill": fill if fill in PPT_COLOR_ROLES else "",
-                    "shape": shape if shape in PPT_SHAPES else "rect",
-                    "align": align if align in PPT_ALIGNMENTS else "left",
-                    "bold": bool(raw_element.get("bold", False)),
-                    "background": background,
-                }
-            )
-        if len(elements) >= 3 and any(item["source"] == "title" for item in elements):
-            pages[index] = elements
-            if image_count:
-                prompt = _fit_ppt_phrase(raw_page.get("visual_prompt"), 1200)
-                if prompt:
-                    design["visual_prompts"][str(index)] = prompt
-    return design, pages
-
-
-def _resolve_ppt_canvas_source(
-    slide: dict[str, Any],
-    source: str,
-    slide_index: int = 0,
-) -> str:
-    """Resolve the same source vocabulary used by the Node PPT renderer."""
-    if source == "title":
-        return str(slide.get("title") or "").strip()
-    if source == "takeaway":
-        return str(slide.get("takeaway") or "").strip()
-    if source == "keyword":
-        return str(slide.get("keyword") or "").strip()
-    if source == "page_number":
-        return str(slide_index + 1)
-    if source in {"left.title", "right.title"}:
-        side, _ = source.split(".", 1)
-        value = slide.get(side)
-        return str(value.get("title") or "").strip() if isinstance(value, dict) else ""
-
-    match = re.fullmatch(r"bullet:(\d+)", source)
-    if match:
-        values = slide.get("bullets") or []
-        index = int(match.group(1))
-        return str(values[index]).strip() if index < len(values) else ""
-
-    match = re.fullmatch(r"(left|right)\.point:(\d+)", source)
-    if match:
-        value = slide.get(match.group(1))
-        points = value.get("points") or [] if isinstance(value, dict) else []
-        index = int(match.group(2))
-        return str(points[index]).strip() if index < len(points) else ""
-
-    match = re.fullmatch(r"step:(\d+)\.(title|description)", source)
-    if match:
-        values = slide.get("steps") or []
-        index = int(match.group(1))
-        value = values[index] if index < len(values) else {}
-        return (
-            str(value.get(match.group(2)) or "").strip()
-            if isinstance(value, dict)
-            else ""
-        )
-
-    match = re.fullmatch(r"timeline:(\d+)\.(label|title)", source)
-    if match:
-        values = slide.get("timeline") or []
-        index = int(match.group(1))
-        value = values[index] if index < len(values) else {}
-        return (
-            str(value.get(match.group(2)) or "").strip()
-            if isinstance(value, dict)
-            else ""
-        )
-    return ""
-
-
-def _prepare_ppt_canvas_for_slide(
-    slide: dict[str, Any],
-    canvas: list[dict[str, Any]],
-    slide_index: int,
-) -> tuple[list[dict[str, Any]] | None, dict[str, Any]]:
-    """Drop empty text slots and reject canvases that would render as blank pages."""
-    prepared: list[dict[str, Any]] = []
-    visible_sources: list[str] = []
-    visible_characters = 0
-    for item in canvas:
-        if item.get("type") != "text":
-            prepared.append(item)
-            continue
-        source = str(item.get("source") or "")
-        resolved = _resolve_ppt_canvas_source(slide, source, slide_index)
-        if not resolved:
-            continue
-        prepared.append(item)
-        if source != "page_number":
-            visible_sources.append(source)
-            visible_characters += len(resolved)
-
-    body_sources = [
-        source for source in visible_sources if source not in {"title", "page_number"}
-    ]
-    valid = (
-        "title" in visible_sources
-        and bool(body_sources)
-        and visible_characters >= 16
-    )
-    diagnostics = {
-        "visible_sources": visible_sources,
-        "body_source_count": len(body_sources),
-        "visible_characters": visible_characters,
-        "recovered_with_safe_layout": not valid,
-    }
-    return (prepared if valid else None), diagnostics
-
-
-def _attach_mock_ppt_design(ppt_data: dict[str, Any]) -> dict[str, Any]:
-    """测试模式也走自由画布渲染，避免只验证安全回退路径。"""
-    ppt_data["design"] = {
-        "name": "理论之路",
-        "concept": "以方向线、章节序号和结论大字表现理论从历史走向实践的教学路径。",
-        "mood": "庄重、开放、有阅读节奏",
-        "fonts": {"heading": "Microsoft YaHei", "body": "Microsoft YaHei"},
-        "palette": {
-            "background": "F5F1E8",
-            "surface": "FFFFFF",
-            "primary": "8F2638",
-            "secondary": "1E4E83",
-            "accent": "C99732",
-            "text": "172033",
-            "muted": "667085",
-            "inverse": "FFFFFF",
-        },
-        "agent": "mock-visual-designer",
-        "status": "personalized",
-        "designed_pages": len(ppt_data.get("slides") or []),
-    }
-    for index, slide in enumerate(ppt_data.get("slides") or []):
-        dark = index in {0, 2, 8}
-        background = "primary" if index == 0 else "secondary" if dark else "background"
-        foreground = "inverse" if dark else "text"
-        title_x = 8 if index % 3 != 1 else 31
-        title_w = 72 if index % 3 != 1 else 61
-        slide["canvas_background"] = background
-        slide["canvas"] = [
-            {
-                "type": "shape",
-                "source": "",
-                "style": "body",
-                "x": 5,
-                "y": 8,
-                "w": 2,
-                "h": 78,
-                "color": "accent",
-                "fill": "accent",
-                "shape": "rect",
-                "align": "left",
-                "bold": False,
-            },
-            {
-                "type": "text",
-                "source": "page_number",
-                "style": "number",
-                "x": 84 if index % 3 != 1 else 8,
-                "y": 9,
-                "w": 9,
-                "h": 10,
-                "color": "accent",
-                "fill": "",
-                "shape": "rect",
-                "align": "right" if index % 3 != 1 else "left",
-                "bold": True,
-            },
-            {
-                "type": "text",
-                "source": "title",
-                "style": "hero" if index == 0 else "title",
-                "x": title_x,
-                "y": 22 if index == 0 else 17,
-                "w": title_w,
-                "h": 24 if index == 0 else 18,
-                "color": foreground,
-                "fill": "",
-                "shape": "rect",
-                "align": "left",
-                "bold": True,
-            },
-            {
-                "type": "text",
-                "source": "takeaway",
-                "style": "quote" if index in {0, 2, 9} else "subtitle",
-                "x": title_x,
-                "y": 53 if index == 0 else 42,
-                "w": title_w,
-                "h": 18,
-                "color": "inverse" if dark else "primary",
-                "fill": "",
-                "shape": "rect",
-                "align": "left",
-                "bold": False,
-            },
-        ]
-    return ppt_data
-
-
-def _canvas_overlap_ratio(first: dict[str, Any], second: dict[str, Any]) -> float:
-    left = max(float(first.get("x", 0)), float(second.get("x", 0)))
-    top = max(float(first.get("y", 0)), float(second.get("y", 0)))
-    right = min(
-        float(first.get("x", 0)) + float(first.get("w", 0)),
-        float(second.get("x", 0)) + float(second.get("w", 0)),
-    )
-    bottom = min(
-        float(first.get("y", 0)) + float(first.get("h", 0)),
-        float(second.get("y", 0)) + float(second.get("h", 0)),
-    )
-    if right <= left or bottom <= top:
-        return 0
-    intersection = (right - left) * (bottom - top)
-    smaller = min(
-        float(first.get("w", 0)) * float(first.get("h", 0)),
-        float(second.get("w", 0)) * float(second.get("h", 0)),
-    )
-    return intersection / smaller if smaller else 0
-
-
-def _deterministic_ppt_quality(ppt_data: dict[str, Any]) -> dict[str, Any]:
-    issues: list[dict[str, Any]] = []
-    slides = ppt_data.get("slides") or []
-    design = ppt_data.get("design") or {}
-    if design.get("status") != "personalized":
-        issues.append(
-            {
-                "slide_index": None,
-                "severity": "high",
-                "category": "visual",
-                "message": "视觉设计 Agent 未完成个性化画布，当前使用安全回退版式。",
-                "suggestion": "检查模型连接后重新生成 PPT。",
-            }
-        )
-    for index, slide in enumerate(slides):
-        canvas = slide.get("canvas") or []
-        if not canvas:
-            issues.append(
-                {
-                    "slide_index": index,
-                    "severity": "high",
-                    "category": "visual",
-                    "message": "本页缺少个性化自由画布。",
-                    "suggestion": "重新设计本页视觉构图。",
-                }
-            )
-            continue
-        text_elements = [
-            item
-            for item in canvas
-            if (
-                item.get("type") == "text"
-                and item.get("source") != "page_number"
-                and _resolve_ppt_canvas_source(
-                    slide,
-                    str(item.get("source") or ""),
-                    index,
-                )
-            )
-        ]
-        if len(text_elements) < 2:
-            issues.append(
-                {
-                    "slide_index": index,
-                    "severity": "medium",
-                    "category": "density",
-                    "message": "本页信息层级过少，可能显得空洞。",
-                    "suggestion": "补充一条核心结论或必要的教学要点。",
-                }
-            )
-        for first_index, first in enumerate(text_elements):
-            for second in text_elements[first_index + 1 :]:
-                if _canvas_overlap_ratio(first, second) > 0.28:
-                    issues.append(
-                        {
-                            "slide_index": index,
-                            "severity": "high",
-                            "category": "visual",
-                            "message": "检测到两个文字区域明显重叠。",
-                            "suggestion": "重新调整本页元素位置或减少文字。",
-                        }
-                    )
-                    break
-            else:
-                continue
-            break
-        available_sources = {
-            f"bullet:{item_index}"
-            for item_index, _ in enumerate(slide.get("bullets") or [])
-        }
-        used_sources = {str(item.get("source") or "") for item in text_elements}
-        if available_sources and not available_sources.intersection(used_sources):
-            issues.append(
-                {
-                    "slide_index": index,
-                    "severity": "medium",
-                    "category": "content",
-                    "message": "本页生成了教学要点，但画布没有呈现任何要点。",
-                    "suggestion": "选择关键要点呈现在页面上，或压缩到讲者备注。",
-                }
-            )
-    layouts = {str(item.get("layout") or "") for item in slides}
-    if "discussion" not in layouts:
-        issues.append(
-            {
-                "slide_index": None,
-                "severity": "medium",
-                "category": "interaction",
-                "message": "整套课件没有明确的课堂参与页面。",
-                "suggestion": "结合教学目标增加讨论、判断或小组任务。",
-            }
-        )
-    if "summary" not in layouts:
-        issues.append(
-            {
-                "slide_index": None,
-                "severity": "medium",
-                "category": "narrative",
-                "message": "整套课件缺少对开场问题的总结回应。",
-                "suggestion": "增加能够收束理论认识和应用方法的结尾页。",
-            }
-        )
-    penalty = {"high": 14, "medium": 7, "low": 3}
-    score = max(0, 100 - sum(penalty.get(item["severity"], 3) for item in issues))
-    return {
-        "score": score,
-        "passed": score >= 80 and not any(item["severity"] == "high" for item in issues),
-        "summary": "自动版面与结构检查完成。",
-        "issues": issues[:30],
-        "reviewer": "ppt-quality-gate-v1",
-        "checked_time": _local_now_iso(),
-    }
-
-
-def _merge_ppt_quality(
-    deterministic: dict[str, Any],
-    model_review: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(model_review, dict):
-        return deterministic
-    model_issues: list[dict[str, Any]] = []
-    for raw in (model_review.get("issues") or [])[:20]:
-        if not isinstance(raw, dict):
-            continue
-        severity = str(raw.get("severity") or "low")
-        category = str(raw.get("category") or "content")
-        try:
-            slide_index = int(raw["slide_index"]) if raw.get("slide_index") is not None else None
-        except (TypeError, ValueError):
-            slide_index = None
-        model_issues.append(
-            {
-                "slide_index": slide_index,
-                "severity": severity if severity in {"high", "medium", "low"} else "low",
-                "category": category,
-                "message": _fit_ppt_phrase(raw.get("message"), 100),
-                "suggestion": _fit_ppt_phrase(raw.get("suggestion"), 120),
-            }
-        )
-    all_issues = [*(deterministic.get("issues") or []), *model_issues]
-    try:
-        model_score = int(model_review.get("score"))
-    except (TypeError, ValueError):
-        model_score = deterministic["score"]
-    score = max(0, min(100, min(deterministic["score"], model_score)))
-    return {
-        **deterministic,
-        "score": score,
-        "passed": score >= 80 and not any(item["severity"] == "high" for item in all_issues),
-        "summary": _fit_ppt_phrase(model_review.get("summary"), 160)
-        or deterministic["summary"],
-        "issues": all_issues[:30],
-        "reviewer": "ppt-quality-agent-v1",
-    }
 
 
 def _invoke_streaming_text(
@@ -912,515 +253,45 @@ class LessonOutlineGenerator:
 
 
 class LessonArtifactGenerator:
+    """Generate non-presentation artifacts only; PPT has its own v2 workflow."""
+
     def __init__(self, db: Session | None = None, user_id: int | None = None) -> None:
-        self.db = db
-        self.user_id = user_id
-        self.model_name = "mock" if settings.ai_mock_mode else AiProviderConfigService.resolve(db).model_name
-
-    @staticmethod
-    def _target_slide_count(variables: dict[str, str]) -> int | None:
-        try:
-            preferences = json.loads(variables.get("ppt_preferences") or "{}")
-            value = preferences.get("slide_count")
-            return int(value) if value is not None else None
-        except (TypeError, ValueError, json.JSONDecodeError):
-            return None
-
-    def _personalize_ppt(
-        self,
-        ppt_data: dict[str, Any],
-        variables: dict[str, str],
-    ) -> dict[str, Any]:
-        slides = ppt_data.get("slides") or []
-        if not slides:
-            return ppt_data
-        design_prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", LESSON_PPT_DESIGN_SYSTEM_PROMPT),
-                ("human", LESSON_PPT_DESIGN_USER_PROMPT),
-            ]
-        )
-        runtime = AiProviderConfigService.resolve(self.db)
-        design_model, _ = build_chat_model(
-            feature="ppt_design",
-            db=self.db,
-            user_id=self.user_id,
-            temperature=max(runtime.temperature, 0.55),
-            timeout=max(runtime.timeout_seconds, 120),
-            streaming=True,
-        )
-        design_raw = _invoke_streaming_text(
-            design_prompt,
-            design_model,
-            {
-                "course_name": variables["course_name"],
-                "chapter_title": variables["chapter_title"],
-                "ppt_preferences": variables.get("ppt_preferences", "{}"),
-                "template_reference": variables.get("template_reference", "{}"),
-                "ppt_json": json.dumps(ppt_data, ensure_ascii=False),
-            },
-        )
-        parsed_design = _extract_json_object(
-            design_raw,
-            error_message="视觉设计 Agent 未返回合法 JSON",
-        )
-        if not isinstance(parsed_design, dict):
-            raise RuntimeError("视觉设计 Agent 返回格式无效")
-        design, pages = _sanitize_ppt_design(parsed_design, len(slides))
-        try:
-            template_reference = json.loads(variables.get("template_reference") or "{}")
-        except json.JSONDecodeError:
-            template_reference = {}
-        template_palette = template_reference.get("palette")
-        if isinstance(template_palette, dict) and template_palette:
-            design["palette"] = {
-                role: _sanitize_hex_color(
-                    template_palette.get(role),
-                    design["palette"][role],
-                )
-                for role in PPT_DEFAULT_PALETTE
-            }
-            design["template_reference"] = {
-                "id": template_reference.get("id"),
-                "name": template_reference.get("name"),
-                "compatibility": template_reference.get("compatibility"),
-            }
-        template_fonts = template_reference.get("fonts")
-        if isinstance(template_fonts, dict):
-            design["fonts"] = {
-                "heading": _fit_ppt_phrase(
-                    template_fonts.get("heading") or design["fonts"]["heading"],
-                    80,
-                ),
-                "body": _fit_ppt_phrase(
-                    template_fonts.get("body") or design["fonts"]["body"],
-                    80,
-                ),
-            }
-        minimum_pages = max(1, int(len(slides) * 0.7))
-        if len(pages) < minimum_pages:
-            raise RuntimeError("视觉设计 Agent 返回的有效页面不足")
-        accepted_pages: dict[int, list[dict[str, Any]]] = {}
-        fallback_pages: list[int] = []
-        canvas_diagnostics: dict[str, Any] = {}
-        for index, slide in enumerate(slides):
-            page = pages.get(index)
-            if page is None:
-                fallback_pages.append(index)
-                continue
-            prepared, diagnostics = _prepare_ppt_canvas_for_slide(
-                slide,
-                page,
-                index,
-            )
-            canvas_diagnostics[str(index)] = diagnostics
-            if prepared is None:
-                fallback_pages.append(index)
-                continue
-            accepted_pages[index] = prepared
-
-        design["status"] = (
-            "personalized" if len(accepted_pages) == len(slides) else "hybrid"
-        )
-        design["designed_pages"] = len(accepted_pages)
-        design["fallback_pages"] = fallback_pages
-        design["canvas_diagnostics"] = canvas_diagnostics
-        ppt_data["design"] = design
-        for index, slide in enumerate(slides):
-            slide.pop("canvas", None)
-            slide.pop("canvas_background", None)
-            if index in accepted_pages:
-                slide["canvas"] = accepted_pages[index]
-                slide["canvas_background"] = accepted_pages[index][0]["background"]
-                visual_prompt = design.get("visual_prompts", {}).get(str(index))
-                if visual_prompt:
-                    slide["visual_prompt"] = visual_prompt
-        return ppt_data
-
-    def _review_ppt(
-        self,
-        ppt_data: dict[str, Any],
-        variables: dict[str, str],
-    ) -> dict[str, Any]:
-        deterministic = _deterministic_ppt_quality(ppt_data)
-        if settings.ai_mock_mode:
-            return deterministic
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", LESSON_PPT_REVIEW_SYSTEM_PROMPT),
-                ("human", LESSON_PPT_REVIEW_USER_PROMPT),
-            ]
-        )
-        runtime = AiProviderConfigService.resolve(self.db)
-        model, _ = build_chat_model(
-            feature="ppt_quality_review",
-            db=self.db,
-            user_id=self.user_id,
-            temperature=0.1,
-            timeout=max(runtime.timeout_seconds, 120),
-            streaming=True,
-        )
-        try:
-            raw = _invoke_streaming_text(
-                prompt,
-                model,
-                {
-                    "course_name": variables["course_name"],
-                    "chapter_title": variables["chapter_title"],
-                    "ppt_preferences": variables.get("ppt_preferences", "{}"),
-                    "ppt_json": json.dumps(ppt_data, ensure_ascii=False),
-                },
-            )
-            parsed = _extract_json_object(raw, error_message="PPT 质量检查未返回合法 JSON")
-            return _merge_ppt_quality(deterministic, parsed)
-        except Exception as exc:
-            logger.warning("ppt_quality_agent_fallback reason=%s", exc)
-            return deterministic
-
-    def revise_slide(
-        self,
-        *,
-        course_name: str,
-        chapter_title: str,
-        ppt_data: dict[str, Any],
-        slide_index: int,
-        request: PptSlideRevisionRequest,
-        evidence: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        original = ppt_data["slides"][slide_index]
-        if settings.ai_mock_mode:
-            revised = json.loads(json.dumps(original, ensure_ascii=False))
-            if request.mode != "design":
-                revised["takeaway"] = _fit_ppt_phrase(request.instruction, 62)
-            mock = _attach_mock_ppt_design(
-                {"title": ppt_data.get("title"), "slides": [revised]}
-            )
-            revised["canvas"] = mock["slides"][0]["canvas"]
-            revised["canvas_background"] = mock["slides"][0]["canvas_background"]
-            return revised
-
-        prompt = ChatPromptTemplate.from_messages(
-            [
-                ("system", LESSON_PPT_REVISION_SYSTEM_PROMPT),
-                ("human", LESSON_PPT_REVISION_USER_PROMPT),
-            ]
-        )
-        runtime = AiProviderConfigService.resolve(self.db)
-        model, _ = build_chat_model(
-            feature="ppt_slide_revision",
-            db=self.db,
-            user_id=self.user_id,
-            temperature=max(runtime.temperature, 0.45),
-            timeout=max(runtime.timeout_seconds, 120),
-            streaming=True,
-        )
-        evidence_context = "\n\n".join(
-            f"[资料{index}] {item.get('source_title') or '课程资料'}\n"
-            f"{item.get('position') or ''}\n{item.get('excerpt') or ''}"
-            for index, item in enumerate(evidence, start=1)
-        )
-        raw = _invoke_streaming_text(
-            prompt,
-            model,
-            {
-                "course_name": course_name,
-                "chapter_title": chapter_title,
-                "revision_mode": request.mode,
-                "instruction": request.instruction,
-                "design_json": json.dumps(ppt_data.get("design") or {}, ensure_ascii=False),
-                "slide_json": json.dumps(original, ensure_ascii=False),
-                "evidence_context": evidence_context,
-            },
-        )
-        parsed = _extract_json_object(raw, error_message="单页修改 Agent 未返回合法 JSON")
-        raw_slide = parsed.get("slide")
-        if request.mode == "design":
-            raw_slide = json.loads(json.dumps(original, ensure_ascii=False))
-        if not isinstance(raw_slide, dict):
-            raise RuntimeError("单页修改 Agent 未返回页面内容")
-        dummy = {
-            "layout": "title",
-            "title": "占位",
-            "takeaway": "",
-            "bullets": [],
-        }
-        normalized = _sanitize_ppt_visible_content(
-            {"title": ppt_data.get("title"), "slides": [dummy, raw_slide]}
-        )["slides"]
-        if len(normalized) < 2:
-            raise RuntimeError("修改后的页面内容无效")
-        revised = normalized[1]
-        valid_refs = {f"资料{index}" for index in range(1, len(evidence) + 1)}
-        revised["evidence_refs"] = [
-            item
-            for item in revised.get("evidence_refs") or []
-            if str(item) in valid_refs
-        ]
-        design_page = parsed.get("design_page")
-        if not isinstance(design_page, dict):
-            raise RuntimeError("单页修改 Agent 未返回页面设计")
-        design, pages = _sanitize_ppt_design(
-            {
-                "design": ppt_data.get("design") or {},
-                "pages": [{"index": 0, **design_page}],
-            },
-            1,
-        )
-        if 0 not in pages:
-            raise RuntimeError("修改后的页面设计未通过画布校验")
-        prepared, _ = _prepare_ppt_canvas_for_slide(revised, pages[0], slide_index)
-        if prepared is None:
-            raise RuntimeError("修改后的页面正文覆盖不足，请重新生成页面设计")
-        revised["canvas"] = prepared
-        revised["canvas_background"] = prepared[0]["background"]
-        return revised
+        self.db, self.user_id = db, user_id
 
     def generate(self, variables: dict[str, str]) -> dict[str, Any]:
         if settings.ai_mock_mode:
             outline = json.loads(variables["outline_json"])
-            chapter_title = variables["chapter_title"]
-            teaching_flow = outline.get("teaching_flow") or []
             objectives = outline.get("objectives") or {}
-            key_points = outline.get("key_points") or ["梳理专题核心概念"]
-            difficult_points = outline.get("difficult_points") or ["区分基本原理与实践说明"]
-            slides = [
-                {
-                    "layout": "title",
-                    "title": outline.get("title") or f"{chapter_title}教学课件",
-                    "takeaway": outline.get("positioning") or "从教材原文出发理解专题主旨",
-                    "bullets": [],
-                    "speaker_notes": "说明本次课程的学习目标与问题线索。",
-                    "evidence_refs": [],
-                },
-                {
-                    "layout": "agenda",
-                    "title": "沿着四个问题展开本专题",
-                    "takeaway": "从问题出发，逐步形成理论结构",
-                    "bullets": ["现实问题是什么", "核心概念是什么", "理论逻辑如何展开", "如何联系实践"],
-                    "speaker_notes": "说明本课的学习路径。",
-                    "evidence_refs": [],
-                },
-                {
-                    "layout": "question",
-                    "title": "为什么必须在新时代继续坚持和发展",
-                    "takeaway": outline.get("positioning") or "建立专题的整体认识",
-                    "bullets": (objectives.get("knowledge") or [])[:3],
-                    "speaker_notes": "用现实问题激活已有认知，引出教材主旨。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "concept",
-                    "title": "核心概念必须放回理论体系中理解",
-                    "keyword": "坚持与发展",
-                    "takeaway": "方向不能改变，实践不断发展",
-                    "bullets": key_points[:4],
-                    "speaker_notes": "讲解概念之间的关系，避免孤立记忆。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "process",
-                    "title": "理论认识沿着四层逻辑逐步展开",
-                    "takeaway": "从时代方位走向实践要求",
-                    "steps": [
-                        {"title": "时代方位", "description": "认识新的历史条件"},
-                        {"title": "理论主题", "description": "明确坚持和发展的对象"},
-                        {"title": "实践路径", "description": "把理论转化为行动"},
-                        {"title": "价值目标", "description": "指向民族复兴与人民幸福"},
-                    ],
-                    "bullets": [],
-                    "speaker_notes": "按逻辑顺序串联本专题的重要观点。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "comparison",
-                    "title": "坚持与发展不是彼此割裂的两件事",
-                    "takeaway": "在坚持中发展，在发展中坚持",
-                    "left": {
-                        "title": "坚持",
-                        "points": ["守住根本方向", "把握基本原则", "保持理论定力"],
-                    },
-                    "right": {
-                        "title": "发展",
-                        "points": ["回应时代问题", "推进实践创新", "丰富理论内涵"],
-                    },
-                    "bullets": difficult_points[:2],
-                    "speaker_notes": "对易混概念进行对照说明。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "timeline",
-                    "title": "理论创新始终与时代实践同向而行",
-                    "takeaway": "实践发展不断提出新的理论课题",
-                    "timeline": [
-                        {"label": "历史起点", "title": "形成道路与制度基础"},
-                        {"label": "新的时期", "title": "改革开放推进理论创新"},
-                        {"label": "新时代", "title": "回答新的重大时代课题"},
-                        {"label": "面向未来", "title": "以新实践丰富理论发展"},
-                    ],
-                    "bullets": [],
-                    "speaker_notes": "联系历史进程理解理论发展的实践基础。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "content",
-                    "title": "教学重点落在理论与实践的统一",
-                    "takeaway": teaching_flow[0].get("teacher_activity") if teaching_flow else "用理论分析现实问题",
-                    "bullets": [
-                        *(objectives.get("ability") or []),
-                        *(objectives.get("values") or []),
-                        *key_points[:2],
-                    ],
-                    "speaker_notes": "结合教学目标深化理论联系实际。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "discussion",
-                    "title": "课堂讨论：如何用本专题分析现实问题",
-                    "takeaway": "观点表达必须建立在准确理解教材的基础上",
-                    "bullets": outline.get("discussion_questions") or ["结合教材说明你的判断"],
-                    "steps": [
-                        {"title": "独立思考", "description": "形成个人判断"},
-                        {"title": "小组辨析", "description": "比较不同观点"},
-                        {"title": "原文核验", "description": "回到教材确认依据"},
-                    ],
-                    "speaker_notes": "组织小组讨论并要求学生核对教材原文。",
-                    "evidence_refs": ["资料1"],
-                },
-                {
-                    "layout": "summary",
-                    "title": "把本专题沉淀为可迁移的认识框架",
-                    "takeaway": "理解核心观点，更要掌握分析问题的方法",
-                    "bullets": [
-                        *key_points[:3],
-                        outline.get("after_class_task") or "完成课后学习任务",
-                    ],
-                    "speaker_notes": "回顾目标并说明课后任务。",
-                    "evidence_refs": ["资料1"],
-                },
-            ]
-            lesson_objectives = [
-                *objectives.get("knowledge", []),
-                *objectives.get("ability", []),
-                *objectives.get("values", []),
-            ]
-            mock_ppt = _attach_mock_ppt_design(
-                _enforce_ppt_slide_count(
-                    {
-                    "title": outline.get("title") or f"{chapter_title}教学课件",
-                    "subtitle": variables["course_name"],
-                    "slides": slides,
-                    },
-                    self._target_slide_count(variables),
-                    outline,
-                )
-            )
-            try:
-                template_reference = json.loads(variables.get("template_reference") or "{}")
-            except json.JSONDecodeError:
-                template_reference = {}
-            if isinstance(template_reference.get("palette"), dict):
-                mock_ppt["design"]["palette"] = {
-                    role: _sanitize_hex_color(
-                        template_reference["palette"].get(role),
-                        mock_ppt["design"]["palette"][role],
-                    )
-                    for role in PPT_DEFAULT_PALETTE
-                }
-                mock_ppt["design"]["template_reference"] = {
-                    "id": template_reference.get("id"),
-                    "name": template_reference.get("name"),
-                    "compatibility": template_reference.get("compatibility"),
-                }
-            if isinstance(template_reference.get("fonts"), dict):
-                mock_ppt["design"]["fonts"] = {
-                    "heading": _fit_ppt_phrase(
-                        template_reference["fonts"].get("heading")
-                        or mock_ppt["design"]["fonts"]["heading"],
-                        80,
-                    ),
-                    "body": _fit_ppt_phrase(
-                        template_reference["fonts"].get("body")
-                        or mock_ppt["design"]["fonts"]["body"],
-                        80,
-                    ),
-                }
-            mock_ppt["quality_report"] = self._review_ppt(mock_ppt, variables)
             return {
-                "ppt": mock_ppt,
                 "lesson_plan": {
-                    "title": f"{chapter_title}教学教案",
+                    "title": f"{variables['chapter_title']}教学教案",
                     "overview": outline.get("positioning") or "",
-                    "objectives": lesson_objectives,
+                    "objectives": [value for key in ("knowledge", "ability", "values") for value in objectives.get(key, [])],
                     "preparation": ["核验教材引用位置", "准备课堂讨论材料"],
-                    "procedures": teaching_flow,
+                    "procedures": outline.get("teaching_flow") or [],
                     "assessment": ["观察课堂讨论中的依据使用情况", "检查课后学习卡片"],
                     "homework": outline.get("after_class_task") or "",
                 },
-                "classroom_activities": [
-                    {
-                        "title": "教材观点定位与小组辨析",
-                        "purpose": "训练学生依据教材原文表达和辨析观点",
-                        "duration_minutes": 15,
-                        "format": "小组",
-                        "instructions": [
-                            "阅读教师指定的教材段落并标出关键词",
-                            "小组形成一条结论并注明资料编号",
-                            "各组交换观点并依据原文提出补充",
-                        ],
-                        "questions": outline.get("discussion_questions") or [],
-                        "evidence_refs": ["资料1"],
-                        "evaluation": "结论准确、依据真实、表达清晰",
-                    }
-                ],
+                "classroom_activities": [{
+                    "title": "教材观点定位与小组辨析", "purpose": "训练依据教材表达观点",
+                    "duration_minutes": 15, "format": "小组",
+                    "instructions": ["阅读教材并标出关键词", "小组形成结论并注明依据", "交换观点并核验原文"],
+                    "questions": outline.get("discussion_questions") or ["结合教材说明你的判断"],
+                    "evidence_refs": ["资料1"], "evaluation": "结论准确、依据真实、表达清晰",
+                }],
             }
-        prompt = ChatPromptTemplate.from_messages(
-            [("system", LESSON_ARTIFACT_SYSTEM_PROMPT), ("human", LESSON_ARTIFACT_USER_PROMPT)]
-        )
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", LESSON_ARTIFACT_SYSTEM_PROMPT), ("human", LESSON_ARTIFACT_USER_PROMPT),
+        ])
         runtime = AiProviderConfigService.resolve(self.db)
         model, _ = build_chat_model(
-            feature="lesson_artifacts",
-            db=self.db,
-            user_id=self.user_id,
-            timeout=max(runtime.timeout_seconds, 120),
-            # The result is one large JSON document.  Do not depend on the
-            # provider's streaming implementation, which currently returns an
-            # empty body for deepseek-v4-flash despite HTTP 200.
-            max_tokens=8192,
-            streaming=False,
+            feature="lesson_artifacts", db=self.db, user_id=self.user_id,
+            timeout=max(runtime.timeout_seconds, 120), max_tokens=8192, streaming=False,
         )
         raw = _invoke_non_streaming_text(prompt, model, variables)
         parsed = _extract_json_object(raw, error_message="模型未返回合法的教学成果 JSON")
-        if not isinstance(parsed, dict):
-            raise RuntimeError("模型返回的教学成果格式无效")
-        if not (parsed.get("ppt") or parsed.get("lesson_plan") or parsed.get("classroom_activities")):
-            raise RuntimeError("模型返回的教学成果为空")
-        ppt_data = parsed.get("ppt")
-        if isinstance(ppt_data, dict) and ppt_data.get("slides"):
-            ppt_data = _sanitize_ppt_visible_content(ppt_data)
-            try:
-                outline_data = json.loads(variables.get("outline_json") or "{}")
-            except json.JSONDecodeError:
-                outline_data = {}
-            ppt_data = _enforce_ppt_slide_count(
-                ppt_data,
-                self._target_slide_count(variables),
-                outline_data,
-            )
-            try:
-                parsed["ppt"] = self._personalize_ppt(ppt_data, variables)
-            except Exception as exc:
-                logger.warning("ppt_visual_design_fallback reason=%s", exc)
-                ppt_data["design"] = {
-                    "name": "安全版式回退",
-                    "concept": "视觉设计 Agent 暂不可用，使用结构化安全版式。",
-                    "mood": "庄重、清晰",
-                    "palette": PPT_DEFAULT_PALETTE,
-                    "agent": "ppt-visual-designer-v1",
-                    "status": "fallback",
-                    "designed_pages": 0,
-                }
-                parsed["ppt"] = ppt_data
-            parsed["ppt"]["quality_report"] = self._review_ppt(parsed["ppt"], variables)
+        if not (parsed.get("lesson_plan") or parsed.get("classroom_activities")):
+            raise RuntimeError("模型返回的教案和课堂活动为空")
         return parsed
 
 
@@ -1430,20 +301,102 @@ class AgentService:
         self.user = user
 
     @staticmethod
+    def _ppt_path(run: AgentRun) -> str | None:
+        return (((run.output_data or {}).get("artifacts") or {}).get("ppt") or {}).get("storage_path")
+
+    def _commit_artifact_mutation(self, run: AgentRun, previous_path: str | None, *, image_job_id: str | None = None) -> None:
+        """Compare-and-swap protects long model calls from stale overwrite.
+
+        Uses SQLAlchemy JSON extraction supported by both SQLite and MySQL.
+        The new file remains isolated if another operation wins the race.
+        """
+        current_path = AgentRun.output_data["artifacts"]["ppt"]["storage_path"].as_string()
+        values = {key: getattr(run, key) for key in (
+            "output_data", "input_data", "status", "current_step", "cancel_requested",
+            "error_message", "finished_time", "prompt_version",
+        )}
+        with self.db.no_autoflush:
+            result = self.db.execute(update(AgentRun).where(
+                AgentRun.id == run.id,
+                (AgentRun.status == "running") if image_job_id else AgentRun.status.not_in(["queued", "running"]),
+                (AgentRun.output_data["ppt_image_job"]["id"].as_string() == image_job_id) if image_job_id else True,
+                current_path == previous_path if previous_path else current_path.is_(None),
+            ).values(**values).execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            self.db.rollback()
+            raise HTTPException(status_code=409, detail="课件版本或任务状态已变化，请刷新后重试；未覆盖当前成果")
+        self.db.expire(run)
+        self.db.commit()
+        self.db.refresh(run)
+
+    @staticmethod
+    def _public_ppt(ppt: dict) -> dict:
+        """Use the same safe view for the current deck and immutable snapshots."""
+        result = json.loads(json.dumps(ppt, ensure_ascii=False))
+        for slide in result.get("slides") or []:
+            slide["preview_available"] = bool(slide.get("preview_path"))
+            slide.pop("preview_path", None)
+            slide.pop("svg", None)
+            if isinstance(slide.get("visual_asset"), dict):
+                slide["visual_asset"].pop("storage_path", None)
+        return result
+
+    @staticmethod
+    def _public_artifact(artifact: dict) -> dict:
+        return {key: value for key, value in artifact.items() if key not in {"storage_path", "preview"}}
+
+    @staticmethod
+    def _version_metadata(version: dict, current_path: str | None) -> dict:
+        artifact = version.get("artifact") or {}
+        ppt = version.get("preview") or {}
+        path = artifact.get("storage_path")
+        unavailable = None
+        if not path:
+            unavailable = "仅保留内容快照，没有 PPT 文件"
+        else:
+            try:
+                safe_artifact_path(path)
+            except FileNotFoundError:
+                unavailable = "PPT 文件已不存在"
+        return {
+            **{key: value for key, value in version.items() if key not in {"preview", "artifact"}},
+            "revision_id": ppt.get("revision_id"),
+            "generated_time": artifact.get("generated_time"),
+            "restorable": unavailable is None,
+            "unavailable_reason": unavailable,
+            "is_current": bool(path and path == current_path),
+        }
+
+    @staticmethod
     def serialize(db: Session, run: AgentRun) -> AgentRunData:
         output_data = json.loads(json.dumps(run.output_data or {}, ensure_ascii=False))
-        for artifact in (output_data.get("artifacts") or {}).values():
+        attempt = output_data.get("artifact_attempt")
+        if isinstance(attempt, dict):
+            for key in ("started_time", "finished_time"):
+                if key in attempt:
+                    attempt[key] = _local_protocol_timestamp(attempt[key])
+        if isinstance(output_data.get("ppt_image_job"), dict):
+            output_data["ppt_image_job"].pop("previous_path", None)
+        for key, artifact in (output_data.get("artifacts") or {}).items():
             if isinstance(artifact, dict):
+                artifact["requires_previous_confirmation"] = requires_previous_confirmation(run.output_data or {}, key)
                 artifact.pop("storage_path", None)
-        for version in output_data.get("ppt_versions") or []:
-            if isinstance(version, dict):
-                version.pop("preview", None)
+                artifact.pop("preview", None)
+        # Restoring a version used to archive the same file repeatedly. Collapse
+        # those duplicate entries in the read view, without rewriting old data.
+        versions, seen = [], set()
+        for version in reversed(output_data.get("ppt_versions") or []):
+            if not isinstance(version, dict):
+                continue
+            identity = (version.get("artifact") or {}).get("storage_path") or version.get("version_id")
+            if identity in seen:
+                continue
+            seen.add(identity)
+            versions.append(AgentService._version_metadata(version, AgentService._ppt_path(run)))
+        output_data["ppt_versions"] = list(reversed(versions))
         ppt = ((output_data.get("artifact_bundle") or {}).get("ppt") or {})
-        for slide in ppt.get("slides") or []:
-            asset = slide.get("visual_asset")
-            if isinstance(asset, dict):
-                asset.pop("storage_path", None)
-                asset.pop("prompt", None)
+        if ppt:
+            output_data["artifact_bundle"]["ppt"] = AgentService._public_ppt(ppt)
         steps = db.scalars(
             select(AgentStep).where(AgentStep.run_id == run.id).order_by(AgentStep.step_order)
         ).all()
@@ -1594,6 +547,28 @@ class AgentService:
         self.db.refresh(run)
         return self.serialize(self.db, run)
 
+    def request_ppt_image_revision(self, run_id: int, slide_index: int,
+                                   request: PptImageRevisionRequest) -> AgentRunData:
+        run = self._get_owned(run_id)
+        if run.status in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="当前任务仍在执行")
+        ppt = ((run.output_data or {}).get("artifact_bundle") or {}).get("ppt") or {}
+        if ppt.get("revision_id") != request.expected_revision:
+            raise HTTPException(status_code=409, detail="课件版本已变化，请刷新后再换图")
+        pages = ppt.get("slides") or []
+        if not 0 <= slide_index < len(pages):
+            raise HTTPException(status_code=404, detail="PPT 页面不存在")
+        if ppt.get("pipeline_version") != "ppt-master-svg-v2" or "visual-asset" not in pages[slide_index].get("svg", ""):
+            raise HTTPException(status_code=409, detail="本页没有可替换的插图槽位，请使用修改本页")
+        previous_path = self._ppt_path(run)
+        run.output_data = {**(run.output_data or {}), "ppt_image_job": {"id": uuid4().hex,
+            "status": "queued", "slide_index": slide_index, "prompt": request.prompt.strip(),
+            "previous_path": previous_path, "started_time": _local_now_iso()}}
+        run.status, run.cancel_requested, run.error_message = "queued", False, None
+        run.finished_time = None
+        self._commit_artifact_mutation(run, previous_path)
+        return self.serialize(self.db, run)
+
     def get(self, run_id: int) -> AgentRunData:
         return self.serialize(self.db, self._get_owned(run_id))
 
@@ -1626,6 +601,7 @@ class AgentService:
 
     def request_artifacts(self, run_id: int, payload: AgentArtifactRequest) -> AgentRunData:
         run = self._get_owned(run_id)
+        previous_path = self._ppt_path(run)
         if not (run.output_data or {}).get("outline"):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="请先生成并核验课纲")
         if run.status in {"queued", "running"}:
@@ -1639,10 +615,10 @@ class AgentService:
         if step is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="任务步骤不完整")
         output_types = list(dict.fromkeys(payload.output_types))
+        previous_preferences = (run.input_data or {}).get("ppt_preferences") or {}
         ppt_preferences = (
-            payload.ppt_preferences.model_dump()
-            if "ppt" in output_types and payload.ppt_preferences is not None
-            else {}
+            (payload.ppt_preferences or PptPreferences.model_validate(previous_preferences)).model_dump()
+            if "ppt" in output_types else previous_preferences
         )
         if ppt_preferences and ppt_preferences["min_slides"] > ppt_preferences["max_slides"]:
             raise HTTPException(
@@ -1659,29 +635,49 @@ class AgentService:
         run.cancel_requested = False
         run.error_message = None
         run.finished_time = None
-        run.prompt_version = "lesson-artifacts-v1"
+        run.prompt_version = "lesson-artifacts-svg-v2"
         input_data = dict(run.input_data or {})
         input_data["artifact_output_types"] = output_types
         input_data["ppt_preferences"] = ppt_preferences
         input_data["ppt_template_reference"] = template_reference
+        input_data["ppt_resume_requested"] = payload.resume
         run.input_data = input_data
+        output_data = dict(run.output_data or {})
+        output_data["artifact_errors"] = {key: value for key, value in (output_data.get("artifact_errors") or {}).items() if key not in output_types}
+        output_data["artifacts"] = {
+            key: {**value, "retained_from_previous_attempt": True} if key in output_types else value
+            for key, value in (output_data.get("artifacts") or {}).items()
+        }
+        output_data.pop("ppt_image_job", None)
+        output_data["artifact_attempt"] = {"id": uuid4().hex, "status": "queued", "resume": payload.resume,
+            "requested_types": output_types, "started_time": _local_now_iso()}
+        run.output_data = output_data
         step.status = "queued"
         step.input_data = {
             "output_types": output_types,
             "ppt_preferences": ppt_preferences,
             "template_reference": template_reference,
+            "resume": payload.resume,
         }
         step.output_data = {}
         step.error_message = None
         step.started_time = None
         step.finished_time = None
-        self.db.commit()
-        self.db.refresh(run)
+        self._commit_artifact_mutation(run, previous_path)
         return self.serialize(self.db, run)
 
-    def artifact_download(self, run_id: int, artifact_key: str) -> tuple[Path, dict[str, Any]]:
+    def artifact_download(
+        self, run_id: int, artifact_key: str, version_id: str | None = None,
+        expected_revision: str | None = None,
+    ) -> tuple[Path, dict[str, Any]]:
         run = self._get_owned(run_id)
-        artifact = ((run.output_data or {}).get("artifacts") or {}).get(artifact_key)
+        if version_id:
+            if artifact_key != "ppt":
+                raise HTTPException(status_code=400, detail="历史版本仅适用于 PPT")
+            artifact = self._ppt_version(run, version_id).get("artifact")
+        else:
+            self._check_ppt_revision(run, expected_revision if artifact_key == "ppt" else None)
+            artifact = ((run.output_data or {}).get("artifacts") or {}).get(artifact_key)
         if not isinstance(artifact, dict):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="教学成果不存在")
         try:
@@ -1698,6 +694,11 @@ class AgentService:
         if not isinstance(ppt_data, dict) or not ppt_data.get("slides"):
             return
         versions = list(output_data.get("ppt_versions") or [])
+        current_path = AgentService._ppt_path(run)
+        # Preserve one snapshot per immutable file, so repeated restores do not
+        # evict real revisions from the ten-version undo history.
+        if current_path:
+            versions = [item for item in versions if (item.get("artifact") or {}).get("storage_path") != current_path]
         versions.append(
             {
                 "version_id": _now().strftime("%Y%m%d%H%M%S%f"),
@@ -1707,27 +708,24 @@ class AgentService:
                 "slide_count": len(ppt_data.get("slides") or []),
                 "design_name": (ppt_data.get("design") or {}).get("name"),
                 "preview": json.loads(json.dumps(ppt_data, ensure_ascii=False)),
+                "artifact": {
+                    key: value for key, value in (output_data.get("artifacts", {}).get("ppt") or {}).items()
+                    if key != "preview"
+                },
             }
         )
         output_data["ppt_versions"] = versions[-10:]
         run.output_data = output_data
 
-    def _save_updated_ppt(self, run: AgentRun, ppt_data: dict[str, Any]) -> None:
-        course = self.db.get(Course, run.course_id)
-        chapter = self.db.get(Chapter, run.chapter_id)
-        if course is None or chapter is None:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="课程或专题已不存在")
-        artifact = PresentationArtifactService(run.id).render_pptx(
-            course_name=course.name,
-            chapter_title=chapter.title,
-            ppt_data=ppt_data,
-            evidence=run.evidence_snapshot or [],
-        )
+    def _save_updated_ppt(self, run: AgentRun, ppt_data: dict[str, Any], artifact: dict) -> None:
         output_data = dict(run.output_data or {})
+        if (output_data.get("ppt_image_job") or {}).get("status") not in {"queued", "running"}:
+            output_data.pop("ppt_image_job", None)
         bundle = dict(output_data.get("artifact_bundle") or {})
         artifacts = dict(output_data.get("artifacts") or {})
         bundle["ppt"] = ppt_data
-        artifacts["ppt"] = artifact
+        artifacts["ppt"] = {**artifact, "retained_from_previous_attempt": False}
+        output_data["artifact_errors"] = {key: value for key, value in (output_data.get("artifact_errors") or {}).items() if key != "ppt"}
         output_data["artifact_bundle"] = bundle
         output_data["artifacts"] = artifacts
         run.output_data = output_data
@@ -1739,6 +737,7 @@ class AgentService:
         request: PptSlideRevisionRequest,
     ) -> AgentRunData:
         run = self._get_owned(run_id)
+        previous_path = self._ppt_path(run)
         if run.status in {"queued", "running"}:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前任务仍在执行")
         ppt_data = json.loads(
@@ -1756,28 +755,13 @@ class AgentService:
         if course is None or chapter is None:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="课程或专题已不存在")
         try:
-            revised = LessonArtifactGenerator(self.db, self.user.id).revise_slide(
-                course_name=course.name,
-                chapter_title=chapter.title,
-                ppt_data=ppt_data,
-                slide_index=slide_index,
-                request=request,
-                evidence=run.evidence_snapshot or [],
+            if ppt_data.get("pipeline_version") != "ppt-master-svg-v2":
+                raise HTTPException(status_code=409, detail="旧版课件继续支持下载；请重新生成新版后进行单页修改")
+            artifact, revised = PptWorkflowService(self.db, self.user.id, run.id).revise(
+                ppt_data, slide_index, request, run.evidence_snapshot or [],
             )
             self._archive_ppt_version(run, f"修改第 {slide_index + 1} 页前")
-            ppt_data["slides"][slide_index] = revised
-            ppt_data["quality_report"] = LessonArtifactGenerator(self.db, self.user.id)._review_ppt(
-                ppt_data,
-                {
-                    "course_name": course.name,
-                    "chapter_title": chapter.title,
-                    "ppt_preferences": json.dumps(
-                        (run.input_data or {}).get("ppt_preferences") or {},
-                        ensure_ascii=False,
-                    ),
-                },
-            )
-            self._save_updated_ppt(run, ppt_data)
+            self._save_updated_ppt(run, revised, artifact)
         except HTTPException:
             raise
         except Exception as exc:
@@ -1785,14 +769,11 @@ class AgentService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"本页重新生成失败：{exc}",
             ) from exc
-        self.db.commit()
-        self.db.refresh(run)
+        self._commit_artifact_mutation(run, previous_path)
         return self.serialize(self.db, run)
 
-    def restore_ppt_version(self, run_id: int, version_id: str) -> AgentRunData:
-        run = self._get_owned(run_id)
-        if run.status in {"queued", "running"}:
-            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前任务仍在执行")
+    @staticmethod
+    def _ppt_version(run: AgentRun, version_id: str) -> dict:
         versions = list((run.output_data or {}).get("ppt_versions") or [])
         target = next(
             (item for item in versions if str(item.get("version_id")) == version_id),
@@ -1800,14 +781,71 @@ class AgentService:
         )
         if target is None or not isinstance(target.get("preview"), dict):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PPT 历史版本不存在")
-        self._archive_ppt_version(run, f"恢复版本 {version_id} 前")
+        return target
+
+    @staticmethod
+    def _check_ppt_revision(run: AgentRun, expected_revision: str | None) -> None:
+        current = ((run.output_data or {}).get("artifact_bundle") or {}).get("ppt") or {}
+        if expected_revision is not None and expected_revision != (current.get("revision_id") or ""):
+            raise HTTPException(status_code=409, detail="当前课件已变化，请刷新版本列表后重试；未覆盖任何成果")
+
+    def ppt_version(self, run_id: int, version_id: str) -> dict:
+        """Read-only history: selecting a snapshot must never restore it."""
+        run = self._get_owned(run_id)
+        target = self._ppt_version(run, version_id)
+        return {
+            **self._version_metadata(target, self._ppt_path(run)),
+            "ppt": self._public_ppt(target["preview"]),
+            "artifact": self._public_artifact(target.get("artifact") or {}),
+        }
+
+    def restore_ppt_version(
+        self, run_id: int, version_id: str, expected_revision: str | None = None,
+    ) -> AgentRunData:
+        run = self._get_owned(run_id)
+        previous_path = self._ppt_path(run)
+        if run.status in {"queued", "running"}:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="当前任务仍在执行")
+        self._check_ppt_revision(run, expected_revision)
+        target = self._ppt_version(run, version_id)
+        artifact = target.get("artifact") or {}
+        if not artifact.get("storage_path"):
+            raise HTTPException(status_code=409, detail="该旧版本仅有内容快照，没有可恢复文件；请基于该内容重新生成")
+        try:
+            safe_artifact_path(artifact["storage_path"])
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="历史版本文件不存在，当前版本保持不变") from exc
+        if artifact["storage_path"] == previous_path:
+            return self.serialize(self.db, run)
+        self._archive_ppt_version(run, "切换版本前自动保存")
         self._save_updated_ppt(
             run,
             json.loads(json.dumps(target["preview"], ensure_ascii=False)),
+            json.loads(json.dumps(artifact, ensure_ascii=False)),
         )
-        self.db.commit()
-        self.db.refresh(run)
+        self._commit_artifact_mutation(run, previous_path)
         return self.serialize(self.db, run)
+
+    def ppt_preview(
+        self, run_id: int, slide_index: int, version_id: str | None = None,
+        expected_revision: str | None = None,
+    ) -> Path:
+        run = self._get_owned(run_id)
+        if version_id:
+            ppt = self._ppt_version(run, version_id)["preview"]
+        else:
+            self._check_ppt_revision(run, expected_revision)
+            ppt = ((run.output_data or {}).get("artifact_bundle") or {}).get("ppt") or {}
+        pages = ppt.get("slides") or []
+        if not 0 <= slide_index < len(pages):
+            raise HTTPException(status_code=404, detail="课件页面不存在")
+        path = pages[slide_index].get("preview_path")
+        if not path:
+            raise HTTPException(status_code=404, detail="此历史课件没有成品预览，请下载查看")
+        try:
+            return safe_artifact_path(path)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail="课件预览文件不存在") from exc
 
     def cancel(self, run_id: int) -> AgentRunData:
         run = self._get_owned(run_id)
@@ -1817,6 +855,8 @@ class AgentService:
         if run.status in {"queued", "waiting_confirmation"}:
             run.status = "cancelled"
             run.finished_time = _now()
+            if (run.output_data or {}).get("ppt_image_job"):
+                run.output_data = {**run.output_data, "ppt_image_job": {**run.output_data["ppt_image_job"], "status": "cancelled"}}
         self.db.commit()
         self.db.refresh(run)
         return self.serialize(self.db, run)
@@ -1953,53 +993,56 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 f"{item.get('position') or ''}\n{item.get('excerpt') or ''}"
                 for index, item in enumerate(run.evidence_snapshot or [], start=1)
             )
-            generated = LessonArtifactGenerator(db, run.created_by).generate(
-                {
-                    "course_name": course.name,
-                    "chapter_title": chapter.title,
-                    "lesson_hours": str((run.input_data or {}).get("lesson_hours", 2)),
-                    "student_level": str((run.input_data or {}).get("student_level", "本科生")),
-                    "teaching_goal": str(
-                        (run.input_data or {}).get("teaching_goal")
-                        or "按已确认课纲完成本专题教学"
-                    ),
-                    "output_types": "、".join(requested),
-                    "outline_json": json.dumps(outline, ensure_ascii=False),
-                    "evidence_context": evidence_context,
-                    "ppt_preferences": json.dumps(
-                        (run.input_data or {}).get("ppt_preferences") or {},
-                        ensure_ascii=False,
-                    ),
-                    "template_reference": json.dumps(
-                        (run.input_data or {}).get("ppt_template_reference") or {},
-                        ensure_ascii=False,
-                    ),
-                }
-            )
+            variables = {
+                "course_name": course.name,
+                "chapter_title": chapter.title,
+                "lesson_hours": str((run.input_data or {}).get("lesson_hours", 2)),
+                "student_level": str((run.input_data or {}).get("student_level", "本科生")),
+                "teaching_goal": str((run.input_data or {}).get("teaching_goal") or "按已确认课纲完成本专题教学"),
+                "output_types": "、".join(item for item in requested if item != "ppt"),
+                "outline_json": json.dumps(outline, ensure_ascii=False),
+                "evidence_context": evidence_context,
+                "ppt_preferences": json.dumps((run.input_data or {}).get("ppt_preferences") or {}, ensure_ascii=False),
+                "template_reference": json.dumps((run.input_data or {}).get("ppt_template_reference") or {}, ensure_ascii=False),
+            }
             renderer = PresentationArtifactService(run.id)
+            generated: dict[str, Any] = {}
             artifacts: dict[str, Any] = {}
             successful_types: list[str] = []
             artifact_errors: dict[str, str] = {}
+
+            ppt_workflow = None
+            def report_progress(stage: str, completed: int, total: int) -> None:
+                db.refresh(run)
+                if run.cancel_requested:
+                    raise PptWorkflowCancelled("已取消课件生成")
+                step.output_data = {
+                    **(step.output_data or {}),
+                    "ppt_workflow": {"stage": stage, "completed_pages": completed, "total_pages": total,
+                        "resume": dict(ppt_workflow.resume_info) if ppt_workflow else {}},
+                }
+                output = dict(run.output_data or {})
+                output["artifact_attempt"] = {**(output.get("artifact_attempt") or {}), "status": "running"}
+                run.output_data = output
+                db.commit()
+
             if "ppt" in requested:
                 try:
-                    ppt_data = generated.get("ppt")
-                    if not isinstance(ppt_data, dict) or not ppt_data.get("slides"):
-                        raise RuntimeError("模型没有返回可用的 PPT 结构")
-                    ppt_data = _sanitize_ppt_visible_content(ppt_data)
-                    preferences = (run.input_data or {}).get("ppt_preferences") or {}
-                    if bool(preferences.get("include_visuals")):
-                        ppt_data = PptMultimodalService(run.id).enhance(ppt_data)
-                    generated["ppt"] = ppt_data
-                    artifacts["ppt"] = renderer.render_pptx(
-                        course_name=course.name,
-                        chapter_title=chapter.title,
-                        ppt_data=ppt_data,
-                        evidence=run.evidence_snapshot or [],
-                    )
+                    ppt_workflow = PptWorkflowService(db, run.created_by, run.id, progress=report_progress)
+                    options = {"resume": True} if (run.input_data or {}).get("ppt_resume_requested") else {}
+                    artifacts["ppt"], generated["ppt"] = ppt_workflow.generate(variables, run.evidence_snapshot or [], **options)
                     successful_types.append("ppt")
+                except PptWorkflowCancelled:
+                    raise
                 except Exception as exc:
                     logger.exception("lesson artifact ppt failed run_id=%s", run_id)
                     artifact_errors["ppt"] = str(exc) or type(exc).__name__
+            if any(key != "ppt" for key in requested):
+                try:
+                    generated.update(LessonArtifactGenerator(db, run.created_by).generate(variables))
+                except Exception as exc:
+                    logger.exception("non-ppt lesson artifacts failed run_id=%s", run_id)
+                    artifact_errors.update({key: str(exc) or type(exc).__name__ for key in requested if key != "ppt"})
             if "lesson_plan" in requested:
                 try:
                     lesson_plan = generated.get("lesson_plan")
@@ -2059,12 +1102,23 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 output_data["artifacts"] = existing_artifacts
                 output_data["artifact_errors"] = artifact_errors
                 output_data["artifact_success_types"] = successful_types
+                visual = (generated.get("ppt") or {}).get("multimodal") or {}
+                partial_images = visual.get("requested_count", 0) > visual.get("generated_count", 0)
+                output_data["artifact_attempt"] = {**(output_data.get("artifact_attempt") or {}),
+                    "status": "partial" if artifact_errors or partial_images else "completed",
+                    "finished_time": _local_now_iso()}
+                for artifact in artifacts.values():
+                    artifact.setdefault("generated_time", _now().isoformat())
+                    artifact["attempt_id"] = output_data["artifact_attempt"].get("id")
+                    artifact["retained_from_previous_attempt"] = False
                 run.output_data = output_data
                 run.status = "completed"
                 run.current_step = 3
                 run.finished_time = _now()
-                step.status = "completed"
+                step.status = "failed" if artifact_errors else "completed"
+                step.error_message = "；".join(artifact_errors.values()) or None
                 step.output_data = {
+                    **(step.output_data or {}),
                     "output_types": requested,
                     "artifact_count": len(artifacts),
                     "successful_types": successful_types,
@@ -2072,8 +1126,19 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 }
                 step.finished_time = _now()
             db.commit()
+        except PptWorkflowCancelled:
+            run.status = "cancelled"
+            run.finished_time = _now()
+            step.status = "cancelled"
+            step.finished_time = _now()
+            db.commit()
         except Exception as exc:
             logger.exception("lesson artifact agent failed run_id=%s", run_id)
+            failures = artifact_errors if "artifact_errors" in locals() else {"workflow": str(exc)}
+            step.output_data = {**(step.output_data or {}), "artifact_errors": failures, "successful_types": []}
+            run.output_data = {**(run.output_data or {}), "artifact_errors": failures, "artifact_success_types": []}
+            run.output_data = {**run.output_data, "artifact_attempt": {
+                **(run.output_data.get("artifact_attempt") or {}), "status": "failed", "finished_time": _local_now_iso()}}
             step.status = "failed"
             step.error_message = str(exc)
             step.finished_time = _now()
@@ -2083,11 +1148,66 @@ def execute_lesson_artifacts(run_id: int, bind: Engine) -> None:
                 run.status = "completed"
                 run.current_step = max(run.current_step or 0, 2)
                 run.error_message = None
+                run.finished_time = _now()
             else:
                 run.status = "failed"
                 run.error_message = str(exc)
                 run.finished_time = _now()
             db.commit()
+
+
+def execute_ppt_image_revision(run_id: int, job_id: str, bind: Engine) -> None:
+    """A short HTTP enqueue, then isolated image replacement and verified export."""
+    with Session(bind=bind, autoflush=False, expire_on_commit=False) as db:
+        run = db.get(AgentRun, run_id)
+        job = dict((run.output_data or {}).get("ppt_image_job") or {}) if run else {}
+        if not run or run.status != "queued" or job.get("id") != job_id:
+            return
+        previous_path = job.get("previous_path")
+        service = AgentService(db, db.get(User, run.created_by))
+        run.status = "running"
+        run.output_data = {**run.output_data, "ppt_image_job": {**job, "status": "running"}}
+        db.commit()
+        def progress(stage, done, total):
+            db.refresh(run)
+            if run.cancel_requested or run.status == "cancelled":
+                raise PptWorkflowCancelled("已取消换图，原课件保持不变")
+            if (run.output_data.get("ppt_image_job") or {}).get("id") != job_id:
+                raise PptWorkflowCancelled("换图任务已变化")
+            run.output_data = {**run.output_data, "ppt_image_job": {
+                **run.output_data["ppt_image_job"], "stage": stage}}
+            db.commit()
+        try:
+            original = ((run.output_data or {}).get("artifact_bundle") or {}).get("ppt")
+            artifact, revised = PptWorkflowService(db, run.created_by, run.id, progress=progress).regenerate_image(
+                original, job["slide_index"], job["prompt"], run.evidence_snapshot or [])
+            db.refresh(run)
+            service._archive_ppt_version(run, f"替换第 {job['slide_index']+1} 页插图前")
+            service._save_updated_ppt(run, revised, artifact)
+            output = dict(run.output_data)
+            output["ppt_image_job"] = {**output["ppt_image_job"], "status": "completed", "finished_time": _local_now_iso()}
+            output["artifact_errors"] = {key: value for key, value in (output.get("artifact_errors") or {}).items() if key != "ppt"}
+            if output.get("artifact_attempt"):
+                visual = revised.get("multimodal") or {}
+                output["artifact_attempt"] = {**output["artifact_attempt"], "status": "partial" if output["artifact_errors"] or visual.get("requested_count", 0) > visual.get("generated_count", 0) else "completed"}
+            run.output_data, run.status, run.finished_time = output, "completed", _now()
+            service._commit_artifact_mutation(run, previous_path, image_job_id=job_id)
+        except Exception as exc:
+            db.rollback()
+            db.refresh(run)
+            live_job = (run.output_data or {}).get("ppt_image_job") or {}
+            if live_job.get("id") != job_id or service._ppt_path(run) != previous_path:
+                return
+            cancelled = isinstance(exc, PptWorkflowCancelled)
+            message = "已取消换图，原课件保持不变" if cancelled else str(exc)[:600]
+            output = {**run.output_data, "ppt_image_job": {**live_job,
+                "status": "cancelled" if cancelled else "failed", "error": message, "finished_time": _local_now_iso()}}
+            db.execute(update(AgentRun).where(AgentRun.id == run.id,
+                AgentRun.output_data["ppt_image_job"]["id"].as_string() == job_id,
+                AgentRun.output_data["artifacts"]["ppt"]["storage_path"].as_string() == previous_path,
+            ).values(output_data=output, status="cancelled" if cancelled else "completed", finished_time=_now()))
+            db.commit()
+            logger.warning("ppt_single_image_revision_failed run_id=%s cancelled=%s", run_id, cancelled)
 
 
 def recover_agent_runs(bind: Engine) -> int:
@@ -2099,9 +1219,18 @@ def recover_agent_runs(bind: Engine) -> int:
         if not runs:
             return 0
         for run in runs:
+            image_job = (run.output_data or {}).get("ppt_image_job") or {}
+            if image_job.get("status") in {"queued", "running"}:
+                run.output_data = {**run.output_data, "ppt_image_job": {**image_job,
+                    "status": "failed", "error": "服务重启导致换图中断，原课件保持不变"}}
+                run.status, run.finished_time = "completed", _now()
+                continue
             run.status = "failed"
             run.error_message = "服务重启导致后台任务中断，请点击重新执行"
             run.finished_time = _now()
+            if (run.output_data or {}).get("artifact_attempt"):
+                run.output_data = {**run.output_data, "artifact_attempt": {
+                    **run.output_data["artifact_attempt"], "status": "failed", "finished_time": _local_now_iso()}}
             step = db.scalar(
                 select(AgentStep)
                 .where(

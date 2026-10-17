@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-import json
-import os
 from pathlib import Path
 import re
-import shutil
-import subprocess
-import tempfile
 from typing import Any
 
 from docx import Document
@@ -14,10 +9,6 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.shared import Pt
 
 from app.core.config import BACKEND_DIR, settings
-
-
-PRESENTATION_RUNTIME = BACKEND_DIR / "presentation_runtime"
-PRESENTATION_SCRIPT = PRESENTATION_RUNTIME / "render_pptx.mjs"
 
 
 def _safe_name(value: str, fallback: str) -> str:
@@ -37,79 +28,6 @@ class PresentationArtifactService:
         self.run_dir = self.root / str(run_id)
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
-    def _node_binary(self) -> str:
-        configured = settings.presentation_node_binary
-        resolved = shutil.which(configured)
-        if resolved:
-            return resolved
-        path = Path(configured)
-        if path.exists():
-            return str(path)
-        raise RuntimeError("未找到 Node.js，请安装受支持的 Node 24+ 或配置 PRESENTATION_NODE_BINARY")
-
-    def render_pptx(
-        self,
-        *,
-        course_name: str,
-        chapter_title: str,
-        ppt_data: dict[str, Any],
-        evidence: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        if not PRESENTATION_SCRIPT.exists():
-            raise RuntimeError("PPT 生成脚本不存在")
-        file_stem = _safe_name(ppt_data.get("title") or chapter_title, "教学课件")
-        output_path = self.run_dir / f"{file_stem}.pptx"
-        payload = {
-            "course_name": course_name,
-            "chapter_title": chapter_title,
-            "ppt": ppt_data,
-            "evidence": evidence,
-            "artifact_root": str(self.root.resolve()),
-        }
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            suffix=".json",
-            dir=self.run_dir,
-            delete=False,
-        ) as handle:
-            json.dump(payload, handle, ensure_ascii=False)
-            input_path = Path(handle.name)
-        env = os.environ.copy()
-        module_paths: list[str] = []
-        local_modules = PRESENTATION_RUNTIME / "node_modules"
-        if local_modules.exists():
-            module_paths.append(str(local_modules))
-        if settings.presentation_node_modules:
-            module_paths.append(settings.presentation_node_modules)
-        if env.get("NODE_PATH"):
-            module_paths.append(env["NODE_PATH"])
-        if module_paths:
-            env["NODE_PATH"] = os.pathsep.join(module_paths)
-        try:
-            result = subprocess.run(
-                [self._node_binary(), str(PRESENTATION_SCRIPT), str(input_path), str(output_path)],
-                cwd=PRESENTATION_RUNTIME,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                check=False,
-            )
-        finally:
-            input_path.unlink(missing_ok=True)
-        if result.returncode != 0 or not output_path.exists():
-            detail = (result.stderr or result.stdout or "PPT 渲染失败").strip()
-            raise RuntimeError(f"PPT 渲染失败：{detail[-800:]}")
-        return {
-            "kind": "ppt",
-            "title": ppt_data.get("title") or f"{chapter_title}教学课件",
-            "file_name": output_path.name,
-            "storage_path": str(output_path.relative_to(self.root)),
-            "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            "slide_count": len(ppt_data.get("slides") or []),
-            "preview": ppt_data,
-        }
 
     def render_lesson_plan(
         self,

@@ -86,10 +86,12 @@ def test_news_api_preserves_legacy_business_wall_time_without_rewriting(
     monkeypatch,
 ) -> None:
     # This test validates timezone serialization, not the rolling news window.
-    # Keep its fixed historical examples visible as the calendar advances.
-    monkeypatch.setattr(settings, "news_default_days", 365)
+    # Freeze the service clock so these serialization fixtures never become a
+    # stale feed, trigger real RSS refresh, and get trimmed as dates advance.
+    fixed_now = datetime(2026, 7, 16, 8, 30)
+    monkeypatch.setattr("app.services.news_service.utc_now", lambda: fixed_now)
     user = User(username="legacy_news_student", password_hash=hash_password("secure-pass-123"), role="student")
-    fetched_time = utc_now()
+    fetched_time = fixed_now
     db.add_all([
         user,
         NewsItem(
