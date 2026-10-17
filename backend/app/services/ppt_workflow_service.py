@@ -115,7 +115,8 @@ class PptWorkflowService:
         self.progress = progress
         self.started = monotonic()
         self.diagnostics = None
-        self.resume_info = {"resumed": False, "reused_pages": 0, "reused_images": 0}
+        self.resume_info = {"resumed": False, "reused_pages": 0, "reused_images": 0,
+                            "generated_images": 0, "pending_images": 0}
 
     def _checkpoint(self, stage: str, completed: int = 0, total: int = 0):
         if monotonic() - self.started > settings.ppt_job_timeout_seconds:
@@ -279,7 +280,9 @@ class PptWorkflowService:
             from app.services.ppt_multimodal_service import PptMultimodalService
             image_service = PptMultimodalService(self.run_id, db=self.db) if preferences.include_visuals else None
             count = preferences.slide_count or preferences.min_slides
-            budget = min(3, settings.ppt_multimodal_max_images, max(1, count // 3)) if image_service and image_service.available else 0
+            # Plan slots from teacher intent, not whether today's credentials
+            # happen to work. Configuration repair must not change the plan.
+            budget = max(0, min(3, settings.ppt_multimodal_max_images, max(1, count // 3))) if image_service else 0
             variables = {**variables, "image_budget": str(budget)}
             from app.services.ppt_checkpoint_service import PptCheckpointStore, digest
             from app.services.ai_operation_service import AiProviderConfigService
@@ -288,13 +291,30 @@ class PptWorkflowService:
                 for feature in ("ppt_plan", "ppt_svg_design"):
                     config = AiProviderConfigService.resolve_for_feature(feature, self.db)
                     models.append((config.base_url, config.model_name, digest(config.api_key)))
-            signature = {"version": 4, "user": self.user_id, "mock": settings.ai_mock_mode,
+            signature = {"version": 5, "user": self.user_id, "mock": settings.ai_mock_mode,
                 "input": {key: value for key, value in variables.items() if key != "output_types"},
-                "evidence": evidence, "skill": metadata, "models": models,
-                "prompts": digest([PLAN_PROMPT, SVG_PROMPT]),
-                "image": image_service.checkpoint_signature() if image_service else None}
-            store = PptCheckpointStore(self.run_id, signature, resume=resume)
+                "evidence": evidence, "skill": metadata,
+                "models": [(base, model) for base, model, _ in models],
+                "prompts": digest([PLAN_PROMPT, SVG_PROMPT])}
+
+            def legacy_fingerprints():
+                # v4 included image/vision credentials in the whole-job key.
+                # Reconstruct exact old hashes from retained configuration
+                # history; never accept a deck based only on a matching title.
+                legacy = {**signature, "version": 4, "models": models}
+                images = image_service.legacy_checkpoint_signatures() if image_service else [None]
+                for image in images:
+                    yield digest({**legacy, "image": image})
+
+            store = PptCheckpointStore(self.run_id, signature, resume=resume,
+                                       legacy_fingerprints=legacy_fingerprints)
             self.resume_info["resumed"] = store.resumed
+            self.resume_info["legacy_imported"] = store.legacy_imported
+            # Independent image metadata is informational, not a dependency of
+            # text/SVG reuse. Keep already-valid paid images on credential or
+            # provider changes; explicit fresh generation still starts clean.
+            if image_service:
+                store.save(image_fingerprint=digest(image_service.checkpoint_signature()))
             self.diagnostics = store.directory
             data = deepcopy(store.state.get("data"))
             if not data:
@@ -327,11 +347,23 @@ class PptWorkflowService:
                 store.save(data=data, stage="designing", completed_pages=index+1)
                 self._checkpoint("designing", index+1, len(data["slides"]))
             if preferences.include_visuals:
-                self.resume_info["reused_images"] = sum(image_service._valid_cached_asset(page.get("visual_asset")) for page in data["slides"])
+                image_pages = [page for page in data["slides"]
+                               if ET.fromstring(page["svg"]).find(f".//{{{SVG_NS}}}image") is not None]
+                self.resume_info["reused_images"] = sum(image_service._valid_cached_asset(page.get("visual_asset")) for page in image_pages)
+                self.resume_info["pending_images"] = len(image_pages) - self.resume_info["reused_images"]
                 store.save(data=data, stage="illustrating")
                 self._checkpoint("illustrating", 0, len(data["slides"]))
+
+                def save_image():
+                    self.resume_info["generated_images"] += 1
+                    self.resume_info["pending_images"] -= 1
+                    # Persist the paid asset before progress/cancellation can
+                    # raise, so a later resume never pays to recreate it.
+                    store.save(data=data, stage="illustrating")
+                    self._checkpoint("illustrating", 0, len(data["slides"]))
+
                 data = image_service.enhance_svg(data, preserve_slots=True,
-                    on_asset=lambda: store.save(data=data, stage="illustrating"))
+                    on_asset=save_image)
             data["resume_info"] = dict(self.resume_info)
             store.save(data=data, stage="exporting")
             self._checkpoint("exporting", len(data["slides"]), len(data["slides"]))

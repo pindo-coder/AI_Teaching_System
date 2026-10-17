@@ -66,6 +66,11 @@ export function lessonArtifactProgress(
   const total = Math.floor(number(workflow.total_pages))
   const done = total ? Math.min(Math.floor(number(workflow.completed_pages)), total) : 0
   const ratio = total ? done / total : 0
+  const resume = (workflow.resume || {}) as Record<string, unknown>
+  const reusedPages = Math.min(Math.floor(number(resume.reused_pages)), total)
+  const reusedImages = Math.floor(number(resume.reused_images))
+  const generatedImages = Math.floor(number(resume.generated_images))
+  const pendingImages = Math.floor(number(resume.pending_images))
   const hasImages = (run.input_data.ppt_preferences as { include_visuals?: boolean } | undefined)?.include_visuals
   const labels: Record<string, string> = {
     waiting_slot: '等待课件生成资源', planning: '正在编排教学内容', designing: '正在设计课件页面',
@@ -84,6 +89,11 @@ export function lessonArtifactProgress(
     ? `已设计 ${done}/${total} 页${done < total ? `，剩余 ${total - done} 页` : '，接下来准备配图或导出'}。`
     : '正在设计课件页面，等待后台返回页数。'
   if (stage === 'illustrating') detail = '页面设计已完成；配图生成与复核耗时波动较大，请耐心等待。'
+  if (stage === 'illustrating' && resume.resumed && reusedPages && typeof resume.pending_images === 'number') {
+    if (reusedPages === total) label = pendingImages ? '正在补全缺失插图' : '插图已齐全，准备导出'
+    detail = `已复用 ${reusedPages} 页设计、${reusedImages} 张已有插图；`
+      + (generatedImages + pendingImages ? `缺失插图已补 ${generatedImages}/${generatedImages + pendingImages} 张。` : '无需重新调用成图模型。')
+  }
   if (stage === 'exporting') detail = '正在生成可编辑 PPT 并渲染逐页预览，文件就绪后才会完成。'
   if (stage === 'completed' && documents.length) {
     label = '正在生成教案与课堂活动'

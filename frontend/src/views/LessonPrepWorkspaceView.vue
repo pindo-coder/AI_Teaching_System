@@ -23,6 +23,7 @@ import UiEmptyState from '@/components/ui/UiEmptyState.vue'
 import type { Course, CourseDetail, LearningStage } from '@/types'
 import { formatBeijingDateTime } from '@/utils/time'
 import { lessonArtifactProgress } from '@/utils/lessonArtifactProgress'
+import { createAgentRunMonitor } from '@/utils/agentRunMonitor'
 import { pptPublicationState } from '@/utils/lessonPublication'
 import logoUrl from '@/assets/logo1.svg'
 import progressBackgroundUrl from '@/assets/lesson-prep-progress-bg.png'
@@ -35,6 +36,7 @@ const loading = ref(true)
 const acting = ref(false)
 const submittingArtifacts = ref(false)
 const progressNow = ref(Date.now())
+const progressSyncWarning = ref('')
 let progressClock: ReturnType<typeof setInterval> | undefined
 const courses = ref<Course[]>([])
 const course = ref<CourseDetail | null>(null)
@@ -158,11 +160,12 @@ const pptProgress = computed(() => {
   if (isExecuting.value && imageJob.value && ['queued', 'running'].includes(imageJob.value.status)) return `正在更新第 ${imageJob.value.slide_index + 1} 页配图，原课件保留至新图验证完成`
   if (!isExecuting.value && !failedArtifactStep.value) return ''
   const value = currentRun.value?.steps.find(step => step.step_key === 'generate_artifacts')?.output_data.ppt_workflow as
-    { stage: string; completed_pages: number; total_pages: number; resume?: { requested?: boolean; resumed?: boolean; reused_pages?: number; reused_images?: number } } | undefined
+    { stage: string; completed_pages: number; total_pages: number; resume?: { requested?: boolean; resumed?: boolean; reused_pages?: number; reused_images?: number; pending_images?: number; generated_images?: number } } | undefined
   if (!value) return ''
   const labels: Record<string, string> = { waiting_slot: '等待课件生成资源', planning: '编排逐页教学内容', designing: '设计课件页面', illustrating: '准备辅助插图', exporting: '导出与渲染成品', completed: '成品检查完成' }
   const reused = value.resume?.reused_pages || 0
   if (value.stage === 'planning' && value.resume?.requested && !value.resume.resumed) return '没有匹配当前输入和版本的检查点，正在安全重建'
+  if (value.stage === 'illustrating' && value.resume?.resumed && reused === value.total_pages) return `页面设计全部复用 · 已有 ${value.resume.reused_images || 0} 张插图 · 已补 ${value.resume.generated_images || 0} 张 · 待补 ${value.resume.pending_images ?? '—'} 张`
   return `${!isExecuting.value ? '本次停在：' : ''}${labels[value.stage] || '正在生成'}${value.total_pages ? ` · ${value.completed_pages}/${value.total_pages} 页` : ''}${reused ? `（已复用 ${reused} 页）` : ''}`
 })
 const isExecuting = computed(() => ['queued', 'running'].includes(currentRun.value?.status || ''))
@@ -279,10 +282,7 @@ async function applyRun(run: AgentRun) {
       setSlideCount(pptPreferences.value.slide_count || pptPreferences.value.min_slides || 10)
     } else pptPreferences.value.title = ''
     syncArtifactInput(run)
-    if (Object.keys(run.output_data.artifacts || {}).length) activeStage.value = 5
-    else if (run.output_data.outline) activeStage.value = 3
-    else if (run.evidence_snapshot.length) activeStage.value = 2
-    else activeStage.value = 1
+    syncRunStage(run)
     if (['queued', 'running'].includes(run.status)) void listenToRun(run.id)
   } finally {
     hydratingRun.value = false
@@ -339,31 +339,40 @@ function syncArtifactInput(run: AgentRun) {
   if (requested.length) artifactTypes.value = requested
 }
 
-async function listenToRun(id: number) {
-  try {
-    await agentApi.stream(id, {
-      onSnapshot: (run) => {
-        currentRun.value = run
-        syncArtifactInput(run)
-        if (run.output_data.ppt_image_job && ['queued', 'running'].includes(run.output_data.ppt_image_job.status)) activeStage.value = 5
-        else if (run.current_step >= 3 || Object.keys(run.output_data.artifacts || {}).length) {
-          activeStage.value = 4
-        } else if (run.output_data.outline) activeStage.value = 3
-      },
-      onDone: async () => {
-        const response = await agentApi.detail(id)
-        currentRun.value = response.data.data
-        const finished = response.data.data
-        syncArtifactInput(finished)
-        if (Object.keys(finished.output_data.artifacts || {}).length) activeStage.value = 5
-        else if (finished.current_step >= 3) activeStage.value = 4
-        else if (finished.output_data.outline) activeStage.value = 3
-      },
-    })
-  } catch {
-    const response = await agentApi.detail(id)
-    currentRun.value = response.data.data
-  }
+const progressMonitor = createAgentRunMonitor<AgentRun>({
+  fetchRun: async (id, signal) => (await agentApi.detail(id, signal)).data.data,
+  stream: (id, handlers, signal) => agentApi.stream(id, handlers, signal),
+  onSnapshot: (run) => {
+    if (currentRun.value?.id !== run.id) return
+    const previous = currentRun.value
+    const phaseChanged = previous.status !== run.status || previous.current_step !== run.current_step
+      || previous.output_data.ppt_image_job?.status !== run.output_data.ppt_image_job?.status
+    progressSyncWarning.value = ''
+    currentRun.value = run
+    syncArtifactInput(run)
+    // Polling identical state must not pull a teacher out of a page they are
+    // reviewing. Only a task phase/terminal transition changes the active tab.
+    if (phaseChanged) syncRunStage(run)
+  },
+  onError: (_error, fatal) => {
+    progressSyncWarning.value = fatal ? '无法同步当前任务，请检查登录状态或重新打开任务。'
+      : '进度同步暂时中断，正在自动恢复；后台任务不受影响。'
+  },
+})
+function syncRunStage(run: AgentRun) {
+  const executing = ['queued', 'running'].includes(run.status)
+  if (run.output_data.ppt_image_job && ['queued', 'running'].includes(run.output_data.ppt_image_job.status)) activeStage.value = 5
+  else if (!executing && Object.keys(run.output_data.artifacts || {}).length) activeStage.value = 5
+  else if (run.current_step >= 3) activeStage.value = 4
+  else if (run.output_data.outline) activeStage.value = 3
+  else if (run.evidence_snapshot.length) activeStage.value = 2
+  else activeStage.value = 1
+}
+function listenToRun(id: number) {
+  progressMonitor.start(id)
+}
+function refreshVisibleProgress() {
+  if (!document.hidden) progressMonitor.refresh()
 }
 
 async function startAgent() {
@@ -795,12 +804,22 @@ watch(() => currentRun.value?.id, () => {
   versionCache.clear()
   void loadVersionPreview()
 })
+watch(() => [currentRun.value?.id, currentRun.value?.status] as const, ([id, status]) => {
+  if (id && status && ['queued', 'running'].includes(status)) listenToRun(id)
+  else progressMonitor.stop()
+  progressSyncWarning.value = ''
+}, { flush: 'sync' })
 onMounted(() => {
+  document.addEventListener('visibilitychange', refreshVisibleProgress)
+  window.addEventListener('online', refreshVisibleProgress)
   progressClock = setInterval(() => {
     if (isExecuting.value || submittingArtifacts.value) progressNow.value = Date.now()
   }, 1000)
 })
 onBeforeUnmount(() => {
+  progressMonitor.stop()
+  document.removeEventListener('visibilitychange', refreshVisibleProgress)
+  window.removeEventListener('online', refreshVisibleProgress)
   versionRequest++; versionController?.abort(); versionCache.clear()
   if (progressClock) clearInterval(progressClock)
 })
@@ -1147,6 +1166,7 @@ onBeforeUnmount(() => {
                 <p class="generation-progress-detail">{{ artifactGenerationProgress.detail }}</p>
                 <span v-if="artifactGenerationProgress.elapsed">{{ artifactGenerationProgress.elapsed }}</span>
               </div>
+              <p v-if="progressSyncWarning" class="generation-progress-detail">{{ progressSyncWarning }}</p>
             </section>
             <el-button
               type="primary"

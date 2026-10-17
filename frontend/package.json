@@ -10,6 +10,7 @@
     "type-check": "vue-tsc -b",
     "test:workspace-ai": "node --experimental-strip-types --test tests/workspaceAiRequests.test.mjs",
     "test:artifact-progress": "node --experimental-strip-types --test tests/lessonArtifactProgress.test.mjs",
+    "test:agent-progress": "node --experimental-strip-types --test tests/agentRunMonitor.test.mjs tests/agentEventStream.test.mjs",
     "test:lesson-publication": "node --experimental-strip-types --test tests/lessonPublication.test.mjs"
   },
   "dependencies": {

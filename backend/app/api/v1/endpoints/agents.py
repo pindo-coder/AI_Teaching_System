@@ -1,5 +1,5 @@
 import json
-from time import sleep
+from time import monotonic, sleep
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
@@ -310,6 +310,7 @@ def run_events(
 
     def event_stream():
         previous = ""
+        last_sent = monotonic()
         while True:
             with Session(bind=bind, autoflush=False, expire_on_commit=False) as event_db:
                 run = event_db.get(AgentRun, run_id)
@@ -321,6 +322,13 @@ def run_events(
                 if serialized != previous:
                     yield f"event: snapshot\ndata: {serialized}\n\n"
                     previous = serialized
+                    last_sent = monotonic()
+                elif monotonic() - last_sent >= 10:
+                    # Model calls may have no progress change for minutes.
+                    # Keep proxies from closing an otherwise healthy stream;
+                    # this is not a completed step or a percentage increase.
+                    yield ": keep-alive\n\n"
+                    last_sent = monotonic()
                 if run.status in {"waiting_confirmation", "completed", "failed", "cancelled"}:
                     yield "event: done\ndata: {}\n\n"
                     return

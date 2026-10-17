@@ -96,13 +96,53 @@ class PptMultimodalService:
         )
 
     def checkpoint_signature(self) -> dict:
-        from app.services.ppt_checkpoint_service import digest
+        """Image-stage metadata only; credentials are not content identity."""
         from app.services.multimodal_provider import VisionProvider
         vision = VisionProvider(db=getattr(self, "db", None))
         return {"prompt_version": IMAGE_PROMPT_VERSION, "model": self.model_name,
-                "base": self.base_url, "key_hash": digest(self.api_key),
+                "base": self.base_url,
                 "review_enabled": settings.ppt_image_review_enabled,
-                "review": [vision.available, vision.model_name, vision.base_url, digest(vision.api_key)]}
+                "review": [vision.enabled, vision.model_name, vision.base_url]}
+
+    def legacy_checkpoint_signatures(self) -> list[dict]:
+        """Reconstruct v4 identities, never guess ownership from slide titles.
+
+        Old states stored only a digest, not the signature. Retained provider
+        history can prove a match after key rotation without making a network
+        call. If history/credentials are unavailable, safely start a new job.
+        Historical keys stay in memory and are never logged or persisted here.
+        """
+        from sqlalchemy import select
+        from app.models.ai_operation import AiProviderConfig
+        from app.services.ai_operation_service import decrypt_api_key
+        from app.services.ppt_checkpoint_service import digest
+        from app.services.multimodal_provider import VisionProvider
+
+        vision = VisionProvider(db=self.db)
+        images = {(self.model_name, self.base_url, digest(self.api_key))}
+        reviews = {(vision.available, vision.model_name, vision.base_url, digest(vision.api_key))}
+        if self.db is not None:
+            for capability in ("image_generation", "vision"):
+                # Bounded, read-only compatibility lookup. Do not open an
+                # unrelated local/default database when no session was given.
+                rows = self.db.scalars(select(AiProviderConfig).where(
+                    AiProviderConfig.capability == capability
+                ).order_by(AiProviderConfig.id.desc()).limit(16))
+                for row in rows:
+                    try:
+                        key = (decrypt_api_key(row.api_key_encrypted) or None) if row.enabled else None
+                    except (RuntimeError, ValueError, TypeError):
+                        continue
+                    base = (row.base_url or "").strip().rstrip("/")
+                    model = (row.model_name or "").strip()
+                    if capability == "image_generation":
+                        images.add((model, base, digest((key or "").strip() or None)))
+                    else:
+                        reviews.add((bool(row.enabled and key and base and model), model, base, digest(key)))
+        return [{"prompt_version": IMAGE_PROMPT_VERSION, "model": model, "base": base,
+                 "key_hash": key_hash, "review_enabled": review_enabled, "review": list(review)}
+                for model, base, key_hash in images for review in reviews
+                for review_enabled in (False, True)]
 
     @staticmethod
     def _safe_prompt(slide: dict[str, Any], design: dict[str, Any]) -> str:
@@ -330,12 +370,15 @@ class PptMultimodalService:
                 candidates.append((index, slide))
         limit = max(0, settings.ppt_multimodal_max_images)
         selected = candidates[:limit] if self.available else []
-        acquired = bool(selected) and _PPT_IMAGE_CALL_GATE.acquire(blocking=False)
-        generated, errors, completed = 0, [], []
+        missing = [(index, slide) for index, slide in selected
+                   if not self._valid_cached_asset(slide.get("visual_asset"))]
+        acquired = bool(missing) and _PPT_IMAGE_CALL_GATE.acquire(blocking=False)
+        generated, reused, errors, completed = 0, 0, [], []
         try:
             for index, slide in candidates:
                 if self._valid_cached_asset(slide.get("visual_asset")):
                     generated += 1
+                    reused += 1
                     completed.append(index + 1)
                     continue
                 if acquired and (index, slide) in selected:
@@ -365,11 +408,24 @@ class PptMultimodalService:
         finally:
             if acquired:
                 _PPT_IMAGE_CALL_GATE.release()
+        requested = len(candidates)
+        remaining = requested - generated
+        if generated:
+            message = (f"已生成 {generated}/{requested} 页辅助插图，部分配图未完成；未完成页面保留文字与矢量设计。"
+                       if remaining else f"已生成 {generated} 页辅助插图。")
+        elif errors:
+            message = "辅助插图生成失败，文字课件已保留；请查看具体原因。"
+        elif missing and not acquired:
+            message = "配图服务正忙，保留文字与矢量设计。"
+        elif candidates and not self.available:
+            message = "配图服务不可用，缺失插图可在配置恢复后继续生成。"
+        else:
+            message = "本次未使用辅助插图，保留文字与矢量设计。"
         ppt_data["multimodal"] = {
-            "status": "partial" if generated and errors else "completed" if generated else "unavailable" if not self.available else "fallback",
-            "generated_count": generated, "requested_count": len(selected), "selected_slides": completed,
-            "message": (f"已生成 {generated}/{len(selected)} 页辅助插图，部分配图未完成；未完成页面保留文字与矢量设计。" if errors
-                else f"已生成 {generated} 页辅助插图。") if generated else "辅助插图生成失败，文字课件已保留；请查看具体原因。" if errors else "配图服务正忙，保留文字与矢量设计。" if selected and not acquired else "本次未使用辅助插图，保留文字与矢量设计。",
+            "status": "completed" if not remaining else "partial" if generated else "unavailable" if not self.available else "fallback",
+            "generated_count": generated, "requested_count": requested, "selected_slides": completed,
+            "reused_count": reused, "newly_generated_count": generated - reused,
+            "missing_count": remaining, "message": message,
             "errors": errors,
             "semantic_review": {"passed": sum((slide.get("visual_asset", {}).get("review") or {}).get("status") == "passed" for slide in slides),
                 "unreviewed": sum(bool(slide.get("visual_asset")) and (slide.get("visual_asset", {}).get("review") or {}).get("status") != "passed" for slide in slides)},

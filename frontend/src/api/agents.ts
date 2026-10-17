@@ -1,6 +1,7 @@
 import { http, type ApiResponse } from './http'
 import type { AiSource } from './ai'
 import type { LearningStage } from '@/types'
+import { streamAgentEvents, type AgentStreamHandlers } from '@/utils/agentEventStream'
 
 export type AgentStatus =
   | 'queued'
@@ -319,8 +320,8 @@ export const agentApi = {
     http.post<ApiResponse<AgentRun>>('/agent/runs', payload, { timeout: 90_000 }),
   list: (limit = 30) =>
     http.get<ApiResponse<AgentRun[]>>('/agent/runs', { params: { limit } }),
-  detail: (id: number) =>
-    http.get<ApiResponse<AgentRun>>(`/agent/runs/${id}`),
+  detail: (id: number, signal?: AbortSignal) =>
+    http.get<ApiResponse<AgentRun>>(`/agent/runs/${id}`, { signal }),
   confirmEvidence: (id: number) =>
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/confirm`, { action: 'approve_evidence' }),
   generateArtifacts: (
@@ -389,33 +390,11 @@ export const agentApi = {
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/cancel`),
   retry: (id: number) =>
     http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/retry`),
-  async stream(id: number, handlers: {
-    onSnapshot: (run: AgentRun) => void
-    onDone?: () => void
-  }) {
+  async stream(id: number, handlers: AgentStreamHandlers<AgentRun>, signal?: AbortSignal) {
     const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-    const response = await fetch(`${baseURL}/agent/runs/${id}/events`, {
-      headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
+    await streamAgentEvents({
+      url: `${baseURL}/agent/runs/${id}/events`, token: localStorage.getItem('access_token') || '',
+      handlers, signal,
     })
-    if (!response.ok || !response.body) throw new Error('智能任务进度服务暂时不可用')
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const events = buffer.split('\n\n')
-      buffer = events.pop() || ''
-      for (const block of events) {
-        const event = block.match(/^event:\s*(.+)$/m)?.[1]
-        const dataLine = block.match(/^data:\s*(.+)$/m)?.[1]
-        if (!event || !dataLine) continue
-        const data = JSON.parse(dataLine)
-        if (event === 'snapshot') handlers.onSnapshot(data)
-        if (event === 'done') handlers.onDone?.()
-        if (event === 'error') throw new Error(data.message || '智能任务执行失败')
-      }
-    }
   },
 }

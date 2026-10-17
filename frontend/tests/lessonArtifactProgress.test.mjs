@@ -68,6 +68,33 @@ test('illustration and export are distinct phases and never claim file readiness
   assert.match(exporting.label, /导出/)
 })
 
+test('an image-only resume shows reused pages, paid images and remaining image work', () => {
+  const value = run('illustrating', 0)
+  value.steps[0].output_data.ppt_workflow.resume = {
+    requested: true, resumed: true, reused_pages: 10, reused_images: 1, generated_images: 0, pending_images: 2,
+  }
+  const progress = lessonArtifactProgress(value)
+  assert.equal(progress.label, '正在补全缺失插图')
+  assert.match(progress.detail, /已复用 10 页设计、1 张已有插图/)
+  assert.match(progress.detail, /已补 0\/2 张/)
+  assert.ok(progress.percentage < 100)
+  value.steps[0].output_data.ppt_workflow.resume.generated_images = 1
+  value.steps[0].output_data.ppt_workflow.resume.pending_images = 1
+  assert.match(lessonArtifactProgress(value).detail, /已补 1\/2 张/)
+})
+
+test('an export retry with all paid images cached does not claim it is generating new ones', () => {
+  const value = run('illustrating', 0)
+  value.steps[0].output_data.ppt_workflow.resume = {
+    resumed: true, reused_pages: 10, reused_images: 2, generated_images: 0, pending_images: 0,
+  }
+  const progress = lessonArtifactProgress(value)
+  assert.equal(progress.label, '插图已齐全，准备导出')
+  assert.match(progress.detail, /无需重新调用成图模型/)
+  delete value.steps[0].output_data.ppt_workflow.resume.pending_images
+  assert.doesNotMatch(lessonArtifactProgress(value).detail, /无需重新调用/) // legacy server fallback
+})
+
 test('waiting for extra documents does not mark the whole request complete', () => {
   const value = run('completed', 10)
   value.output_data.artifact_attempt.requested_types.push('lesson_plan', 'classroom_activities')

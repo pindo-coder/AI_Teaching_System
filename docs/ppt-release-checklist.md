@@ -18,6 +18,8 @@
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m pytest -q \
   tests/test_ppt_workflow.py tests/test_agents.py \
+  tests/test_agent_run_events.py \
+  tests/test_ppt_checkpoint.py tests/test_ppt_resume_images.py \
   tests/test_lesson_publication_safety.py tests/test_ppt_retention.py \
   tests/test_ppt_mysql_integration.py \
   tests/test_small_server_multimodal_hardening.py tests/test_container_deployment_contract.py
@@ -27,10 +29,13 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. .venv/bin/python -m pytest -q \
 CI 使用专用 MySQL 8.0 服务。手动运行只允许本机 `ppt_ci` 用户的 `ppt_workflow_ci` 可丢弃测试库；
 测试会创建/清空该专用库的表，绝不能传入生产连接。
 
+成图密钥轮换与仅补缺图的断点规则、v4 兼容范围见 [PPT 断点与缺失插图补全](ppt-checkpoint-resume.md)。
+
 前端在 `frontend/` 运行：
 
 ```bash
 corepack pnpm test:artifact-progress
+corepack pnpm test:agent-progress
 corepack pnpm test:lesson-publication
 corepack pnpm test:workspace-ai
 corepack pnpm build
