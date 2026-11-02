@@ -13,8 +13,6 @@ import os
 import re
 from pathlib import Path
 import shutil
-import signal
-import subprocess
 import sys
 from uuid import uuid4
 from xml.etree import ElementTree as ET
@@ -22,6 +20,7 @@ from zipfile import ZipFile
 
 from app.core.config import BACKEND_DIR, settings
 from app.services.ppt_svg_service import SVG_NS, FONT_FAMILY
+from app.services.ppt_process_service import export_slot, render_mode, run_bounded_program
 
 
 def artifact_root() -> Path:
@@ -52,32 +51,25 @@ def font_directory() -> Path | None:
     return bundled if bundled.is_dir() else None
 
 
-def run_program(args: list[str], *, cwd: Path, timeout: int | None = None, font_config: Path | None = None) -> str:
+def run_program(args: list[str], *, cwd: Path, timeout: int | None = None, font_config: Path | None = None,
+                resource_limited: bool = False, min_memory_mb: int | None = None) -> str:
     env = {key: value for key, value in os.environ.items() if key in {
         "PATH", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT", "WINDIR",
         "FONTCONFIG_FILE", "FONTCONFIG_PATH", "DYLD_LIBRARY_PATH", "LD_LIBRARY_PATH",
     }}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # BLAS/OpenMP defaults can create many threads in a tiny render worker.
+    # This only applies to presentation subprocesses, not the web process.
+    env.update(OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1", NUMEXPR_NUM_THREADS="1")
     if font_config:
         env["FONTCONFIG_FILE"] = str(font_config)
         env["SAL_FONTPATH_PRIVATE"] = str(font_directory())
-    process = subprocess.Popen(args, cwd=cwd, env=env, text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, start_new_session=os.name == "posix")
-    try:
-        stdout, stderr = process.communicate(timeout=timeout or settings.ppt_export_timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        if os.name == "posix":
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-        process.communicate()
-        raise RuntimeError("课件导出或渲染超时，已有成果未被覆盖") from exc
-    if process.returncode:
-        raise RuntimeError("课件工具检查失败：" + (stderr or stdout)[-1800:])
-    return stdout
+    return run_bounded_program(args, cwd=cwd, env=env, timeout=timeout or settings.ppt_export_timeout_seconds,
+                               resource_limited=resource_limited, min_memory_mb=min_memory_mb)
 
 
 def check_runtime() -> dict[str, str]:
+    render_mode()  # Explicit production isolation never silently falls back.
     runtime = runtime_root()
     office, raster = shutil.which(settings.ppt_office_binary), shutil.which("pdftoppm")
     if not office or not raster:
@@ -160,6 +152,10 @@ class PptNativeService:
         self.root = artifact_root()
 
     def export(self, ppt_data: dict, evidence: list[dict]) -> tuple[dict, dict]:
+        with export_slot(self.root):
+            return self._export(ppt_data, evidence)
+
+    def _export(self, ppt_data: dict, evidence: list[dict]) -> tuple[dict, dict]:
         ready = check_runtime()
         runtime, office, raster = Path(ready["runtime"]), ready["office"], ready["raster"]
         revision = uuid4().hex
@@ -214,7 +210,8 @@ class PptNativeService:
             raise RuntimeError("课件未产生结构检查报告")
         output = project / "教学课件.pptx"
         run_program([sys.executable, str(runtime / "scripts/svg_to_pptx.py"), str(project),
-                     "--quick-generate", "--with-notes", "--no-animations", "-o", str(output)], cwd=project)
+                     "--quick-generate", "--with-notes", "--no-animations", "-o", str(output)], cwd=project,
+                    resource_limited=True, min_memory_mb=128)
         # Upstream maps Noto CJK to Microsoft YaHei for Windows. Keep our
         # application font contract portable instead of depending on that font.
         normalized = output.with_suffix(".fonts.pptx")
@@ -250,7 +247,8 @@ class PptNativeService:
                         raise RuntimeError(f"第 {index+1} 页图片裁切与边框形状不一致")
         profile = project / "office-profile"
         run_program([office, f"-env:UserInstallation={profile.as_uri()}", "--headless", "--convert-to", "pdf",
-                     "--outdir", str(previews), str(output)], cwd=project, font_config=font_config)
+                     "--outdir", str(previews), str(output)], cwd=project, font_config=font_config,
+                    timeout=settings.ppt_render_timeout_seconds, resource_limited=True)
         pdf = previews / "教学课件.pdf"
         if not pdf.is_file():
             raise RuntimeError("课件最终文件未能渲染，不能宣称生成成功")
@@ -266,7 +264,8 @@ class PptNativeService:
                 labels = [value for i, value in enumerate(page.get("diagram_labels", [])) if f'id="label-{i}"' in page["svg"]]
                 if any("".join(value.split()) not in visible for value in [page["title"], page["takeaway"], *page["bullets"], *labels]):
                     raise RuntimeError(f"第 {index+1} 页成品渲染遗漏正文，当前成果不予替换")
-        run_program([raster, "-png", "-scale-to", "1280", str(pdf), str(previews / "page")], cwd=project)
+        run_program([raster, "-png", "-scale-to", "1280", str(pdf), str(previews / "page")], cwd=project,
+                    resource_limited=True, min_memory_mb=128)
         images = sorted(previews.glob("page-*.png"), key=lambda path: int(path.stem.split("-")[-1]))
         if len(images) != len(data["slides"]):
             raise RuntimeError("课件最终渲染页数不一致")

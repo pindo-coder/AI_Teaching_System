@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -146,6 +147,17 @@ class Settings(BaseSettings):
     ppt_office_binary: str = "soffice"
     ppt_font_directory: str | None = None
     ppt_export_timeout_seconds: int = Field(default=120, ge=30, le=300)
+    # PDF rendering has its own budget; extending it must not remove resource
+    # limits or turn an overloaded renderer into an unbounded web worker.
+    ppt_render_timeout_seconds: int = Field(default=300, ge=30, le=600)
+    ppt_render_isolation: Literal["auto", "systemd", "process"] = "auto"
+    ppt_render_memory_limit_mb: int = Field(default=512, ge=128, le=8192)
+    ppt_render_min_memory_mb: int = Field(default=192, ge=64, le=4096)
+    ppt_render_reserve_mb: int = Field(default=128, ge=64, le=8192)
+    ppt_render_cpu_percent: int = Field(default=100, ge=10, le=400)
+    ppt_render_tasks_max: int = Field(default=64, ge=16, le=256)
+    ppt_render_lock_wait_seconds: float = Field(default=60, ge=0, le=300)
+    ppt_render_memory_wait_seconds: float = Field(default=20, ge=0, le=60)
     ppt_page_repair_attempts: int = Field(default=2, ge=0, le=3)
     ppt_job_timeout_seconds: int = Field(default=1800, ge=180, le=3600)
     ppt_multimodal_enabled: bool = True

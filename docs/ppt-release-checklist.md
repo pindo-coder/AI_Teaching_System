@@ -30,6 +30,7 @@ CI 使用专用 MySQL 8.0 服务。手动运行只允许本机 `ppt_ci` 用户�
 测试会创建/清空该专用库的表，绝不能传入生产连接。
 
 成图密钥轮换与仅补缺图的断点规则、v4 兼容范围见 [PPT 断点与缺失插图补全](ppt-checkpoint-resume.md)。
+渲染单独限时、跨进程导出锁与宿主机资源隔离见 [PPT 渲染资源保护](ppt-render-isolation.md)。
 
 前端在 `frontend/` 运行：
 

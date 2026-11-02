@@ -36,6 +36,7 @@ knowledge_base/generated_artifacts/*
 *.tsbuildinfo
 
 # Local review, agent memory, and generated acceptance artifacts
+/output/
 tmp/
 .tmp/
 .workbuddy/
