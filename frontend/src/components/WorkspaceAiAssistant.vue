@@ -819,70 +819,77 @@ async function send(executionId?: number | Event) {
     const scope = safeExecutionId
       ? { course_id: null, chapter_id: null, chapter_ids: [], teaching_class_id: null, learning_stage: 'preview' as LearningStage, page_name: null }
       : currentScope
-    if (requestMode === 'agent') {
-      const streamAgent = safeExecutionId ? aiApi.continueWorkspaceAgentExecution : aiApi.workspaceAgentStream
-      await streamAgent({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {
-        onContext: (context) => {
-          emit('context-updated', context)
-          updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = Boolean(context.course_id && context.chapter_id) })
-        },
-        onMeta: (meta) => updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = meta.grounded; message.model = meta.model }),
-        onExecution: (execution) => updateAssistantMessage(assistantMessage.id, (message) => { message.execution = execution }),
-        onPlan: (plan) => updateAssistantMessage(assistantMessage.id, (message) => { message.plan = plan }),
-        onProgress: (progress) => updateAssistantMessage(assistantMessage.id, (message) => { message.progress = [...(message.progress || []), progress] }),
-        onTool: (tool) => updateAssistantMessage(assistantMessage.id, (message) => {
-          const existing = message.toolCalls || []
-          const index = existing.findIndex((item) => item.name === tool.name)
-          if (index >= 0) existing[index] = tool
-          else existing.push(tool)
-          message.toolCalls = [...existing]
-        }),
-        onAction: (action) => {
-          updateAssistantMessage(assistantMessage.id, (message) => { message.actions = [...(message.actions || []), action] })
-          // 生成类工具沿用已有备课成果接口，规划器不直接写文件；生成完成后
-          // 仍只展示可下载结果，发布权留给教师。
-          if (action.kind === 'generate_artifacts' && action.run_id && action.output_types?.length) {
-            action.status = 'running'
-            void (async () => {
-              try {
-                const detail = await agentApi.detail(action.run_id!)
-                updateRunSnapshot(assistantMessage.id, detail.data.data)
-                await generateArtifacts(assistantMessage.id, detail.data.data, action.output_types!, action.ppt_preferences)
-                action.status = 'completed'
-                action.label = '成果生成已提交'
-                persistHistory()
-              } catch (error) {
-                action.status = 'failed'
-                ElMessage.error(error instanceof Error ? error.message : '成果生成失败，请稍后重试')
-              }
-            })()
-          }
-        },
-        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
-        onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
-      })
-    } else {
-      await aiApi.workspaceStream({
-        mode: requestMode,
-        role: role.value,
-        question: content,
-        task_type: requestTaskType,
-        attachment_ids: selectedImages.map((asset) => asset.id),
-        conversation_history: conversationHistory,
-        ...scope,
-      }, {
-        onMeta: (meta) => updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = meta.grounded; message.model = meta.model }),
-        onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
-        onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
-      })
-      if (assistantMessage.content.trim() && shouldSubmitLearningQuestion) {
-        await submitStudentLearningQuestion(scope, content)
+    const streamController = new AbortController()
+    activeStreamControllers.add(streamController)
+    try {
+      if (requestMode === 'agent') {
+        const streamAgent = safeExecutionId ? aiApi.continueWorkspaceAgentExecution : aiApi.workspaceAgentStream
+        await streamAgent({ role: role.value, question: content, execution_id: safeExecutionId, ...scope }, {
+          onContext: (context) => {
+            emit('context-updated', context)
+            updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = Boolean(context.course_id && context.chapter_id) })
+          },
+          onMeta: (meta) => updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = meta.grounded; message.model = meta.model }),
+          onExecution: (execution) => updateAssistantMessage(assistantMessage.id, (message) => { message.execution = execution }),
+          onPlan: (plan) => updateAssistantMessage(assistantMessage.id, (message) => { message.plan = plan }),
+          onProgress: (progress) => updateAssistantMessage(assistantMessage.id, (message) => { message.progress = [...(message.progress || []), progress] }),
+          onTool: (tool) => updateAssistantMessage(assistantMessage.id, (message) => {
+            const existing = message.toolCalls || []
+            const index = existing.findIndex((item) => item.name === tool.name)
+            if (index >= 0) existing[index] = tool
+            else existing.push(tool)
+            message.toolCalls = [...existing]
+          }),
+          onAction: (action) => {
+            updateAssistantMessage(assistantMessage.id, (message) => { message.actions = [...(message.actions || []), action] })
+            // 生成类工具沿用已有备课成果接口，规划器不直接写文件；生成完成后
+            // 仍只展示可下载结果，发布权留给教师。
+            if (action.kind === 'generate_artifacts' && action.run_id && action.output_types?.length) {
+              action.status = 'running'
+              void (async () => {
+                try {
+                  const detail = await agentApi.detail(action.run_id!)
+                  updateRunSnapshot(assistantMessage.id, detail.data.data)
+                  await generateArtifacts(assistantMessage.id, detail.data.data, action.output_types!, action.ppt_preferences)
+                  action.status = 'completed'
+                  action.label = '成果生成已提交'
+                  persistHistory()
+                } catch (error) {
+                  action.status = 'failed'
+                  ElMessage.error(error instanceof Error ? error.message : '成果生成失败，请稍后重试')
+                }
+              })()
+            }
+          },
+          onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
+          onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
+        }, { signal: streamController.signal })
+      } else {
+        await aiApi.workspaceStream({
+          mode: requestMode,
+          role: role.value,
+          question: content,
+          task_type: requestTaskType,
+          attachment_ids: selectedImages.map((asset) => asset.id),
+          conversation_history: conversationHistory,
+          ...scope,
+        }, {
+          onMeta: (meta) => updateAssistantMessage(assistantMessage.id, (message) => { message.grounded = meta.grounded; message.model = meta.model }),
+          onChunk: (text) => { updateAssistantMessage(assistantMessage.id, (message) => { message.content += text }); scrollToBottom(requestMode) },
+          onSources: (sources) => updateAssistantMessage(assistantMessage.id, (message) => { message.sources = sources }),
+        }, { signal: streamController.signal })
+        if (assistantMessage.content.trim() && shouldSubmitLearningQuestion) {
+          await submitStudentLearningQuestion(scope, content)
+        }
       }
+    } finally {
+      activeStreamControllers.delete(streamController)
     }
     persistHistory()
     if (requestMode === 'agent') void loadExecutions()
     window.dispatchEvent(new Event('learning-evidence-updated'))
   } catch (error: unknown) {
+    if (error instanceof DOMException && error.name === 'AbortError') return
     updateAssistantMessage(assistantMessage.id, (message) => {
       message.content = error instanceof Error ? error.message : 'AI 暂时无法连接，请稍后重试。'
       message.failed = true
@@ -923,7 +930,12 @@ async function applyExternalRequest(request: WorkspaceAiRequest) {
 watch(storageScopeKey, loadHistory, { immediate: true })
 function refreshAfterHandoff() { void loadExecutions() }
 onMounted(() => { void loadTemplates(); window.addEventListener('agent-handoff-saved', refreshAfterHandoff) })
-onBeforeUnmount(() => window.removeEventListener('agent-handoff-saved', refreshAfterHandoff))
+const activeStreamControllers = new Set<AbortController>()
+onBeforeUnmount(() => {
+  window.removeEventListener('agent-handoff-saved', refreshAfterHandoff)
+  for (const controller of activeStreamControllers) controller.abort()
+  activeStreamControllers.clear()
+})
 
 defineExpose({ applyExternalRequest, isBusy })
 </script>

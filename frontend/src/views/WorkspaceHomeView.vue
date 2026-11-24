@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, defineAsyncComponent } from 'vue'
 import { useAuthStore } from '@/stores/auth'
-import DashboardView from './DashboardView.vue'
-import AdminWorkspaceView from './AdminWorkspaceView.vue'
+
+const DashboardView = defineAsyncComponent(() => import('./DashboardView.vue'))
+const AdminWorkspaceView = defineAsyncComponent(() => import('./AdminWorkspaceView.vue'))
 
 const auth = useAuthStore()
 const workspaceComponent = computed(() => {

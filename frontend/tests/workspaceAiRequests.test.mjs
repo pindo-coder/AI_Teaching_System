@@ -13,7 +13,12 @@ const vueUrl = pathToFileURL(require.resolve('vue')).href
 const { parse, compileScript } = createRequire(require.resolve('vue'))('@vue/compiler-sfc')
 const toModule = (source) => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`
 const moduleUrl = (relative) => new URL(relative, import.meta.url).href
-const flush = async () => { for (let index = 0; index < 15; index += 1) await Vue.nextTick() }
+const flush = async () => {
+  for (let round = 0; round < 3; round += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    for (let index = 0; index < 10; index += 1) await Vue.nextTick()
+  }
+}
 function deferred() {
   let resolve, reject
   const promise = new Promise((yes, no) => { resolve = yes; reject = no })
@@ -163,6 +168,10 @@ async function mountDock({ fetch, route, workspace } = {}) {
   code = code.replace(/from (["'])([^"']+)\1/g, (_match, _quote, name) => {
     assert.ok(imports[name], `Unexpected component dependency: ${name}`)
     return `from ${JSON.stringify(imports[name])}`
+  })
+  code = code.replace(/import\((["'])([^"']+)\1\)/g, (_match, _quote, name) => {
+    assert.ok(imports[name], `Unexpected dynamic dependency: ${name}`)
+    return `import(${JSON.stringify(imports[name])})`
   })
   const component = (await import(toModule(code))).default
   const root = { type: 'root', children: [] }

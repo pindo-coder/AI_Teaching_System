@@ -16,7 +16,7 @@ import { useAuthStore } from '@/stores/auth'
 import type { DashboardData, LearningStage, TeacherDashboardData } from '@/types'
 import { beijingTimestamp, beijingToday, formatBeijingTime } from '@/utils/time'
 import { requestWorkspaceAi } from '@/utils/workspaceAiEvents'
-import dashboardHomeBackground from '@/assets/dashboard-home-bg.svg'
+import dashboardHomeBackground from '@/assets/dashboard-home-bg.webp'
 import teacherDashboardMetrics from '@/assets/teacher-dashboard-metrics.svg'
 
 const auth = useAuthStore()

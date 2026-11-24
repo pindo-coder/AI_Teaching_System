@@ -12,7 +12,7 @@ import KnowledgeGraph from '@/components/KnowledgeGraph.vue'
 import { getErrorMessage } from '@/utils/error'
 import { beijingToday, formatBeijingDateTime } from '@/utils/time'
 import logoUrl from '@/assets/logo1.svg'
-import learningHeroBackground from '@/assets/learning-hero-reference.png'
+import learningHeroBackground from '@/assets/learning-hero-reference.webp'
 
 const route = useRoute()
 const router = useRouter()

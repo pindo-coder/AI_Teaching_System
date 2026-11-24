@@ -6,7 +6,7 @@ import { Lock, User } from '@element-plus/icons-vue'
 import { useAuthStore } from '@/stores/auth'
 import { getErrorMessage } from '@/utils/error'
 import BrandLockup from '@/components/ui/BrandLockup.vue'
-import loginVisualImage from '@/assets/login-city-visual.png'
+import loginVisualImage from '@/assets/login-city-visual.webp'
 import loginRobotImage from '@/assets/login-robot.png'
 
 const formRef = ref<FormInstance>()

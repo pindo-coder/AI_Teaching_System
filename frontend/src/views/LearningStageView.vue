@@ -13,7 +13,7 @@ import { MagicStick } from '@element-plus/icons-vue'
 import NoteRichEditor from '@/components/NoteRichEditor.vue'
 import TextbookAnnotationReader from '@/components/TextbookAnnotationReader.vue'
 import logoUrl from '@/assets/logo1.svg'
-import learningHeroBackground from '@/assets/learning-hero-reference.png'
+import learningHeroBackground from '@/assets/learning-hero-reference.webp'
 import type { AiTaskType } from '@/api/ai'
 import { requestWorkspaceAi } from '@/utils/workspaceAiEvents'
 
@@ -152,9 +152,11 @@ async function loadFootprint() {
   footprint.value = (await learningApi.footprint(courseId.value, chapterId.value, stage.value)).data.data
 }
 
-function trackReading(event?: Event) {
-  const eventTarget = event?.currentTarget
-  const element = eventTarget instanceof HTMLElement ? eventTarget : annotationReader.value?.getElement()
+let readingScrollRaf: number | null = null
+let loadSequence = 0
+
+function measureReadingProgress(targetEl?: HTMLElement | null) {
+  const element = targetEl || annotationReader.value?.getElement()
   if (!element) return
   const hasInternalScroll = element.scrollHeight > element.clientHeight + 1
   let percent: number
@@ -172,6 +174,16 @@ function trackReading(event?: Event) {
   }
 }
 
+function trackReading(event?: Event) {
+  const eventTarget = event?.currentTarget
+  const element = eventTarget instanceof HTMLElement ? eventTarget : null
+  if (readingScrollRaf !== null) return
+  readingScrollRaf = window.requestAnimationFrame(() => {
+    readingScrollRaf = null
+    measureReadingProgress(element)
+  })
+}
+
 async function confirmReadingComplete() {
   if (lastReadingPercent.value >= 100) return
   const previous = lastReadingPercent.value
@@ -185,18 +197,29 @@ async function confirmReadingComplete() {
 }
 
 async function load() {
+  const seq = ++loadSequence
   loading.value = true
   try {
-    course.value = (await courseApi.detail(courseId.value)).data.data
+    const [courseResp, noteResp] = await Promise.all([
+      courseApi.detail(courseId.value),
+      studyApi.note(chapterId.value).catch(() => null),
+    ])
+    if (seq !== loadSequence) return
+    course.value = courseResp.data.data
     chapter.value = course.value.chapters.find((item) => item.id === chapterId.value) || null
     if (!chapter.value) return router.replace(`/courses/${courseId.value}`)
-    savedNote.value = (await studyApi.note(chapterId.value)).data.data
+    savedNote.value = noteResp?.data.data || null
     noteEditing.value = false
     noteDraft.value = sanitizeNoteHtml(savedNote.value?.content || '')
     lastReadingPercent.value = 0
     await recordEvent('chapter_opened')
+    if (seq !== loadSequence) return
     await loadFootprint()
-  } finally { loading.value = false }
+  } catch {
+    if (seq === loadSequence) ElMessage.error('专题学习内容加载失败，请稍后重试')
+  } finally {
+    if (seq === loadSequence) loading.value = false
+  }
 }
 function goToDestination(destination: { chapterId: number; stage: LearningStage }) {
   router.push(`/courses/${courseId.value}/chapters/${destination.chapterId}/${destination.stage}`)
@@ -337,7 +360,13 @@ async function savePracticeToNotes(silent = false) {
 onMounted(load)
 watch(() => [courseId.value, chapterId.value, stage.value], load)
 onMounted(() => window.addEventListener('scroll', trackReading, { passive: true }))
-onUnmounted(() => window.removeEventListener('scroll', trackReading))
+onUnmounted(() => {
+  window.removeEventListener('scroll', trackReading)
+  if (readingScrollRaf !== null) {
+    window.cancelAnimationFrame(readingScrollRaf)
+    readingScrollRaf = null
+  }
+})
 </script>
 
 <template>

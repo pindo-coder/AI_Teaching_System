@@ -16,7 +16,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useRouter } from 'vue-router'
 import { formatBeijingDateTime } from '@/utils/time'
 import logoUrl from '@/assets/logo1.svg'
-import learningHeroBackground from '@/assets/learning-hero-reference.png'
+import learningHeroBackground from '@/assets/learning-hero-reference.webp'
 
 type MaterialTab = 'central' | 'textbook' | 'local' | 'unclassified'
 

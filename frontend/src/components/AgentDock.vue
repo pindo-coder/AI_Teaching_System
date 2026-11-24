@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch, type Component, type ShallowRef } from 'vue'
 import { ArrowDown, Check, MagicStick, RefreshRight, Setting } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AiWorkspaceContext, type AiWorkspaceContextPayload } from '@/api/ai'
@@ -9,7 +9,20 @@ import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { WORKSPACE_AI_REQUEST_EVENT, workspaceAiRequestError, type WorkspaceAiRequest } from '@/utils/workspaceAiEvents'
 import { createWorkspaceContextLoader } from '@/utils/workspaceAiContext'
-import WorkspaceAiAssistant from './WorkspaceAiAssistant.vue'
+
+const assistantComponent: ShallowRef<Component | null> = shallowRef(null)
+let assistantLoaderPromise: Promise<Component> | null = null
+function loadWorkspaceAiAssistant(): Promise<Component> {
+  const existing = assistantComponent.value
+  if (existing) return Promise.resolve(existing)
+  if (!assistantLoaderPromise) {
+    assistantLoaderPromise = import('./WorkspaceAiAssistant.vue').then((mod) => {
+      assistantComponent.value = mod.default
+      return mod.default
+    })
+  }
+  return assistantLoaderPromise
+}
 
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
@@ -112,6 +125,19 @@ function acceptAgentContext(nextContext: AiWorkspaceContext) {
   context.value = nextContext
 }
 
+async function waitForAssistantReady(expectedRevision: number) {
+  if (assistantRef.value || expectedRevision !== requestRevision) return
+  await new Promise<void>((resolve) => {
+    const stop = watch(assistantRef, (instance) => {
+      if (instance || expectedRevision !== requestRevision) {
+        stop()
+        resolve()
+      }
+    }, { flush: 'post' })
+    setTimeout(() => { stop(); resolve() }, 5000)
+  })
+}
+
 async function handleWorkspaceAiRequest(event: Event) {
   const request = (event as CustomEvent<WorkspaceAiRequest>).detail
   const error = workspaceAiRequestError(request, {
@@ -136,7 +162,7 @@ async function handleWorkspaceAiRequest(event: Event) {
   manualClassId.value = null
   requestedStage.value = request.learningStage
   try {
-    const resolved = await refreshContext()
+    const [resolved] = await Promise.all([refreshContext(), loadWorkspaceAiAssistant()])
     if (current !== requestRevision) return
     if (!resolved || resolved.course_id !== request.courseId || resolved.chapter_id !== request.chapterId
       || resolved.learning_stage !== request.learningStage) {
@@ -144,6 +170,7 @@ async function handleWorkspaceAiRequest(event: Event) {
     }
     openingRequest.value = false
     await nextTick()
+    await waitForAssistantReady(current)
     if (current !== requestRevision) return
     if (!assistantRef.value) throw new Error('AI 工作台尚未准备好，请重新点击入口。')
     await assistantRef.value.applyExternalRequest(request)
@@ -159,6 +186,9 @@ async function handleWorkspaceAiRequest(event: Event) {
   }
 }
 
+watch(expanded, (isExpanded) => {
+  if (isExpanded) void loadWorkspaceAiAssistant()
+})
 watch(() => route.fullPath, () => {
   requestRevision += 1
   handlingRequest = false
@@ -221,8 +251,9 @@ onBeforeUnmount(() => {
       <div v-if="expanded" class="agent-dock-body">
         <p v-if="openingRequest" class="agent-dock-request-status" role="status">正在确认教学范围并打开 AI 工作台…</p>
         <p v-else-if="requestError" class="agent-dock-request-status" role="alert">{{ requestError }}</p>
-        <WorkspaceAiAssistant
-          v-else
+        <component
+          :is="assistantComponent"
+          v-else-if="assistantComponent"
           ref="assistantRef"
           :key="`${context?.course_id || 0}-${context?.chapter_ids.join('-') || 0}-${context?.teaching_class_id || 0}-${stage}`"
           :course-id="context?.course_id"
@@ -233,6 +264,7 @@ onBeforeUnmount(() => {
           :context="context"
           @context-updated="acceptAgentContext"
         />
+        <p v-else class="agent-dock-request-status" role="status">正在加载 AI 工作台…</p>
       </div>
     </transition>
   </section>

@@ -1,4 +1,5 @@
 import { http, type ApiResponse } from './http'
+import { streamSseJson } from './sse'
 
 export interface NewsItem {
   id: number
@@ -60,33 +61,15 @@ export const newsApi = {
   textbookRelations: (newsId: number, courseId: number, options: { signal?: AbortSignal } = {}) =>
     http.get<ApiResponse<TextbookRelationItem[]>>(`/current-affairs/${newsId}/textbook-relations`, { params: { course_id: courseId }, signal: options.signal }),
   async summaryStream(newsId: number, handlers: NewsSummaryStreamHandlers, options: { signal?: AbortSignal } = {}) {
-    const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-    const response = await fetch(`${baseURL}/current-affairs/${newsId}/ai-summary/stream`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
+    await streamSseJson(`/current-affairs/${newsId}/ai-summary/stream`, (event, data) => {
+      if (event === 'meta') handlers.onMeta(data as Parameters<NewsSummaryStreamHandlers['onMeta']>[0])
+      if (event === 'chunk') handlers.onChunk((data as { text: string }).text)
+      if (event === 'sources') handlers.onSources()
+    }, {
       signal: options.signal,
+      unavailableMessage: 'AI 时政总结暂时不可用',
+      errorFallbackMessage: 'AI 时政总结生成失败',
     })
-    if (!response.ok || !response.body) throw new Error(`AI 时政总结暂时不可用（HTTP ${response.status}）`)
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const events = buffer.split('\n\n')
-      buffer = events.pop() || ''
-      for (const block of events) {
-        const event = block.match(/^event:\s*(.+)$/m)?.[1]
-        const dataLine = block.match(/^data:\s*(.+)$/m)?.[1]
-        if (!event || !dataLine) continue
-        const data = JSON.parse(dataLine)
-        if (event === 'meta') handlers.onMeta(data)
-        if (event === 'chunk') handlers.onChunk(data.text)
-        if (event === 'sources') handlers.onSources()
-        if (event === 'error') throw new Error(data.message || 'AI 时政总结生成失败')
-      }
-    }
   },
   saveStudyNote: (newsId: number, payload: { chapter_id: number; content: string; textbook_relation: string; mode: 'append' | 'create' }) =>
     http.post<ApiResponse<NewsStudyNoteResult>>(`/current-affairs/${newsId}/study-note`, payload),

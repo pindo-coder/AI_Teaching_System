@@ -26,9 +26,9 @@ import { lessonArtifactProgress } from '@/utils/lessonArtifactProgress'
 import { createAgentRunMonitor } from '@/utils/agentRunMonitor'
 import { pptPublicationState } from '@/utils/lessonPublication'
 import logoUrl from '@/assets/logo1.svg'
-import progressBackgroundUrl from '@/assets/lesson-prep-progress-bg.png'
-import contextBackgroundUrl from '@/assets/lesson-prep-context-bg.png'
-import designBriefBackgroundUrl from '@/assets/challenge-cup-topbar.png'
+import progressBackgroundUrl from '@/assets/lesson-prep-progress-bg.webp'
+import contextBackgroundUrl from '@/assets/lesson-prep-context-bg.webp'
+import designBriefBackgroundUrl from '@/assets/challenge-cup-topbar.webp'
 
 const router = useRouter()
 const route = useRoute()

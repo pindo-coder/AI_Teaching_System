@@ -22,8 +22,8 @@ import { formatBeijingDateTime } from '@/utils/time'
 import { getErrorMessage } from '@/utils/error'
 import { requestWorkspaceAi } from '@/utils/workspaceAiEvents'
 import logoUrl from '@/assets/logo1.svg'
-import sidebarArtworkUrl from '@/assets/challenge-cup-sidebar.png'
-import topbarArtworkUrl from '@/assets/challenge-cup-topbar.png'
+import sidebarArtworkUrl from '@/assets/challenge-cup-sidebar.webp'
+import topbarArtworkUrl from '@/assets/challenge-cup-topbar.webp'
 
 const auth = useAuthStore()
 const workspace = useWorkspaceStore()
@@ -272,7 +272,9 @@ onMounted(() => {
   void loadNotifications()
   window.addEventListener('notifications-changed', loadNotifications)
   document.addEventListener('pointerdown', handleHeaderSearchOutside)
-  notificationTimer = window.setInterval(() => void loadNotifications(), 60_000)
+  notificationTimer = window.setInterval(() => {
+    if (document.visibilityState === 'visible') void loadNotifications()
+  }, 60_000)
 })
 
 onUnmounted(() => {
@@ -299,12 +301,14 @@ async function loadNotifications() {
       notifications.value = response.data.data
     } catch { /* 提醒接口异常不应阻断管理员账号找回入口 */ }
     if (auth.user?.role === 'admin') {
-      const [candidateSummary, resetRequests] = await Promise.all([
-        knowledgeApi.candidateDecisionSummary(),
-        authApi.pendingPasswordResets(),
-      ])
-      actionableCandidateCount.value = candidateSummary.data.data.pending_review
-      pendingPasswordResetCount.value = resetRequests.data.data.length
+      try {
+        const [candidateSummary, resetRequests] = await Promise.all([
+          knowledgeApi.candidateDecisionSummary(),
+          authApi.pendingPasswordResets(),
+        ])
+        actionableCandidateCount.value = candidateSummary.data.data.pending_review
+        pendingPasswordResetCount.value = resetRequests.data.data.length
+      } catch { /* 管理员待办统计接口异常不应产生未捕获 Promise 拒绝 */ }
     }
   } finally {
     notificationLoading.value = false

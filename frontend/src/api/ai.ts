@@ -1,4 +1,5 @@
 import { http, type ApiResponse } from './http'
+import { streamSseJson } from './sse'
 import type { LearningStage } from '@/types'
 import type { PptPreferences } from './agents'
 
@@ -203,49 +204,6 @@ export interface AiWorkspaceAgentStreamHandlers {
   onSources: (sources: AiSource[]) => void
 }
 
-async function readSse(
-  response: Response,
-  onEvent: (event: string, data: any) => void,
-  unavailableMessage: string,
-) {
-  if (!response.ok || !response.body) {
-    // SSE 请求在开始发送事件前发生 4xx/5xx 时，浏览器不会进入事件循环，
-    // 原先只显示“工作流暂时不可用”，导致参数校验错误无法定位。保留后端
-    // 的 detail/message，并附带状态码，方便用户和管理员快速修复部署问题。
-    let detail = ''
-    try {
-      const payload = await response.clone().json() as { detail?: string; message?: string; errors?: unknown }
-      detail = payload.detail || payload.message || ''
-      if (payload.errors) {
-        const validation = typeof payload.errors === 'string' ? payload.errors : JSON.stringify(payload.errors)
-        detail = detail ? `${detail}（${validation}）` : validation
-      }
-    } catch {
-      try { detail = (await response.clone().text()).trim() } catch { /* ignore */ }
-    }
-    const suffix = detail ? `：${detail}` : ''
-    throw new Error(`${unavailableMessage}（HTTP ${response.status}${suffix}）`)
-  }
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  while (true) {
-    const { value, done } = await reader.read()
-    if (done) break
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split('\n\n')
-    buffer = events.pop() || ''
-    for (const block of events) {
-      const event = block.match(/^event:\s*(.+)$/m)?.[1]
-      const dataLine = block.match(/^data:\s*(.+)$/m)?.[1]
-      if (!event || !dataLine) continue
-      const data = JSON.parse(dataLine)
-      if (event === 'error') throw new Error(data.message || 'AI 生成失败')
-      onEvent(event, data)
-    }
-  }
-}
-
 export const aiApi = {
   assist: (payload: AiAssistPayload) => http.post<ApiResponse<AiAssistData>>('/ai/assist', payload, { timeout: 90_000 }),
   async assistStream(payload: AiAssistPayload, handlers: {
@@ -253,51 +211,30 @@ export const aiApi = {
     onChunk: (text: string) => void
     onSources: (sources: AiSource[]) => void
   }, options: { signal?: AbortSignal } = {}) {
-    const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-    const response = await fetch(`${baseURL}/ai/assist/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
-      body: JSON.stringify(payload),
+    await streamSseJson('/ai/assist/stream', (event, data) => {
+      if (event === 'meta') handlers.onMeta(data as { grounded: boolean; model: string })
+      if (event === 'chunk') handlers.onChunk((data as { text: string }).text)
+      if (event === 'sources') handlers.onSources(data as AiSource[])
+    }, {
+      body: payload,
       signal: options.signal,
+      unavailableMessage: 'AI 流式服务暂时不可用',
     })
-    if (!response.ok || !response.body) throw new Error('AI 流式服务暂时不可用')
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    while (true) {
-      const { value, done } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const events = buffer.split('\n\n')
-      buffer = events.pop() || ''
-      for (const block of events) {
-        const event = block.match(/^event:\s*(.+)$/m)?.[1]
-        const dataLine = block.match(/^data:\s*(.+)$/m)?.[1]
-        if (!event || !dataLine) continue
-        const data = JSON.parse(dataLine)
-        if (event === 'meta') handlers.onMeta(data)
-        if (event === 'chunk') handlers.onChunk(data.text)
-        if (event === 'sources') handlers.onSources(data)
-        if (event === 'error') throw new Error(data.message || 'AI 生成失败')
-      }
-    }
   },
   async workspaceStream(payload: AiWorkspacePayload, handlers: {
     onMeta: (data: { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole }) => void
     onChunk: (text: string) => void
     onSources: (sources: AiSource[]) => void
-  }) {
-    const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
-    const response = await fetch(`${baseURL}/ai/workspace/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
-      body: JSON.stringify(payload),
+  }, options: { signal?: AbortSignal } = {}) {
+    await streamSseJson('/ai/workspace/stream', (event, data) => {
+      if (event === 'meta') handlers.onMeta(data as { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole })
+      if (event === 'chunk') handlers.onChunk((data as { text: string }).text)
+      if (event === 'sources') handlers.onSources(data as AiSource[])
+    }, {
+      body: payload,
+      signal: options.signal,
+      unavailableMessage: 'AI 工作台暂时不可用',
     })
-    await readSse(response, (event, data) => {
-      if (event === 'meta') handlers.onMeta(data)
-      if (event === 'chunk') handlers.onChunk(data.text)
-      if (event === 'sources') handlers.onSources(data)
-    }, 'AI 工作台暂时不可用')
   },
   workspaceContext: (payload: AiWorkspaceContextPayload) =>
     http.post<ApiResponse<AiWorkspaceContext>>('/ai/workspace/context', payload),
@@ -312,34 +249,32 @@ export const aiApi = {
     http.get<ApiResponse<AiAgentTemplate[]>>('/ai/workspace/agent/templates'),
   retryWorkspaceAgentExecution: (executionId: number) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/retry`),
-  continueWorkspaceAgentExecution: (payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers) =>
-    aiApi.workspaceAgentStream(payload, handlers),
+  continueWorkspaceAgentExecution: (payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers, options: { signal?: AbortSignal } = {}) =>
+    aiApi.workspaceAgentStream(payload, handlers, options),
   resolveWorkspaceAgentExecution: (executionId: number, resolution: 'confirmed' | 'cancelled', note?: string) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/resolve`, { resolution, note }),
   cancelWorkspaceAgentExecution: (executionId: number) =>
     http.post<ApiResponse<AiAgentExecution>>(`/ai/workspace/agent/executions/${executionId}/cancel`),
-  async workspaceAgentStream(payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers) {
-    const baseURL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+  async workspaceAgentStream(payload: AiWorkspaceAgentPayload, handlers: AiWorkspaceAgentStreamHandlers, options: { signal?: AbortSignal } = {}) {
     // 不把可选范围字段的 null 发送给旧版后端。新后端支持 null，省略后
     // 仍会按“自动识别教学范围”处理，同时兼容尚未完成迁移的部署实例。
     const requestBody = Object.fromEntries(
       Object.entries(payload).filter(([, value]) => value !== null && value !== undefined && value !== ''),
     )
-    const response = await fetch(`${baseURL}/ai/workspace/agent/stream`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('access_token') || ''}` },
-      body: JSON.stringify(requestBody),
+    await streamSseJson('/ai/workspace/agent/stream', (event, data) => {
+      if (event === 'context') handlers.onContext(data as AiWorkspaceContext)
+      if (event === 'meta') handlers.onMeta(data as { grounded: boolean; model: string; mode: AiWorkspaceMode; role: AiWorkspaceRole })
+      if (event === 'execution') handlers.onExecution(data as AiAgentExecution)
+      if (event === 'plan') handlers.onPlan(data as Parameters<AiWorkspaceAgentStreamHandlers['onPlan']>[0])
+      if (event === 'progress') handlers.onProgress(data as Parameters<AiWorkspaceAgentStreamHandlers['onProgress']>[0])
+      if (event === 'tool') handlers.onTool(data as { name: string; title: string; status: string; error?: string; requires_confirmation?: boolean })
+      if (event === 'action') handlers.onAction(data as AiAgentAction)
+      if (event === 'chunk') handlers.onChunk((data as { text: string }).text)
+      if (event === 'sources') handlers.onSources(data as AiSource[])
+    }, {
+      body: requestBody,
+      signal: options.signal,
+      unavailableMessage: 'Agent 工作流暂时不可用',
     })
-    await readSse(response, (event, data) => {
-      if (event === 'context') handlers.onContext(data)
-      if (event === 'meta') handlers.onMeta(data)
-      if (event === 'execution') handlers.onExecution(data)
-      if (event === 'plan') handlers.onPlan(data)
-      if (event === 'progress') handlers.onProgress(data)
-      if (event === 'tool') handlers.onTool(data)
-      if (event === 'action') handlers.onAction(data)
-      if (event === 'chunk') handlers.onChunk(data.text)
-      if (event === 'sources') handlers.onSources(data)
-    }, 'Agent 工作流暂时不可用')
   },
 }
