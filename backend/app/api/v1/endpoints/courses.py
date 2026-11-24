@@ -1,7 +1,10 @@
+import anyio
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
+from app.core.config import settings
+from app.core.upload import read_upload_limited
 from app.db.session import get_db
 from app.models.user import User
 from app.repositories.course_repository import ChapterRepository, CourseRepository
@@ -44,31 +47,44 @@ async def import_course(
     db: Session = Depends(get_db),
 ) -> ApiResponse[CourseRead]:
     """创建教材课程，并可在同一次导入中建立第一份知识库资料。"""
-    course = CourseService(db).create_course(CourseCreate(name=name, description=description))
-    if file is not None:
-        content = await file.read()
-        filename = file.filename or "教材资料.txt"
-        text = extract_text(filename, content)
-        source_title = (file.filename or "教材资料").rsplit(".", 1)[0]
-        course_service = CourseService(db)
-        chapters = []
-        for sort_order, (title, chapter_content) in enumerate(extract_chapters(text), start=1):
-            chapters.append(course_service.create_chapter(
-                course.id,
-                ChapterCreate(title=title, content=chapter_content, sort_order=sort_order),
-            ))
-        document = KnowledgeService(db).ingest(
-            filename=filename,
-            content=content,
-            source_title=source_title,
-            course_id=course.id,
-            chapter_id=None,
-            knowledge_point=None,
-            defer_index=True,
+    content = (
+        await read_upload_limited(
+            file,
+            max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+            label="教材文件",
         )
-        CitationService(db).auto_calibrate(document.id, chapters)
+        if file is not None
+        else None
+    )
+
+    def _run_import():
+        course = CourseService(db).create_course(CourseCreate(name=name, description=description))
+        if file is not None and content is not None:
+            filename = file.filename or "教材资料.txt"
+            text = extract_text(filename, content)
+            source_title = (file.filename or "教材资料").rsplit(".", 1)[0]
+            course_service = CourseService(db)
+            chapters = []
+            for sort_order, (title, chapter_content) in enumerate(extract_chapters(text), start=1):
+                chapters.append(course_service.create_chapter(
+                    course.id,
+                    ChapterCreate(title=title, content=chapter_content, sort_order=sort_order),
+                ))
+            document = KnowledgeService(db).ingest(
+                filename=filename,
+                content=content,
+                source_title=source_title,
+                course_id=course.id,
+                chapter_id=None,
+                knowledge_point=None,
+                defer_index=True,
+            )
+            CitationService(db).auto_calibrate(document.id, chapters)
+        return CourseRead.model_validate(course)
+
+    course_data = await anyio.to_thread.run_sync(_run_import)
     message = "教材、专题和知识库已自动建立" if file else "教材创建成功"
-    return ApiResponse(message=message, data=CourseRead.model_validate(course))
+    return ApiResponse(message=message, data=course_data)
 
 
 @router.get("/courses/{course_id}", response_model=ApiResponse[CourseDetail])

@@ -55,7 +55,7 @@ def create_assignment(payload: AssignmentCreate, user: User = Depends(manager), 
     except Exception:
         db.rollback()
         raise
-    item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
+    item = AssignmentService(db).teacher_assignments(user.id, user.role == "admin", assignment_id=assignment.id)[0]
     return ApiResponse(message="学习任务已发布", data=TeacherAssignmentRead(**item))
 
 
@@ -82,7 +82,7 @@ def confirm_assignment_rubric(
     db: Session = Depends(get_db),
 ) -> ApiResponse[TeacherAssignmentRead]:
     assignment = AssignmentService(db).confirm_rubric(assignment_id, user, payload.rubric)
-    item = next(item for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin") if item["id"] == assignment.id)
+    item = AssignmentService(db).teacher_assignments(user.id, user.role == "admin", assignment_id=assignment.id)[0]
     return ApiResponse(message="批改量规已确认", data=TeacherAssignmentRead(**item))
 
 
@@ -98,9 +98,5 @@ def update_assignment_completion_policy(
         user,
         payload.completion_policy,
     )
-    item = next(
-        item
-        for item in AssignmentService(db).teacher_assignments(user.id, user.role == "admin")
-        if item["id"] == assignment.id
-    )
+    item = AssignmentService(db).teacher_assignments(user.id, user.role == "admin", assignment_id=assignment.id)[0]
     return ApiResponse(message="任务完成条件已更新并重新统计", data=TeacherAssignmentRead(**item))

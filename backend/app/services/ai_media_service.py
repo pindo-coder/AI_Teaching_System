@@ -8,6 +8,7 @@ import shutil
 import subprocess
 from uuid import uuid4
 
+import anyio
 from fastapi import UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
@@ -254,7 +255,7 @@ class AiMediaService:
             if media_kind == "audio":
                 # The browser-reported value is only a UX hint.  The persisted
                 # value and the hard limit both use the server-side probe.
-                duration_seconds = probe_audio_duration_seconds(temporary_path)
+                duration_seconds = await anyio.to_thread.run_sync(probe_audio_duration_seconds, temporary_path)
                 max_duration = audio_max_duration_seconds()
                 if duration_seconds > max_duration:
                     raise AiMediaValidationError(

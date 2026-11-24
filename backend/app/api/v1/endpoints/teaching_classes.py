@@ -1,11 +1,13 @@
 from io import BytesIO, StringIO
 import csv
 
+import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
+from app.core.upload import read_upload_limited
 from app.db.session import get_db
 from datetime import date
 
@@ -221,11 +223,13 @@ def _read_roster(file: UploadFile, content: bytes) -> list[dict[str, str]]:
 async def import_roster(class_id: int, file: UploadFile = File(...),
                         user: User = Depends(require_roles("teacher", "admin")),
                         db: Session = Depends(get_db)) -> ApiResponse[RosterImportResult]:
-    content = await file.read()
-    if len(content) > 5 * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="名单文件不能超过 5 MB")
-    rows = _read_roster(file, content)
-    result = TeachingClassService(db).add_roster(class_id, user, rows)
+    content = await read_upload_limited(file, max_bytes=5 * 1024 * 1024, label="名单文件")
+
+    def _run_roster_import():
+        rows = _read_roster(file, content)
+        return TeachingClassService(db).add_roster(class_id, user, rows)
+
+    result = await anyio.to_thread.run_sync(_run_roster_import)
     return ApiResponse(message="学生名单已导入", data=result)
 
 

@@ -427,13 +427,21 @@ class AssignmentService:
         self.db.commit()
         return output
 
-    def teacher_assignments(self, teacher_id: int, is_admin: bool = False) -> list[dict[str, object]]:
+    def teacher_assignments(
+        self,
+        teacher_id: int,
+        is_admin: bool = False,
+        *,
+        assignment_id: int | None = None,
+    ) -> list[dict[str, object]]:
         statement = (
             select(TeacherAssignment, Course.name, Chapter.title)
             .join(Course, Course.id == TeacherAssignment.course_id)
             .join(Chapter, Chapter.id == TeacherAssignment.chapter_id)
             .order_by(TeacherAssignment.created_time.desc(), TeacherAssignment.id.desc())
         )
+        if assignment_id is not None:
+            statement = statement.where(TeacherAssignment.id == assignment_id)
         if not is_admin:
             class_ids = select(TeachingClassTeacher.teaching_class_id).where(
                 TeachingClassTeacher.user_id == teacher_id
@@ -442,13 +450,21 @@ class AssignmentService:
                 TeacherAssignment.created_by == teacher_id,
                 TeacherAssignment.teaching_class_id.in_(class_ids),
             ))
+        rows = list(self.db.execute(statement).all())
+        if not rows:
+            return []
+        assignment_ids = [assignment.id for assignment, _, _ in rows]
+        all_recipients = list(self.db.scalars(select(AssignmentRecipient).where(
+            AssignmentRecipient.assignment_id.in_(assignment_ids)
+        )).all())
+        recipients_by_assignment: dict[int, list[AssignmentRecipient]] = {}
+        for recipient in all_recipients:
+            recipients_by_assignment.setdefault(recipient.assignment_id, []).append(recipient)
         output = []
         now = utc_now()
-        for assignment, course_name, chapter_title in self.db.execute(statement).all():
+        for assignment, course_name, chapter_title in rows:
             due_time = _assignment_due_time_utc(assignment)
-            recipients = list(self.db.scalars(select(AssignmentRecipient).where(
-                AssignmentRecipient.assignment_id == assignment.id
-            )).all())
+            recipients = recipients_by_assignment.get(assignment.id, [])
             for recipient in recipients:
                 self._sync_recipient(assignment, recipient)
             output.append({

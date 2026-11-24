@@ -183,8 +183,9 @@ def assist_stream(
                 except Exception:
                     logger.exception("ai_learning_evidence_record_failed user_id=%s", user.id)
             yield "event: done\ndata: {}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("assist_stream_failed user_id=%s", user.id)
+            yield f"event: error\ndata: {json.dumps({'message': 'AI 生成暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
         finally:
             # 客户端关闭弹窗会断开 SSE；显式释放模型迭代器，避免后台继续持有本次生成。
             close = getattr(chunks, "close", None)
@@ -265,8 +266,13 @@ def workspace_assist_stream(
                 except Exception:
                     logger.exception("workspace_ai_learning_evidence_record_failed user_id=%s", user.id)
             yield "event: done\ndata: {}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        except Exception:
+            logger.exception("workspace_assist_stream_failed user_id=%s", user.id)
+            yield f"event: error\ndata: {json.dumps({'message': 'AI 生成暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
+        finally:
+            close = getattr(chunks, "close", None)
+            if callable(close):
+                close()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

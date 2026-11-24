@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, require_roles
 from app.core.config import settings
+from app.core.upload import read_upload_limited
+import anyio
 from app.db.session import get_db
 from app.models.user import User
 from app.models.knowledge_document import KnowledgeDocument
@@ -77,34 +79,43 @@ async def upload_document(
     _: User = Depends(require_roles("admin")),
     db: Session = Depends(get_db),
 ) -> ApiResponse[KnowledgeDocumentRead]:
-    content = await file.read()
-    chapters = ChapterRepository(db).list_by_course(course_id) if auto_calibrate else []
-    if auto_calibrate and not chapters:
-        raise HTTPException(status_code=400, detail="当前教材还没有专题，无法自动生成章节边界")
-    if auto_calibrate and db.scalar(select(TextbookVersion).where(
-        TextbookVersion.course_id == course_id,
-        TextbookVersion.version_label == version_label,
-    )):
-        raise HTTPException(
-            status_code=409,
-            detail="教材版本标识已存在，请为新文件填写不同的版本名称",
-        )
-    document = KnowledgeService(db).ingest(
-        filename=file.filename or "unknown",
-        content=content,
-        source_title=source_title,
-        course_id=course_id,
-        chapter_id=chapter_id,
-        knowledge_point=knowledge_point,
-        version_label=version_label,
-        source_role=source_role,
-        access_policy=access_policy,
-        defer_index=auto_calibrate,
+    content = await read_upload_limited(
+        file,
+        max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        label="教材文档",
     )
-    if auto_calibrate:
-        document = CitationService(db).auto_calibrate(document.id, chapters, version_label=version_label)
+
+    def _ingest_textbook():
+        chapters = ChapterRepository(db).list_by_course(course_id) if auto_calibrate else []
+        if auto_calibrate and not chapters:
+            raise HTTPException(status_code=400, detail="当前教材还没有专题，无法自动生成章节边界")
+        if auto_calibrate and db.scalar(select(TextbookVersion).where(
+            TextbookVersion.course_id == course_id,
+            TextbookVersion.version_label == version_label,
+        )):
+            raise HTTPException(
+                status_code=409,
+                detail="教材版本标识已存在，请为新文件填写不同的版本名称",
+            )
+        document = KnowledgeService(db).ingest(
+            filename=file.filename or "unknown",
+            content=content,
+            source_title=source_title,
+            course_id=course_id,
+            chapter_id=chapter_id,
+            knowledge_point=knowledge_point,
+            version_label=version_label,
+            source_role=source_role,
+            access_policy=access_policy,
+            defer_index=auto_calibrate,
+        )
+        if auto_calibrate:
+            document = CitationService(db).auto_calibrate(document.id, chapters, version_label=version_label)
+        return KnowledgeDocumentRead.model_validate(document)
+
+    document_data = await anyio.to_thread.run_sync(_ingest_textbook)
     message = "新版本已上传并生成待确认章节边界" if auto_calibrate else "文档上传并建立索引成功"
-    return ApiResponse(message=message, data=KnowledgeDocumentRead.model_validate(document))
+    return ApiResponse(message=message, data=document_data)
 
 
 @router.get("/documents", response_model=ApiResponse[list[KnowledgeDocumentRead]])
@@ -151,20 +162,29 @@ async def upload_material(
     user: User = Depends(knowledge_manager),
     db: Session = Depends(get_db),
 ) -> ApiResponse[KnowledgeDocumentRead]:
-    content = await file.read()
-    service = MaterialCenterService(db)
-    document = service.ingest_file(
-        user, material_type=material_type, filename=file.filename or "unknown",
-        content=content, source_title=source_title, publisher=publisher,
-        published_date=published_date, applicable_scope=applicable_scope,
-        version_label=version_label, supersedes_document_id=supersedes_document_id,
-        access_policy=access_policy, course_ids=_form_ints(course_ids, "教材范围"),
-        chapter_ids=_form_ints(chapter_ids, "专题范围"),
-        class_ids=_form_ints(teaching_class_ids, "教学班范围"),
-        knowledge_tags=_form_strings(knowledge_tags, "知识点"),
+    content = await read_upload_limited(
+        file,
+        max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        label="资料文件",
     )
+
+    def _ingest_material():
+        service = MaterialCenterService(db)
+        document = service.ingest_file(
+            user, material_type=material_type, filename=file.filename or "unknown",
+            content=content, source_title=source_title, publisher=publisher,
+            published_date=published_date, applicable_scope=applicable_scope,
+            version_label=version_label, supersedes_document_id=supersedes_document_id,
+            access_policy=access_policy, course_ids=_form_ints(course_ids, "教材范围"),
+            chapter_ids=_form_ints(chapter_ids, "专题范围"),
+            class_ids=_form_ints(teaching_class_ids, "教学班范围"),
+            knowledge_tags=_form_strings(knowledge_tags, "知识点"),
+        )
+        return service.read(document)
+
+    material_data = await anyio.to_thread.run_sync(_ingest_material)
     message = "中央材料已上传，请确认智能关联后发布" if material_type == "central" else "地方材料已加入所选教学班"
-    return ApiResponse(message=message, data=service.read(document))
+    return ApiResponse(message=message, data=material_data)
 
 
 @router.post("/materials/url", response_model=ApiResponse[KnowledgeDocumentRead], status_code=status.HTTP_201_CREATED)
@@ -193,10 +213,13 @@ async def preview_material_batch(
     filename = file.filename or "batch.csv"
     if Path(filename).suffix.lower() not in {".csv", ".xlsx", ".xls"}:
         raise HTTPException(status_code=400, detail="批量导入仅支持 CSV、XLSX 和 XLS 文件")
-    content = await file.read(settings.max_upload_size_mb * 1024 * 1024 + 1)
-    if len(content) > settings.max_upload_size_mb * 1024 * 1024:
-        raise HTTPException(status_code=413, detail="批量导入文件超过系统大小限制")
-    return ApiResponse(message="文件已解析，请确认字段和数据", data=preview_material_file(filename, content))
+    content = await read_upload_limited(
+        file,
+        max_bytes=settings.max_upload_size_mb * 1024 * 1024,
+        label="批量导入文件",
+    )
+    preview_data = await anyio.to_thread.run_sync(preview_material_file, filename, content)
+    return ApiResponse(message="文件已解析，请确认字段和数据", data=preview_data)
 
 
 @router.post(

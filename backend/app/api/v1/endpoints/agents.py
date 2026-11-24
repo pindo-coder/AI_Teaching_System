@@ -1,7 +1,9 @@
+import asyncio
 import json
-from time import monotonic, sleep
+from time import monotonic
 from urllib.parse import quote
 
+import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import Engine
@@ -9,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_roles
 from app.core.config import settings
+from app.core.upload import read_upload_limited
 from app.db.session import get_db
 from app.models.agent_run import AgentRun
 from app.models.user import User
@@ -78,13 +81,15 @@ async def upload_ppt_template(
     user: User = Depends(require_roles("teacher", "admin")),
     db: Session = Depends(get_db),
 ) -> ApiResponse[PresentationTemplateData]:
-    content = await file.read()
-    data = PresentationTemplateService(db, user).create(
-        name=name,
-        description=description,
-        is_shared=is_shared,
-        original_filename=file.filename or "presentation-template.pptx",
-        content=content,
+    content = await read_upload_limited(file, max_bytes=20 * 1024 * 1024, label="PPT 模板文件")
+    data = await anyio.to_thread.run_sync(
+        lambda: PresentationTemplateService(db, user).create(
+            name=name,
+            description=description,
+            is_shared=is_shared,
+            original_filename=file.filename or "presentation-template.pptx",
+            content=content,
+        )
     )
     return ApiResponse(message="PPT 模板已解析，可在生成设置中选择", data=data)
 
@@ -307,32 +312,42 @@ def run_events(
     bind = db.get_bind()
     user_id = user.id
     is_admin = user.role == "admin"
+    max_stream_seconds = max(300, int(settings.ppt_job_timeout_seconds))
 
-    def event_stream():
+    def _poll_snapshot() -> tuple[str | None, str | None]:
+        with Session(bind=bind, autoflush=False, expire_on_commit=False) as event_db:
+            run = event_db.get(AgentRun, run_id)
+            if run is None or (not is_admin and run.created_by != user_id):
+                return None, None
+            data = api_json_value(AgentService.serialize(event_db, run))
+            return json.dumps(data, ensure_ascii=False), run.status
+
+    async def event_stream():
         previous = ""
-        last_sent = monotonic()
+        started_at = monotonic()
+        last_sent = started_at
         while True:
-            with Session(bind=bind, autoflush=False, expire_on_commit=False) as event_db:
-                run = event_db.get(AgentRun, run_id)
-                if run is None or (not is_admin and run.created_by != user_id):
-                    yield f"event: error\ndata: {json.dumps({'message': '任务不存在或无权访问'}, ensure_ascii=False)}\n\n"
-                    return
-                data = api_json_value(AgentService.serialize(event_db, run))
-                serialized = json.dumps(data, ensure_ascii=False)
-                if serialized != previous:
-                    yield f"event: snapshot\ndata: {serialized}\n\n"
-                    previous = serialized
-                    last_sent = monotonic()
-                elif monotonic() - last_sent >= 10:
-                    # Model calls may have no progress change for minutes.
-                    # Keep proxies from closing an otherwise healthy stream;
-                    # this is not a completed step or a percentage increase.
-                    yield ": keep-alive\n\n"
-                    last_sent = monotonic()
-                if run.status in {"waiting_confirmation", "completed", "failed", "cancelled"}:
-                    yield "event: done\ndata: {}\n\n"
-                    return
-            sleep(0.5)
+            serialized, run_status = await anyio.to_thread.run_sync(_poll_snapshot)
+            if serialized is None:
+                yield f"event: error\ndata: {json.dumps({'message': '任务不存在或无权访问'}, ensure_ascii=False)}\n\n"
+                return
+            if serialized != previous:
+                yield f"event: snapshot\ndata: {serialized}\n\n"
+                previous = serialized
+                last_sent = monotonic()
+            elif monotonic() - last_sent >= 10:
+                # Model calls may have no progress change for minutes.
+                # Keep proxies from closing an otherwise healthy stream;
+                # this is not a completed step or a percentage increase.
+                yield ": keep-alive\n\n"
+                last_sent = monotonic()
+            if run_status in {"waiting_confirmation", "completed", "failed", "cancelled"}:
+                yield "event: done\ndata: {}\n\n"
+                return
+            if monotonic() - started_at >= max_stream_seconds:
+                yield f"event: error\ndata: {json.dumps({'message': '进度订阅已超时，请刷新任务状态'}, ensure_ascii=False)}\n\n"
+                return
+            await asyncio.sleep(0.5)
 
     return StreamingResponse(
         event_stream(),

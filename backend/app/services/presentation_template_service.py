@@ -46,7 +46,13 @@ def inspect_pptx_template(content: bytes) -> dict:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="文件不是有效的 PPTX",
         ) from exc
-    names = set(archive.namelist())
+    infos = archive.infolist()
+    if len(infos) > 1000 or sum(info.file_size for info in infos) > 100 * 1024 * 1024:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="PPTX 压缩包条目过多或解压体积超限",
+        )
+    names = {info.filename for info in infos}
     if "[Content_Types].xml" not in names or "ppt/presentation.xml" not in names:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="PPTX 结构不完整")
     slide_names = sorted(
