@@ -10,6 +10,8 @@ frontend/node_modules/
 frontend/dist/
 frontend/.env.local
 backend/presentation_runtime/node_modules/
+backend/presentation_runtime/vendor/
+backend/presentation_runtime/fonts/
 .pnpm-store/
 
 # Backend runtime data
@@ -34,6 +36,7 @@ knowledge_base/generated_artifacts/*
 *.tsbuildinfo
 
 # Local review, agent memory, and generated acceptance artifacts
+/output/
 tmp/
 .tmp/
 .workbuddy/

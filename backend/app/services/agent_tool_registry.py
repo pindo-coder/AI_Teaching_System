@@ -12,6 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ValidationError
 
 from app.services.planning_agent import PlanningAgent, ToolCall, ToolResult
+from app.schemas.agent import PptPreferences
 
 
 SideEffect = Literal["read", "draft", "write"]
@@ -50,6 +51,10 @@ class SearchMaterialsArgs(EmptyToolArgs):
     query: str | None = Field(default=None, min_length=1, max_length=500)
     keyword: str | None = Field(default=None, min_length=1, max_length=500)
     max_results: int | None = Field(default=None, ge=1, le=10)
+
+
+class PresentationToolArgs(EmptyToolArgs):
+    ppt_preferences: PptPreferences | None = None
 
 
 @dataclass(frozen=True)
@@ -103,10 +108,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "prepare_follow_up": _spec("prepare_follow_up", "生成不自动发送的跟进建议", {"teacher"}, side_effect="draft", requires_context=True),
     "check_material_health": _spec("check_material_health", "检查资料和索引健康状态", {"teacher"}, requires_context=True),
     "generate_lesson_outline": _spec("generate_lesson_outline", "检查或生成课纲入口", {"teacher"}, side_effect="draft", requires_context=True),
-    "generate_ppt": _spec("generate_ppt", "生成 PPT 入口", {"teacher"}, side_effect="draft", requires_context=True),
+    "generate_ppt": ToolSpec("generate_ppt", "生成 PPT，可在 ppt_preferences 指定 6–30 页、互动与配图偏好", frozenset({"teacher"}), args_model=PresentationToolArgs, side_effect="draft", requires_context=True),
     "generate_lesson_plan": _spec("generate_lesson_plan", "生成教案入口", {"teacher"}, side_effect="draft", requires_context=True),
     "generate_classroom_activity": _spec("generate_classroom_activity", "生成课堂互动入口", {"teacher"}, side_effect="draft", requires_context=True),
-    "generate_all_artifacts": _spec("generate_all_artifacts", "生成全部教学成果入口", {"teacher"}, side_effect="draft", requires_context=True),
+    "generate_all_artifacts": ToolSpec("generate_all_artifacts", "生成全部教学成果，支持 ppt_preferences", frozenset({"teacher"}), args_model=PresentationToolArgs, side_effect="draft", requires_context=True),
     "inspect_admin_overview": _spec("inspect_admin_overview", "汇总平台治理风险", {"admin"}),
     "inspect_discovery_status": _spec("inspect_discovery_status", "检查资料发现和审核队列", {"admin"}),
     "inspect_knowledge_governance": _spec("inspect_knowledge_governance", "检查知识库治理状态", {"admin"}),

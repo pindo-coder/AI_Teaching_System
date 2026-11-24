@@ -729,15 +729,16 @@ async function executeAction(messageId: number, action: AiAgentAction) {
     ElMessage.error(error instanceof Error ? error.message : '确认失败，请稍后重试')
   }
 }
-async function generateArtifacts(messageId: number, run: AgentRun, outputTypes: Array<'ppt' | 'lesson_plan' | 'classroom_activities'>) {
+async function generateArtifacts(messageId: number, run: AgentRun, outputTypes: Array<'ppt' | 'lesson_plan' | 'classroom_activities'>, preferences?: AiAgentAction['ppt_preferences']) {
   if (run.status === 'queued' || run.status === 'running') return
   try {
-    const response = await agentApi.generateArtifacts(run.id, outputTypes)
+    const response = await agentApi.generateArtifacts(run.id, outputTypes, preferences || run.output_data.artifact_bundle?.ppt?.preferences)
     updateRunSnapshot(messageId, response.data.data)
     void watchRun(messageId, run.id)
     ElMessage.success('教学成果正在后台生成，进度会持续显示在当前对话中')
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '教学成果生成失败，请稍后重试')
+    throw error
   }
 }
 async function downloadArtifact(run: AgentRun, artifactKey: string, fileName: string) {
@@ -846,7 +847,7 @@ async function send(executionId?: number | Event) {
               try {
                 const detail = await agentApi.detail(action.run_id!)
                 updateRunSnapshot(assistantMessage.id, detail.data.data)
-                await generateArtifacts(assistantMessage.id, detail.data.data, action.output_types!)
+                await generateArtifacts(assistantMessage.id, detail.data.data, action.output_types!, action.ppt_preferences)
                 action.status = 'completed'
                 action.label = '成果生成已提交'
                 persistHistory()

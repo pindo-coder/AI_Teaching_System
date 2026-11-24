@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from io import BytesIO
 from zipfile import ZipFile
 
@@ -21,9 +21,8 @@ from app.models.user import User
 from app.services.agent_service import (
     LessonArtifactGenerator,
     _extract_json_object,
-    _prepare_ppt_canvas_for_slide,
-    _sanitize_ppt_design,
 )
+from app.services.ppt_workflow_service import PptWorkflowService
 from app.services.ppt_multimodal_service import PptMultimodalService
 
 
@@ -150,94 +149,6 @@ def _pptx_template_bytes() -> bytes:
     return target.getvalue()
 
 
-def test_personalized_ppt_design_canvas_is_validated() -> None:
-    design, pages = _sanitize_ppt_design(
-        {
-            "design": {
-                "name": "人民当家作主的制度之路",
-                "concept": "以道路和节点表现制度发展。",
-                "palette": {"primary": "#8f2638", "accent": "not-a-color"},
-            },
-            "pages": [
-                {
-                    "index": 0,
-                    "background": "primary",
-                    "elements": [
-                        {
-                            "type": "shape",
-                            "x": -20,
-                            "y": 2,
-                            "w": 180,
-                            "h": 120,
-                            "fill": "accent",
-                        },
-                        {
-                            "type": "text",
-                            "source": "title",
-                            "style": "hero",
-                            "x": 8,
-                            "y": 16,
-                            "w": 70,
-                            "h": 24,
-                            "color": "inverse",
-                        },
-                        {
-                            "type": "text",
-                            "source": "takeaway",
-                            "style": "quote",
-                            "x": 8,
-                            "y": 52,
-                            "w": 72,
-                            "h": 18,
-                            "color": "inverse",
-                        },
-                        {"type": "text", "source": "invented.fact", "x": 1, "y": 1},
-                    ],
-                }
-            ],
-        },
-        1,
-    )
-    assert design["palette"]["primary"] == "8F2638"
-    assert design["palette"]["accent"] == "D3A23A"
-    assert len(pages[0]) == 3
-    assert pages[0][0]["x"] == 0
-    assert pages[0][0]["y"] == 6
-
-
-def test_ppt_canvas_rejects_blank_decorative_layout_and_keeps_valid_content() -> None:
-    slide = {
-        "title": "新时代坚持和发展中国特色社会主义",
-        "takeaway": "明确新时代坚持和发展中国特色社会主义的核心课题。",
-        "bullets": ["理解理论逻辑", "把握实践要求"],
-    }
-    decorative = [
-        {"type": "text", "source": "title"},
-        {"type": "text", "source": "bullet:9"},
-        {"type": "shape", "source": ""},
-    ]
-    prepared, diagnostics = _prepare_ppt_canvas_for_slide(slide, decorative, 0)
-    assert prepared is None
-    assert diagnostics["recovered_with_safe_layout"] is True
-
-    complete = [
-        {"type": "text", "source": "title"},
-        {"type": "text", "source": "takeaway"},
-        {"type": "text", "source": "bullet:0"},
-        {"type": "text", "source": "bullet:9"},
-        {"type": "shape", "source": ""},
-    ]
-    prepared, diagnostics = _prepare_ppt_canvas_for_slide(slide, complete, 0)
-    assert prepared is not None
-    assert [item.get("source") for item in prepared] == [
-        "title",
-        "takeaway",
-        "bullet:0",
-        "",
-    ]
-    assert diagnostics["recovered_with_safe_layout"] is False
-
-
 def test_extract_json_object_accepts_model_explanation_and_code_fence() -> None:
     parsed = _extract_json_object(
         "说明如下：\n```json\n{\"title\": \"测试课纲\", \"items\": [1]}\n```",
@@ -361,7 +272,8 @@ def test_teacher_can_generate_preview_and_download_all_teaching_artifacts(
     generated = client.post(
         f"/api/v1/agent/runs/{run['id']}/artifacts",
         headers=_headers(teacher),
-        json={"output_types": ["ppt", "lesson_plan", "classroom_activities"]},
+        json={"output_types": ["ppt", "lesson_plan", "classroom_activities"],
+              "ppt_preferences": {"title": "民主专题教师自定义课件"}},
     )
     assert generated.status_code == 200
     detail = client.get(
@@ -382,10 +294,20 @@ def test_teacher_can_generate_preview_and_download_all_teaching_artifacts(
     ppt_slides = detail["output_data"]["artifact_bundle"]["ppt"]["slides"]
     ppt_design = detail["output_data"]["artifact_bundle"]["ppt"]["design"]
     ppt_quality = detail["output_data"]["artifact_bundle"]["ppt"]["quality_report"]
-    assert ppt_design["status"] == "personalized"
-    assert ppt_design["designed_pages"] == len(ppt_slides)
-    assert all(len(slide.get("canvas") or []) >= 3 for slide in ppt_slides)
-    assert 0 <= ppt_quality["score"] <= 100
+    assert ppt_design["name"]
+    assert detail["output_data"]["artifact_bundle"]["ppt"]["pipeline_version"] == "ppt-master-svg-v2"
+    assert all(slide["preview_available"] for slide in ppt_slides)
+    assert all("svg" not in slide and "preview_path" not in slide for slide in ppt_slides)
+    assert ppt_quality["visual_review"] == "teacher_required"
+    assert ppt_quality["passed"] is True
+    assert detail['input_data']['ppt_preferences']['title'] == '民主专题教师自定义课件'
+    assert detail['output_data']['artifact_bundle']['ppt']['title'] == '民主专题教师自定义课件'
+    assert ppt_slides[0]['title'] == '民主专题教师自定义课件'
+    assert detail['output_data']['artifacts']['ppt']['file_name'] == '民主专题教师自定义课件.pptx'
+    attempt = detail["output_data"]["artifact_attempt"]
+    assert datetime.fromisoformat(attempt["started_time"]).tzinfo is not None
+    assert datetime.fromisoformat(attempt["finished_time"]).tzinfo is not None
+    assert "chinese_glyphs" in ppt_quality["checks"]
     layouts = {slide["layout"] for slide in ppt_slides}
     assert {
         "title",
@@ -417,6 +339,18 @@ def test_teacher_can_generate_preview_and_download_all_teaching_artifacts(
         assert response.status_code == 200
         assert response.content.startswith(b"PK")
 
+    original_ppt = client.get(f"/api/v1/agent/runs/{run['id']}/artifacts/ppt/download", headers=_headers(teacher)).content
+    preview_url = f"/api/v1/agent/runs/{run['id']}/ppt/slides/0/preview"
+    preview = client.get(preview_url, headers=_headers(teacher))
+    assert preview.status_code == 200
+    assert preview.content.startswith(b"\x89PNG")
+    assert preview.headers["cache-control"] == "private, no-store"
+    assert client.get(preview_url).status_code == 401
+    stranger = User(username="another-ppt-teacher", password_hash=hash_password("secure-pass-456"), role="teacher", approval_status="approved")
+    db.add(stranger)
+    db.commit()
+    assert client.get(preview_url, headers=_headers(stranger)).status_code in {403, 404}
+
     revised = client.post(
         f"/api/v1/agent/runs/{run['id']}/ppt/slides/1/revise",
         headers=_headers(teacher),
@@ -436,6 +370,7 @@ def test_teacher_can_generate_preview_and_download_all_teaching_artifacts(
         json={"version_id": version_id},
     )
     assert restored.status_code == 200
+    assert client.get(f"/api/v1/agent/runs/{run['id']}/artifacts/ppt/download", headers=_headers(teacher)).content == original_ppt
 
 
 def test_artifact_failure_keeps_completed_outline_available(
@@ -455,10 +390,10 @@ def test_artifact_failure_keeps_completed_outline_available(
         json={"action": "approve_evidence"},
     )
 
-    def raise_generation_error(self, variables):
+    def raise_generation_error(self, variables, evidence):
         raise RuntimeError("模型未返回任何内容")
 
-    monkeypatch.setattr(LessonArtifactGenerator, "generate", raise_generation_error)
+    monkeypatch.setattr(PptWorkflowService, "generate", raise_generation_error)
     response = client.post(
         f"/api/v1/agent/runs/{run['id']}/artifacts",
         headers=_headers(teacher),
@@ -472,7 +407,7 @@ def test_artifact_failure_keeps_completed_outline_available(
     assert detail["status"] == "completed"
     assert detail["output_data"]["outline"]["title"]
     assert detail["steps"][3]["status"] == "failed"
-    assert detail["steps"][3]["error_message"] == "模型未返回任何内容"
+    assert "模型未返回任何内容" in detail["steps"][3]["error_message"]
 
 
 def test_artifact_retry_keeps_existing_successful_outputs(
@@ -646,25 +581,22 @@ def test_multimodal_service_attaches_generated_asset(monkeypatch, tmp_path) -> N
     ppt = {
         "design": {"name": "专题视觉"},
         "slides": [
-            {"canvas": [{"type": "text", "source": "title"}]},
+            {"svg": '<svg xmlns="http://www.w3.org/2000/svg"/>'},
             {
                 "title": "青年担当",
                 "takeaway": "把个人成长融入时代发展",
                 "visual_prompt": "青年在城市与校园之间学习实践",
-                "canvas": [
-                    {"type": "text", "source": "title"},
-                    {"type": "image", "source": "visual_asset"},
-                ],
+                "svg": '<svg xmlns="http://www.w3.org/2000/svg"><image id="visual-asset" /></svg>',
             },
         ],
     }
-    enhanced = service.enhance(ppt)
+    enhanced = service.enhance_svg(ppt)
     assert enhanced["multimodal"]["status"] == "completed"
     assert enhanced["multimodal"]["generated_count"] == 1
     assert enhanced["slides"][1]["visual_asset"]["model"] == "wan2.7-image"
 
 
-def test_multimodal_service_auto_selects_pages_without_image_slots(monkeypatch, tmp_path) -> None:
+def test_multimodal_service_never_invents_unapproved_svg_image_slots(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "generated_artifact_directory", str(tmp_path))
     monkeypatch.setattr(settings, "ppt_multimodal_enabled", True)
     monkeypatch.setattr(settings, "ppt_multimodal_api_key", "test-key")
@@ -682,28 +614,21 @@ def test_multimodal_service_auto_selects_pages_without_image_slots(monkeypatch, 
         }
 
     monkeypatch.setattr(service, "_generate_one", fake_generate)
-    canvas = [
-        {"type": "text", "source": "title", "x": 8, "y": 10, "w": 48, "h": 12},
-        {"type": "text", "source": "takeaway", "x": 8, "y": 28, "w": 46, "h": 20},
-    ]
+    svg = '<svg xmlns="http://www.w3.org/2000/svg"/>'
     ppt = {
         "design": {"name": "专题视觉"},
         "slides": [
-            {"layout": "title", "canvas": list(canvas)},
-            {"layout": "concept", "title": "理论与实践", "takeaway": "相互促进", "canvas": list(canvas)},
-            {"layout": "timeline", "title": "发展进程", "takeaway": "持续推进", "canvas": list(canvas)},
-            {"layout": "summary", "canvas": list(canvas)},
+            {"layout": "title", "svg": svg},
+            {"layout": "concept", "title": "理论与实践", "takeaway": "相互促进", "svg": svg},
+            {"layout": "timeline", "title": "发展进程", "takeaway": "持续推进", "svg": svg},
+            {"layout": "summary", "svg": svg},
         ],
     }
 
-    enhanced = service.enhance(ppt)
-    assert enhanced["multimodal"]["status"] == "completed"
-    assert enhanced["multimodal"]["generated_count"] == 2
-    assert enhanced["multimodal"]["selected_slides"] == [2, 3]
-    assert all(
-        any(item.get("type") == "image" for item in enhanced["slides"][index]["canvas"])
-        for index in (1, 2)
-    )
+    enhanced = service.enhance_svg(ppt)
+    assert enhanced["multimodal"]["generated_count"] == 0
+    assert enhanced["multimodal"]["selected_slides"] == []
+    assert all(item["svg"] == svg for item in enhanced["slides"])
 
 
 def test_teacher_can_publish_ppt_and_discussion_to_students(
@@ -732,6 +657,7 @@ def test_teacher_can_publish_ppt_and_discussion_to_students(
             "ppt_preferences": {"slide_count": 6},
         },
     )
+    revision = client.get(f"/api/v1/agent/runs/{run['id']}", headers=_headers(teacher)).json()["data"]["output_data"]["artifact_bundle"]["ppt"]["revision_id"]
     published = client.post(
         f"/api/v1/agent/runs/{run['id']}/publish",
         headers=_headers(teacher),
@@ -743,6 +669,7 @@ def test_teacher_can_publish_ppt_and_discussion_to_students(
             "publish_discussions": True,
             "discussion_indices": [0],
             "confirmed": True,
+            "expected_ppt_revision": revision,
         },
     )
     assert published.status_code == 200

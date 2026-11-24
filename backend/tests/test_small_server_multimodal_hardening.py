@@ -113,14 +113,19 @@ def test_ppt_image_download_streams_to_part_then_atomically_replaces(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    response = _ImageStreamResponse([b"first-", b"second"])
+    from PIL import Image
+    buffer = BytesIO()
+    Image.new("RGB", (32, 32), "white").save(buffer, format="PNG")
+    bitmap = buffer.getvalue()
+    response = _ImageStreamResponse([bitmap[:20], bitmap[20:]])
     service = _ppt_service(tmp_path, monkeypatch, response)
 
     asset = service._generate_one({"title": "测试"}, {}, 0)
 
-    output = service.asset_dir / "slide-1.png"
-    assert output.read_bytes() == b"first-second"
-    assert asset["storage_path"] == "701/ppt_visuals/slide-1.png"
+    output = service.asset_dir / asset["file_name"]
+    assert output.read_bytes() == bitmap
+    assert asset["storage_path"] == f"701/ppt_visuals/{output.name}"
+    assert output.name.startswith("slide-1-")
     assert response.chunk_sizes == [64 * 1024]
     assert list(service.asset_dir.glob("*.part")) == []
     assert list(service.asset_dir.glob(".*.part")) == []
@@ -138,6 +143,24 @@ def test_ppt_image_download_rejects_oversized_content_length_before_streaming(
         service._generate_one({"title": "测试"}, {}, 0)
 
     assert response.iterated_chunks == 0
+
+
+def test_image_moderation_failure_is_not_retried_or_exposed_raw(tmp_path, monkeypatch):
+    service = _ppt_service(tmp_path, monkeypatch)
+    calls = []
+    class Client:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def post(self, url, **kwargs):
+            calls.append(kwargs)
+            return httpx.Response(400, json={"code": "DataInspectionFailed", "message": "private provider diagnostic"})
+    monkeypatch.setattr(ppt_module.httpx, "Client", lambda **kwargs: Client())
+    with pytest.raises(ppt_module.PptImageGenerationError, match="内容审核") as error:
+        service._generate_one({"visual_prompt": "教学插图"}, {}, 0)
+    assert len(calls) == 1
+    assert "private provider diagnostic" not in str(error.value)
     assert list(service.asset_dir.iterdir()) == []
 
 
@@ -172,7 +195,7 @@ def test_ppt_image_gate_falls_back_immediately_and_removes_image_slots(
         "slides": [
             {
                 "layout": "concept",
-                "canvas": [{"type": "image", "source": "visual_asset"}],
+                "svg": '<svg xmlns="http://www.w3.org/2000/svg"><image id="visual-asset" /></svg>',
                 "visual_asset": {"storage_path": "stale.png"},
             }
         ],
@@ -180,13 +203,13 @@ def test_ppt_image_gate_falls_back_immediately_and_removes_image_slots(
 
     assert ppt_module._PPT_IMAGE_CALL_GATE.acquire(blocking=False) is True
     try:
-        enhanced = service.enhance(ppt)
+        enhanced = service.enhance_svg(ppt)
     finally:
         ppt_module._PPT_IMAGE_CALL_GATE.release()
 
     assert enhanced["multimodal"]["status"] == "fallback"
     assert "正忙" in enhanced["multimodal"]["message"]
-    assert enhanced["slides"][0]["canvas"] == []
+    assert "image" not in enhanced["slides"][0]["svg"]
     assert "visual_asset" not in enhanced["slides"][0]
 
 
@@ -206,16 +229,59 @@ def test_ppt_image_gate_is_released_after_generation_failure(
         "slides": [
             {
                 "layout": "concept",
-                "canvas": [{"type": "image", "source": "visual_asset"}],
+                "svg": '<svg xmlns="http://www.w3.org/2000/svg"><image id="visual-asset" /></svg>',
             }
         ],
     }
 
-    enhanced = service.enhance(ppt)
+    enhanced = service.enhance_svg(ppt)
 
     assert enhanced["multimodal"]["status"] == "fallback"
     assert ppt_module._PPT_IMAGE_CALL_GATE.acquire(blocking=False) is True
     ppt_module._PPT_IMAGE_CALL_GATE.release()
+
+
+def test_ppt_image_prompt_uses_topic_style_and_partial_failure_is_visible(tmp_path, monkeypatch):
+    service = _ppt_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "ppt_multimodal_max_images", 2)
+    theme = {"name": "同心协商", "topic_keywords": ["社区协商"],
+        "visual_motif": "围坐交流", "image_style": "暖色纪实教学插画", "primary": "1F4E5F"}
+    prompt = service._safe_prompt({"visual_prompt": "居民协商公共事务"}, theme)
+    assert all(value in prompt for value in ["居民协商公共事务", "暖色纪实教学插画", "1F4E5F"])
+    assert "主题关键词" not in prompt
+    def generate(slide, design, index):
+        if index == 1:
+            raise RuntimeError("provider failed")
+        return {"storage_path": "generated.png"}
+    monkeypatch.setattr(service, "_generate_one", generate)
+    result = service.enhance_svg({"design": theme, "slides": [
+        {"svg": '<svg xmlns="http://www.w3.org/2000/svg"><image id="visual-asset" /></svg>'}
+        for _ in range(2)]})
+    assert result["multimodal"]["status"] == "partial"
+    assert result["multimodal"]["generated_count"] == 1
+    assert result["multimodal"]["selected_slides"] == [1]
+    assert "1/2" in result["multimodal"]["message"]
+    assert "visual_asset" in result["slides"][0]
+    assert "image" not in result["slides"][1]["svg"]
+
+
+def test_image_retry_keeps_existing_paid_image_and_fills_only_missing(tmp_path, monkeypatch):
+    from PIL import Image
+    service = _ppt_service(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "generated_artifact_directory", str(tmp_path))
+    monkeypatch.setattr(settings, "ppt_multimodal_max_images", 2)
+    Image.new("RGB", (32, 32), "white").save(tmp_path / "paid.png")
+    generated = []
+    def generate(slide, design, index):
+        generated.append(index)
+        return {"storage_path": "new.png"}
+    monkeypatch.setattr(service, "_generate_one", generate)
+    source = '<svg xmlns="http://www.w3.org/2000/svg"><image id="visual-asset" /></svg>'
+    result = service.enhance_svg({"design": {}, "slides": [
+        {"svg": source, "visual_asset": {"storage_path": "paid.png"}}, {"svg": source}]}, preserve_slots=True)
+    assert generated == [1]
+    assert result["slides"][0]["visual_asset"]["storage_path"] == "paid.png"
+    assert result["multimodal"]["generated_count"] == 2
 
 
 def _qwen_provider() -> SpeechTranscriptionProvider:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 from typing import Any
 
@@ -23,6 +24,7 @@ from app.models.teaching_class import (
 from app.models.user import User
 from app.schemas.agent import LessonPublicationData, LessonPublishRequest
 from app.services.presentation_artifact_service import PresentationArtifactService
+from app.services.lesson_artifact_state import requires_previous_confirmation
 from app.services.teaching_class_service import TeachingClassService
 
 
@@ -36,7 +38,11 @@ class LessonPublicationService:
         self.root = root
 
     def _require_run(self, run_id: int) -> AgentRun:
-        run = self.db.get(AgentRun, run_id)
+        # Hold the MySQL row lock through the immutable publication copy and
+        # commit. Generation/restore CAS updates cannot switch the selected PPT
+        # between the version check and publication. Refresh any cached object.
+        run = self.db.scalar(select(AgentRun).where(AgentRun.id == run_id)
+                             .with_for_update().execution_options(populate_existing=True))
         if run is None or (self.user.role != "admin" and run.created_by != self.user.id):
             raise HTTPException(status_code=404, detail="备课任务不存在或无权访问")
         if run.status != "completed" or run.current_step < 3:
@@ -109,6 +115,18 @@ class LessonPublicationService:
         activities = bundle.get("classroom_activities") or []
         if payload.publish_ppt and not isinstance(ppt_artifact, dict):
             raise HTTPException(status_code=400, detail="当前任务没有可发布的 PPT")
+        if payload.publish_ppt:
+            ppt = bundle.get("ppt") or {}
+            revision = ppt_artifact.get("revision_id") or ppt.get("revision_id") or ""
+            modern = ppt.get("pipeline_version") == "ppt-master-svg-v2" or bool(revision)
+            missing_binding = modern and (not revision or not payload.expected_ppt_revision)
+            changed_binding = payload.expected_ppt_revision is not None and payload.expected_ppt_revision != revision
+            inconsistent = (ppt.get("revision_id") and ppt_artifact.get("revision_id")
+                            and ppt["revision_id"] != ppt_artifact["revision_id"])
+            if missing_binding or changed_binding or inconsistent:
+                raise HTTPException(status_code=409, detail="待发布课件版本已变化或未绑定，请刷新预览并重新确认")
+            if requires_previous_confirmation(output, "ppt") and not payload.allow_previous_ppt:
+                raise HTTPException(status_code=409, detail="本次 PPT 尚未成功生成；如需发布保留的上一版，请单独确认")
         if payload.publish_discussions and not activities:
             raise HTTPException(status_code=400, detail="当前任务没有可发布的课堂讨论")
 
@@ -133,7 +151,12 @@ class LessonPublicationService:
                 copied_path = publication_dir / source.name
                 shutil.copy2(source, copied_path)
                 item.ppt_storage_path = str(copied_path.relative_to(self.root))
-                item.ppt_file_name = source.name
+                # Immutable internal filenames are intentionally generic. Keep
+                # the teacher's safe display filename for student downloads.
+                name = str(ppt_artifact.get("file_name") or source.name)
+                name = re.sub(r'[\x00-\x1f\x7f/\\:*?"<>|]', "_", name).strip(" .")
+                item.ppt_file_name = (re.sub(r"\.pptx$", "", name, flags=re.I)[:180].rstrip(" .")
+                                      or "教学课件") + ".pptx"
             selected = payload.discussion_indices or list(range(len(activities)))
             activity_ids: list[int] = []
             if payload.publish_discussions:

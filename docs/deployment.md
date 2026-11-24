@@ -85,13 +85,19 @@ CADDYFILE_PATH=./deploy/Caddyfile.ip
 `APP_UPSTREAM=127.0.0.1:80`。该配置关闭 HTTP challenge，使用 443 上的
 TLS-ALPN challenge 签发证书，同时以 `default_sni` 兼容不发送 SNI 的裸 IP 客户端。
 
-镜像固定包含 Node.js 24 LTS、PPT 渲染脚本和生产依赖。构建阶段会检查脚本可解析、
-`pptxgenjs` 可加载，并验证非 root 运行用户能写入教学成果目录。部署后可再次执行：
+镜像包含锁定的完整 PPT Master 分发、Python 依赖、LibreOffice、Poppler 和 Noto 中文字体。
+构建阶段检查上游署名门禁、依赖及非 root 用户写权限。不要在小规格生产实例构建镜像或前端。
+非容器部署先安装这些系统依赖，再执行 `python scripts/install_ppt_master.py`；Git 不包含 vendor，
+离线发布需额外上传锁文件指定的源码包并通过 `--archive` 安装。部署后可再次执行：
 
 ```bash
 docker compose --env-file .env.production run --rm --no-deps backend \
-  python scripts/verify_presentation_runtime.py
+  python scripts/verify_presentation_runtime.py --render-smoke
 ```
+
+PPT 流程替换需前后端同版本发布，并验证旧课件下载、版本绑定和上一版单独确认。
+详见 [PPT 上线检查清单](ppt-release-checklist.md)。维护脚本默认只预览；实际隔离/恢复只允许停机窗口，
+不自动删除当前文件、历史引用或已发布课件。
 
 镜像同时包含 `ffprobe`。录音上传后由服务端读取真实时长，不采用浏览器上报值；
 临时图片和录音默认每位用户合计不超过 50 MB，并在 24 小时后由启动清理及请求侧

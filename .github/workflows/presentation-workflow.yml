@@ -1,0 +1,94 @@
+name: Presentation workflow regression
+
+on:
+  pull_request:
+    paths:
+      - 'backend/app/services/ppt_*.py'
+      - 'backend/app/services/agent_service.py'
+      - 'backend/app/services/lesson_*'
+      - 'backend/app/services/presentation_*'
+      - 'backend/app/schemas/presentation.py'
+      - 'backend/app/schemas/agent.py'
+      - 'backend/app/api/v1/endpoints/agents.py'
+      - 'backend/app/core/config.py'
+      - 'backend/app/core/prompts.py'
+      - 'backend/presentation_runtime/**'
+      - 'backend/Dockerfile'
+      - 'backend/requirements.txt'
+      - 'backend/scripts/*ppt*.py'
+      - 'backend/scripts/verify_presentation_runtime.py'
+      - 'backend/tests/test_ppt_workflow.py'
+      - 'backend/tests/test_agents.py'
+      - 'backend/tests/test_agent_run_events.py'
+      - 'backend/tests/test_lesson_publication_safety.py'
+      - 'backend/tests/test_ppt_*.py'
+      - 'backend/tests/test_*deployment*'
+      - 'backend/tests/test_small_server_multimodal_hardening.py'
+      - 'frontend/**'
+      - 'docker-compose.yml'
+      - '.github/workflows/presentation-workflow.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  editable-pptx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: disposable-ci-root
+          MYSQL_DATABASE: ppt_workflow_ci
+          MYSQL_USER: ppt_ci
+          MYSQL_PASSWORD: disposable-ci-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pdisposable-ci-root"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      AI_MOCK_MODE: 'true'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONPATH: .
+      PPT_MYSQL_TEST_URL: mysql+pymysql://ppt_ci:disposable-ci-password@127.0.0.1:3306/ppt_workflow_ci?charset=utf8mb4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install actual rendering dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libreoffice-impress poppler-utils fonts-noto-cjk ffmpeg
+          python -m pip install -r backend/requirements.txt
+      - name: Install complete pinned skill runtime
+        working-directory: backend
+        run: |
+          python scripts/install_ppt_master.py
+          python scripts/verify_presentation_runtime.py --render-smoke
+      - name: Exercise native export, preview, version and permission contracts
+        working-directory: backend
+        run: python -m pytest -q tests/test_ppt_workflow.py tests/test_agents.py tests/test_agent_run_events.py tests/test_ppt_checkpoint.py tests/test_ppt_resume_images.py tests/test_lesson_publication_safety.py tests/test_ppt_retention.py tests/test_ppt_mysql_integration.py tests/test_small_server_multimodal_hardening.py tests/test_container_deployment_contract.py
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: corepack enable
+      - name: Check publication UI and production build
+        working-directory: frontend
+        run: |
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm test:artifact-progress
+          corepack pnpm test:agent-progress
+          corepack pnpm test:lesson-publication
+          corepack pnpm test:workspace-ai
+          corepack pnpm build
