@@ -10,9 +10,10 @@ const router = useRouter()
 const auth = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(false)
-const form = reactive({ password: '', confirmPassword: '' })
+const form = reactive({ currentPassword: '', password: '', confirmPassword: '' })
 const validateConfirm = (_rule: unknown, value: string, callback: (error?: Error) => void) => callback(value === form.password ? undefined : new Error('两次输入的密码不一致'))
 const rules: FormRules = {
+  currentPassword: [{ required: true, message: '请输入当前临时密码', trigger: 'blur' }],
   password: [{ required: true, min: 8, max: 128, message: '密码长度为 8～128 个字符', trigger: 'blur' }],
   confirmPassword: [{ required: true, validator: validateConfirm, trigger: 'blur' }],
 }
@@ -21,8 +22,8 @@ async function submit() {
   if (!(await formRef.value?.validate())) return
   loading.value = true
   try {
-    await authApi.changePassword(form.password)
-    auth.logout()
+    await authApi.changePassword(form.currentPassword, form.password)
+    auth.logout(false)
     ElMessage.success('密码修改成功，请重新登录')
     await router.push('/login')
   } catch (error: unknown) {
@@ -38,6 +39,7 @@ async function submit() {
       <h1>请修改临时密码</h1>
       <p class="muted">管理员为你生成了临时密码，修改后才能继续使用平台。</p>
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @keyup.enter="submit">
+        <el-form-item label="当前临时密码" prop="currentPassword"><el-input v-model="form.currentPassword" type="password" show-password size="large" autocomplete="current-password" /></el-form-item>
         <el-form-item label="新密码" prop="password"><el-input v-model="form.password" type="password" show-password size="large" autocomplete="new-password" /></el-form-item>
         <el-form-item label="确认新密码" prop="confirmPassword"><el-input v-model="form.confirmPassword" type="password" show-password size="large" autocomplete="new-password" /></el-form-item>
         <el-button type="primary" size="large" class="full-button" :loading="loading" @click="submit">保存新密码</el-button>

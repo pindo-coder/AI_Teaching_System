@@ -16,7 +16,12 @@ backend/presentation_runtime/fonts/
 
 # Backend runtime data
 backend/data/*.db
+backend/data/*.db.bak
+backend/data/*.bak
+backend/data/*.bak-shm
+backend/data/*.bak-wal
 backend/data/*.sqlite3
+backend/data/*.sqlite3.bak
 backend/data/*.db-shm
 backend/data/*.db-wal
 backend/data/*.sqlite3-shm

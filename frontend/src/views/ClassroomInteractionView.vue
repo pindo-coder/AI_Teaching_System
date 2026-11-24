@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Finished } from '@element-plus/icons-vue'
@@ -197,6 +197,8 @@ watch(activityDrawerOpen, (open) => {
   if (open) startActivityPolling()
   else stopActivityPolling()
 })
+
+onBeforeUnmount(stopActivityPolling)
 
 async function createDiscussion() {
   if (!discussionForm.title.trim() || !discussionForm.content.trim()) return ElMessage.warning('请填写讨论标题和内容')

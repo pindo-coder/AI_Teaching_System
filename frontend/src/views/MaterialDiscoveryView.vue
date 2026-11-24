@@ -103,16 +103,20 @@ async function runDiscovery() {
 
 async function refresh() { await load() }
 
+let disposed = false
+
 function scheduleJobPoll() {
   if (jobPollTimer) clearTimeout(jobPollTimer)
   jobPollTimer = undefined
-  if (!runningJob.value) return
+  if (disposed || !runningJob.value) return
   jobPollTimer = setTimeout(async () => {
+    if (disposed) return
     const previousId = runningJob.value?.id
     try {
       // 页面不可见时不发请求；只有任务运行中才以低频查询任务状态。
       if (document.visibilityState === 'visible') {
         jobs.value = (await knowledgeApi.discoveryJobs(30)).data.data
+        if (disposed) return
         if (previousId && !jobs.value.some((item) => item.id === previousId && ['queued', 'running'].includes(item.status))) {
           await load()
         }
@@ -120,7 +124,7 @@ function scheduleJobPoll() {
     } catch {
       // 临时网络失败留给下一轮或用户手动刷新，不反复弹出错误提示。
     } finally {
-      scheduleJobPoll()
+      if (!disposed) scheduleJobPoll()
     }
   }, 10_000)
 }
@@ -336,6 +340,7 @@ onMounted(async () => {
   scheduleJobPoll()
 })
 onBeforeUnmount(() => {
+  disposed = true
   if (jobPollTimer) clearTimeout(jobPollTimer)
 })
 watch(runningJob, scheduleJobPoll)

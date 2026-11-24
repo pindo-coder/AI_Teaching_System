@@ -62,6 +62,14 @@ def _check_activity_access(activity: ClassroomActivity, current_user: User, db: 
         _class_access(db, current_user, activity.teaching_class_id)
 
 
+def _check_activity_manage_access(activity: ClassroomActivity, current_user: User, db: Session) -> None:
+    if activity.teaching_class_id is None:
+        if current_user.role != "admin" and activity.created_by != current_user.id:
+            raise HTTPException(status_code=403, detail="只有活动创建教师或管理员可以管理该课堂互动")
+        return
+    _class_access(db, current_user, activity.teaching_class_id)
+
+
 def _response_read(response: ClassroomResponse, user_name: str) -> ResponseRead:
     return ResponseRead(
         id=response.id, activity_id=response.activity_id, user_id=response.user_id,
@@ -256,7 +264,7 @@ def comment_activity_response(
     db: Session = Depends(get_db),
 ) -> ApiResponse[ResponseRead]:
     activity = _activity_or_404(activity_id, db)
-    _check_activity_access(activity, current_user, db)
+    _check_activity_manage_access(activity, current_user, db)
     response = db.scalar(select(ClassroomResponse).where(
         ClassroomResponse.id == response_id, ClassroomResponse.activity_id == activity_id
     ))
@@ -279,7 +287,7 @@ def ai_review_activity_response(
     db: Session = Depends(get_db),
 ) -> ApiResponse[ResponseRead]:
     activity = _activity_or_404(activity_id, db)
-    _check_activity_access(activity, current_user, db)
+    _check_activity_manage_access(activity, current_user, db)
     response = db.scalar(select(ClassroomResponse).where(
         ClassroomResponse.id == response_id, ClassroomResponse.activity_id == activity_id
     ))
@@ -313,7 +321,7 @@ def close_activity(
     db: Session = Depends(get_db),
 ) -> ApiResponse[ActivityRead]:
     activity = _activity_or_404(activity_id, db)
-    _check_activity_access(activity, current_user, db)
+    _check_activity_manage_access(activity, current_user, db)
     activity.status = "closed"
     db.commit()
     db.refresh(activity)

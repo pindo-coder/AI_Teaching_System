@@ -1,6 +1,9 @@
+from collections import defaultdict, deque
 from datetime import timedelta
 import hashlib
 import secrets
+import threading
+import time
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select, update
@@ -22,6 +25,59 @@ _BLOCKED_TEACHER_MESSAGES = {
     "rejected": "教师账号审核未通过",
     "disabled": "教师账号已被禁用",
 }
+
+_LOGIN_FAIL_WINDOW_SECONDS = 900
+_LOGIN_FAIL_MAX_ATTEMPTS = 10
+_LOGIN_FAIL_LOCK = threading.Lock()
+_LOGIN_FAIL_BUCKETS: dict[tuple[str, str], deque[float]] = defaultdict(deque)
+
+
+def clear_auth_rate_limits() -> None:
+    """Clear in-memory failed login rate-limit buckets (used by tests)."""
+    with _LOGIN_FAIL_LOCK:
+        _LOGIN_FAIL_BUCKETS.clear()
+
+
+def _prune_bucket(bucket: deque[float], now_ts: float, window: int) -> None:
+    cutoff = now_ts - window
+    while bucket and bucket[0] < cutoff:
+        bucket.popleft()
+
+
+def _check_login_rate_limit(client_ip: str | None, username: str) -> None:
+    key = ((client_ip or "unknown").strip(), username.strip().lower())
+    now_ts = time.monotonic()
+    with _LOGIN_FAIL_LOCK:
+        bucket = _LOGIN_FAIL_BUCKETS[key]
+        _prune_bucket(bucket, now_ts, _LOGIN_FAIL_WINDOW_SECONDS)
+        if len(bucket) >= _LOGIN_FAIL_MAX_ATTEMPTS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="登录失败次数过多，请 15 分钟后再试",
+            )
+
+
+def _record_login_failure(client_ip: str | None, username: str) -> None:
+    key = ((client_ip or "unknown").strip(), username.strip().lower())
+    now_ts = time.monotonic()
+    with _LOGIN_FAIL_LOCK:
+        bucket = _LOGIN_FAIL_BUCKETS[key]
+        _prune_bucket(bucket, now_ts, _LOGIN_FAIL_WINDOW_SECONDS)
+        bucket.append(now_ts)
+
+
+def _clear_login_failures(client_ip: str | None, username: str) -> None:
+    key = ((client_ip or "unknown").strip(), username.strip().lower())
+    with _LOGIN_FAIL_LOCK:
+        _LOGIN_FAIL_BUCKETS.pop(key, None)
+
+
+def _generate_temporary_password() -> str:
+    configured = (settings.admin_temporary_password or "").strip()
+    if configured:
+        return configured
+    # 12+ chars random high-entropy temporary password
+    return secrets.token_urlsafe(9)
 
 
 def teacher_authentication_block_reason(user: User) -> str | None:
@@ -73,16 +129,24 @@ class AuthService:
             self.db.rollback()
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="用户名、学号或工号已存在") from None
 
-    def login(self, *, username: str, password: str) -> tuple[str, User]:
-        user = self.users.get_by_username(username.strip())
+    def login(self, *, username: str, password: str, request_ip: str | None = None) -> tuple[str, User]:
+        normalized_username = username.strip()
+        _check_login_rate_limit(request_ip, normalized_username)
+        user = self.users.get_by_username(normalized_username)
         if user is None or not verify_password(password, user.password_hash):
+            _record_login_failure(request_ip, normalized_username)
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+        _clear_login_failures(request_ip, normalized_username)
         blocked_reason = teacher_authentication_block_reason(user)
         if blocked_reason:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=blocked_reason)
         if user.email and not user.email_verified_at:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="请先验证邮箱后再登录")
         return create_access_token(str(user.id), user.auth_version), user
+
+    def logout(self, *, user: User) -> None:
+        user.auth_version += 1
+        self.db.commit()
 
     def _create_token(
         self,
@@ -124,6 +188,33 @@ class AuthService:
         duplicate = self.db.scalar(select(User).where(User.email_hash == email_hash, User.id != user.id))
         if duplicate:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="邮箱已被其他账号使用")
+        now = utc_now()
+        latest = self.db.scalar(select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.purpose == "email_verification",
+        ).order_by(PasswordResetToken.expires_at.desc()).limit(1))
+        latest_created_at = (
+            latest.expires_at - timedelta(minutes=settings.password_reset_token_expire_minutes)
+            if latest else None
+        )
+        if latest_created_at and (now - latest_created_at).total_seconds() < settings.password_reset_rate_limit_seconds:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="验证码发送过于频繁，请稍后再试")
+        hourly_cutoff = now - timedelta(hours=1) + timedelta(minutes=settings.password_reset_token_expire_minutes)
+        hourly_count = self.db.scalar(select(func.count(PasswordResetToken.id)).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.purpose == "email_verification",
+            PasswordResetToken.expires_at >= hourly_cutoff,
+        )) or 0
+        if hourly_count >= settings.password_reset_hourly_limit:
+            raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="验证码发送次数过多，请稍后再试")
+        if request_ip:
+            ip_count = self.db.scalar(select(func.count(PasswordResetToken.id)).where(
+                PasswordResetToken.request_ip == request_ip,
+                PasswordResetToken.purpose == "email_verification",
+                PasswordResetToken.expires_at >= hourly_cutoff,
+            )) or 0
+            if ip_count >= settings.password_reset_hourly_limit * 3:
+                raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="验证码发送次数过多，请稍后再试")
         user.email = normalized
         user.email_hash = email_hash
         user.email_verified_at = None
@@ -150,7 +241,11 @@ class AuthService:
         if token_row is None or token_row.attempts >= 5:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="验证码无效或已过期")
         if token_row.token_hash != self._token_hash(code):
-            token_row.attempts += 1
+            self.db.execute(
+                update(PasswordResetToken)
+                .where(PasswordResetToken.id == token_row.id)
+                .values(attempts=PasswordResetToken.attempts + 1)
+            )
             self.db.commit()
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="验证码无效或已过期")
         changed = self.db.execute(
@@ -262,7 +357,11 @@ class AuthService:
             if token_row is not None and token_row.attempts >= 5:
                 token_row = None
             if token_row is not None and token_row.token_hash != self._token_hash(code or ""):
-                token_row.attempts += 1
+                self.db.execute(
+                    update(PasswordResetToken)
+                    .where(PasswordResetToken.id == token_row.id)
+                    .values(attempts=PasswordResetToken.attempts + 1)
+                )
                 self.db.commit()
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="验证码无效或已过期")
         if token_row is None:
@@ -295,7 +394,7 @@ class AuthService:
         user = self.users.get_by_id(user_id)
         if user is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="用户不存在")
-        temporary_password = settings.admin_temporary_password
+        temporary_password = _generate_temporary_password()
         now = utc_now()
         user.password_hash = hash_password(temporary_password)
         user.password_changed_at = now
@@ -309,7 +408,11 @@ class AuthService:
         self.db.commit()
         return temporary_password
 
-    def change_password(self, *, user: User, new_password: str) -> None:
+    def change_password(self, *, user: User, current_password: str, new_password: str) -> None:
+        if not verify_password(current_password, user.password_hash):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="当前密码不正确")
+        if current_password == new_password:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="新密码不能与当前密码相同")
         now = utc_now()
         user.password_hash = hash_password(new_password)
         user.password_changed_at = now

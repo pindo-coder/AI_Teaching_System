@@ -12,6 +12,7 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.core.config import settings
+from app.services.auth_service import clear_auth_rate_limits
 
 
 test_engine = create_engine(
@@ -49,9 +50,12 @@ def reset_database(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "generated_artifact_directory", str(tmp_path / "artifacts"))
     monkeypatch.setattr(settings, "rag_collection_name", "test_knowledge_base")
     monkeypatch.setattr(settings, "rag_score_threshold", -1.0)
+    monkeypatch.setattr(settings, "admin_temporary_password", None)
+    clear_auth_rate_limits()
     Base.metadata.drop_all(test_engine)
     Base.metadata.create_all(test_engine)
     yield
+    clear_auth_rate_limits()
 
 
 @pytest.fixture

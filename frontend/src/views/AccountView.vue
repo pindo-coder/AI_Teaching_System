@@ -21,26 +21,62 @@ const passwordDialogVisible = ref(false)
 const profileFormRef = ref<FormInstance>()
 const avatarInput = ref<HTMLInputElement>()
 const form = reactive({ email: auth.user?.email || '', code: '' })
+const LEGACY_STORAGE_KEYS = [
+  'account_profile_name',
+  'account_profile_birth_date',
+  'account_profile_university',
+  'account_profile_city',
+  'account_profile_address',
+  'account_profile_bio',
+  'account_profile_avatar',
+  'account_learning_reminder',
+  'account_product_updates',
+  'account_compact_mode',
+]
+function scopedKey(suffix: string) {
+  return auth.user?.id ? `account_u${auth.user.id}_${suffix}` : null
+}
+function readScoped(suffix: string): string | null {
+  const key = scopedKey(suffix)
+  if (!key) return null
+  try { return localStorage.getItem(key) } catch { return null }
+}
+function writeScoped(suffix: string, value: string): boolean {
+  const key = scopedKey(suffix)
+  if (!key) return false
+  try {
+    localStorage.setItem(key, value)
+    return true
+  } catch {
+    return false
+  }
+}
+function clearLegacyAccountStorage() {
+  for (const key of LEGACY_STORAGE_KEYS) {
+    try { localStorage.removeItem(key) } catch { /* ignore */ }
+  }
+}
 const profileForm = reactive({
-  name: localStorage.getItem('account_profile_name') || auth.user?.username || '',
-  birthDate: localStorage.getItem('account_profile_birth_date') || '',
-  university: localStorage.getItem('account_profile_university') || '',
-  city: localStorage.getItem('account_profile_city') || '',
-  address: localStorage.getItem('account_profile_address') || '',
-  bio: localStorage.getItem('account_profile_bio') || '',
-  avatar: localStorage.getItem('account_profile_avatar') || '',
+  name: readScoped('profile_name') || auth.user?.username || '',
+  birthDate: readScoped('profile_birth_date') || '',
+  university: readScoped('profile_university') || '',
+  city: readScoped('profile_city') || '',
+  address: readScoped('profile_address') || '',
+  bio: readScoped('profile_bio') || '',
+  avatar: readScoped('profile_avatar') || '',
 })
-const passwordForm = reactive({ password: '', confirmPassword: '' })
+const passwordForm = reactive({ currentPassword: '', password: '', confirmPassword: '' })
 const preferences = reactive({
-  learningReminder: localStorage.getItem('account_learning_reminder') !== 'false',
-  productUpdates: localStorage.getItem('account_product_updates') === 'true',
-  compactMode: localStorage.getItem('account_compact_mode') === 'true',
+  learningReminder: readScoped('learning_reminder') !== 'false',
+  productUpdates: readScoped('product_updates') === 'true',
+  compactMode: readScoped('compact_mode') === 'true',
 })
 const emailRules: FormRules = {
   email: [{ required: true, type: 'email', message: '请输入有效邮箱', trigger: 'blur' }],
   code: [{ required: true, len: 6, pattern: /^\d{6}$/, message: '请输入 6 位数字验证码', trigger: 'blur' }],
 }
 const passwordRules: FormRules = {
+  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   password: [{ required: true, min: 8, max: 128, message: '密码长度为 8～128 个字符', trigger: 'blur' }],
   confirmPassword: [{ required: true, validator: (_rule, value, callback) => callback(value === passwordForm.password ? undefined : new Error('两次输入的密码不一致')), trigger: 'blur' }],
 }
@@ -63,32 +99,64 @@ const currentSection = computed(() => ({
 }[activeSection.value]))
 
 watch(preferences, (value) => {
-  localStorage.setItem('account_learning_reminder', String(value.learningReminder))
-  localStorage.setItem('account_product_updates', String(value.productUpdates))
-  localStorage.setItem('account_compact_mode', String(value.compactMode))
+  writeScoped('learning_reminder', String(value.learningReminder))
+  writeScoped('product_updates', String(value.productUpdates))
+  writeScoped('compact_mode', String(value.compactMode))
 }, { deep: true })
 
 function selectSection(section: SettingSection) { activeSection.value = section }
 function openAvatarPicker() { avatarInput.value?.click() }
-function onAvatarChange(event: Event) {
+function compressAvatar(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('头像读取失败'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('图片解析失败'))
+      img.onload = () => {
+        const maxDim = 160
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height))
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.max(1, Math.round(img.width * scale))
+        canvas.height = Math.max(1, Math.round(img.height * scale))
+        const ctx = canvas.getContext('2d')
+        if (!ctx) { reject(new Error('浏览器不支持图片压缩')); return }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', 0.82))
+      }
+      img.src = String(reader.result || '')
+    }
+    reader.readAsDataURL(file)
+  })
+}
+async function onAvatarChange(event: Event) {
   const file = (event.target as HTMLInputElement).files?.[0]
   if (!file) return
   if (!['image/png', 'image/jpeg'].includes(file.type)) { ElMessage.error('头像仅支持 PNG 或 JPEG 格式'); return }
   if (file.size > 2 * 1024 * 1024) { ElMessage.error('头像大小不能超过 2MB'); return }
-  const reader = new FileReader()
-  reader.onload = () => { profileForm.avatar = String(reader.result || '') }
-  reader.readAsDataURL(file)
+  try {
+    profileForm.avatar = await compressAvatar(file)
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '头像处理失败，请更换图片重试'))
+  }
 }
 async function saveProfile() {
   if (!(await profileFormRef.value?.validate())) return
-  localStorage.setItem('account_profile_name', profileForm.name)
-  localStorage.setItem('account_profile_birth_date', profileForm.birthDate)
-  localStorage.setItem('account_profile_university', profileForm.university)
-  localStorage.setItem('account_profile_city', profileForm.city)
-  localStorage.setItem('account_profile_address', profileForm.address)
-  localStorage.setItem('account_profile_bio', profileForm.bio)
-  if (profileForm.avatar) localStorage.setItem('account_profile_avatar', profileForm.avatar)
-  ElMessage.success('基础信息已保存到当前浏览器')
+  clearLegacyAccountStorage()
+  const ok = [
+    writeScoped('profile_name', profileForm.name),
+    writeScoped('profile_birth_date', profileForm.birthDate),
+    writeScoped('profile_university', profileForm.university),
+    writeScoped('profile_city', profileForm.city),
+    writeScoped('profile_address', profileForm.address),
+    writeScoped('profile_bio', profileForm.bio),
+    profileForm.avatar ? writeScoped('profile_avatar', profileForm.avatar) : true,
+  ].every(Boolean)
+  if (!ok) {
+    ElMessage.warning('浏览器本地存储空间不足，部分资料未保存，请清理浏览器缓存后重试')
+    return
+  }
+  ElMessage.success('基础信息已按当前账号保存到本机浏览器')
 }
 async function submitEmail() {
   if (!(await emailFormRef.value?.validate())) return
@@ -104,11 +172,11 @@ async function confirmEmail() {
   catch (error: unknown) { ElMessage.error(getErrorMessage(error, '验证码无效或已过期')) }
   finally { verifying.value = false }
 }
-function openPasswordDialog() { passwordForm.password = ''; passwordForm.confirmPassword = ''; passwordDialogVisible.value = true }
+function openPasswordDialog() { passwordForm.currentPassword = ''; passwordForm.password = ''; passwordForm.confirmPassword = ''; passwordDialogVisible.value = true }
 async function submitPassword() {
   if (!(await passwordFormRef.value?.validate())) return
   passwordLoading.value = true
-  try { await authApi.changePassword(passwordForm.password); passwordDialogVisible.value = false; auth.logout(); ElMessage.success('密码修改成功，请重新登录'); await router.push('/login') }
+  try { await authApi.changePassword(passwordForm.currentPassword, passwordForm.password); passwordDialogVisible.value = false; auth.logout(false); ElMessage.success('密码修改成功，请重新登录'); await router.push('/login') }
   catch (error: unknown) { ElMessage.error(getErrorMessage(error, '修改失败，请稍后重试')) }
   finally { passwordLoading.value = false }
 }
@@ -158,7 +226,7 @@ async function copyIdentity() {
         <section v-else class="settings-section"><div class="section-card preference-card"><div class="card-heading"><div><h3>提醒设置</h3><p>提醒会显示在平台消息中心，不会影响课程功能。</p></div><span class="security-icon security-icon--gold"><el-icon><Bell /></el-icon></span></div><div class="preference-row"><div><strong>学习进度提醒</strong><span>有待完成的学习任务时提醒我</span></div><el-switch v-model="preferences.learningReminder" /></div><div class="preference-row"><div><strong>平台更新通知</strong><span>接收新功能和平台维护信息</span></div><el-switch v-model="preferences.productUpdates" /></div></div><div class="section-card preference-card"><div class="card-heading"><div><h3>显示偏好</h3><p>仅保存在当前浏览器，不会同步到其他设备。</p></div><span class="security-icon"><el-icon><Setting /></el-icon></span></div><div class="preference-row"><div><strong>紧凑显示</strong><span>减少列表间距，查看更多内容</span></div><el-switch v-model="preferences.compactMode" /></div></div></section>
       </main>
     </div>
-    <el-dialog v-model="passwordDialogVisible" title="修改登录密码" width="min(92vw, 460px)" destroy-on-close><p class="dialog-description">设置新密码后，当前会话会退出，请使用新密码重新登录。</p><el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-position="top" @keyup.enter="submitPassword"><el-form-item label="新密码" prop="password"><el-input v-model="passwordForm.password" type="password" show-password autocomplete="new-password" size="large" /></el-form-item><el-form-item label="确认新密码" prop="confirmPassword"><el-input v-model="passwordForm.confirmPassword" type="password" show-password autocomplete="new-password" size="large" /></el-form-item></el-form><template #footer><el-button @click="passwordDialogVisible = false">取消</el-button><el-button type="primary" :loading="passwordLoading" @click="submitPassword">确认修改</el-button></template></el-dialog>
+    <el-dialog v-model="passwordDialogVisible" title="修改登录密码" width="min(92vw, 460px)" destroy-on-close><p class="dialog-description">设置新密码后，当前会话会退出，请使用新密码重新登录。</p><el-form ref="passwordFormRef" :model="passwordForm" :rules="passwordRules" label-position="top" @keyup.enter="submitPassword"><el-form-item label="当前密码" prop="currentPassword"><el-input v-model="passwordForm.currentPassword" type="password" show-password autocomplete="current-password" size="large" /></el-form-item><el-form-item label="新密码" prop="password"><el-input v-model="passwordForm.password" type="password" show-password autocomplete="new-password" size="large" /></el-form-item><el-form-item label="确认新密码" prop="confirmPassword"><el-input v-model="passwordForm.confirmPassword" type="password" show-password autocomplete="new-password" size="large" /></el-form-item></el-form><template #footer><el-button @click="passwordDialogVisible = false">取消</el-button><el-button type="primary" :loading="passwordLoading" @click="submitPassword">确认修改</el-button></template></el-dialog>
   </div>
 </template>
 

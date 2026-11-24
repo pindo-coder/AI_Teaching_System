@@ -47,9 +47,22 @@ def register(payload: UserCreate, request: Request, db: Session = Depends(get_db
 
 
 @router.post("/login", response_model=ApiResponse[TokenData])
-def login(payload: UserLogin, db: Session = Depends(get_db)) -> ApiResponse[TokenData]:
-    token, user = AuthService(db).login(username=payload.username, password=payload.password)
+def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)) -> ApiResponse[TokenData]:
+    token, user = AuthService(db).login(
+        username=payload.username,
+        password=payload.password,
+        request_ip=request.client.host if request.client else None,
+    )
     return ApiResponse(message="登录成功", data=TokenData(access_token=token, user=UserRead.model_validate(user)))
+
+
+@router.post("/logout", response_model=ApiResponse[dict[str, str]])
+def logout(
+    current_user: User = Depends(get_session_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, str]]:
+    AuthService(db).logout(user=current_user)
+    return ApiResponse(message="已退出登录", data={})
 
 
 @router.post("/email/verification/request", response_model=ApiResponse[dict[str, str]])
@@ -108,7 +121,11 @@ def change_password(
     current_user: User = Depends(get_session_user),
     db: Session = Depends(get_db),
 ) -> ApiResponse[dict[str, str]]:
-    AuthService(db).change_password(user=current_user, new_password=payload.new_password)
+    AuthService(db).change_password(
+        user=current_user,
+        current_password=payload.current_password,
+        new_password=payload.new_password,
+    )
     return ApiResponse(message="密码修改成功，请重新登录", data={})
 
 

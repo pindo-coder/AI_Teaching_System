@@ -74,7 +74,7 @@ async def upload_document(
     source_role: Annotated[str, Form(pattern="^(primary|supplementary)$")] = "primary",
     access_policy: Annotated[str, Form(pattern="^(citation_only|full_preview|download)$")] = "full_preview",
     auto_calibrate: Annotated[bool, Form()] = False,
-    _: User = Depends(knowledge_manager),
+    _: User = Depends(require_roles("admin")),
     db: Session = Depends(get_db),
 ) -> ApiResponse[KnowledgeDocumentRead]:
     content = await file.read()
@@ -418,10 +418,10 @@ def document_pages(document_id: int, user: User = Depends(get_current_user),
             response_model=ApiResponse[dict])
 def override_document_text_block(
     document_id: int, pdf_page: int, block_id: str, payload: TextBlockOverride,
-    user: User = Depends(knowledge_manager), db: Session = Depends(get_db),
+    user: User = Depends(require_roles("admin")), db: Session = Depends(get_db),
 ) -> ApiResponse[dict]:
     document = KnowledgeService(db).require_document(document_id)
-    MaterialCenterService(db).ensure_document_access(document, user)
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     if document.material_type != "textbook":
         raise HTTPException(status_code=400, detail="只有教材正文可以校正 OCR 文本块")
     page = CitationService(db).update_text_block(
@@ -452,7 +452,7 @@ def document_outline(document_id: int, user: User = Depends(get_current_user),
 def refresh_document_ocr(document_id: int, user: User = Depends(knowledge_manager),
                          db: Session = Depends(get_db)) -> ApiResponse[KnowledgeDocumentRead]:
     document = KnowledgeService(db).require_document(document_id)
-    MaterialCenterService(db).ensure_document_access(document, user)
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     document = KnowledgeService(db).refresh_ocr_extraction(document_id)
     return ApiResponse(
         message="OCR 文字已重新提取，请复核清洗结果并保存校准",
@@ -516,9 +516,9 @@ def document_file(document_id: int, user: User = Depends(get_current_user),
 
 @router.put("/documents/{document_id}/calibration", response_model=ApiResponse[KnowledgeDocumentRead])
 def calibrate_document(document_id: int, payload: DocumentCalibrationUpdate,
-                       user: User = Depends(knowledge_manager), db: Session = Depends(get_db)) -> ApiResponse[KnowledgeDocumentRead]:
+                       user: User = Depends(require_roles("admin")), db: Session = Depends(get_db)) -> ApiResponse[KnowledgeDocumentRead]:
     document = KnowledgeService(db).require_document(document_id)
-    MaterialCenterService(db).ensure_document_access(document, user)
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     if document.material_type != "textbook":
         raise HTTPException(status_code=400, detail="只有教材正文可以进行引用校准")
     document = CitationService(db).calibrate(document_id, payload)
@@ -550,10 +550,7 @@ def delete_document(
 ) -> ApiResponse[dict[str, int]]:
     service = KnowledgeService(db)
     document = service.require_document(document_id)
-    if document.material_type == "central" and user.role != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以删除中央材料草稿")
-    if document.material_type == "local" and user.role != "admin" and document.owner_user_id != user.id:
-        raise HTTPException(status_code=403, detail="无权删除该地方材料")
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     service.delete(document_id)
     return ApiResponse(message="文档及向量索引已删除", data={"id": document_id})
 
@@ -566,10 +563,7 @@ def reindex_document(
 ) -> ApiResponse[KnowledgeDocumentRead]:
     service = KnowledgeService(db)
     document = service.require_document(document_id)
-    if document.material_type == "central" and user.role != "admin":
-        raise HTTPException(status_code=403, detail="只有管理员可以重建中央材料索引")
-    if document.material_type == "local" and user.role != "admin" and document.owner_user_id != user.id:
-        raise HTTPException(status_code=403, detail="无权重建该地方材料索引")
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     document = service.reindex(document_id)
     return ApiResponse(message="文档重新索引成功", data=KnowledgeDocumentRead.model_validate(document))
 
@@ -577,11 +571,11 @@ def reindex_document(
 @router.post("/documents/{document_id}/auto-calibrate", response_model=ApiResponse[KnowledgeDocumentRead])
 def auto_calibrate_document(
     document_id: int,
-    user: User = Depends(knowledge_manager),
+    user: User = Depends(require_roles("admin")),
     db: Session = Depends(get_db),
 ) -> ApiResponse[KnowledgeDocumentRead]:
     document = KnowledgeService(db).require_document(document_id)
-    MaterialCenterService(db).ensure_document_access(document, user)
+    MaterialCenterService(db).ensure_document_write_access(document, user)
     if document.material_type != "textbook":
         raise HTTPException(status_code=400, detail="只有教材正文可以自动拆分专题")
     chapters = ChapterRepository(db).list_by_course(document.course_id)

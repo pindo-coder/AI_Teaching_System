@@ -37,7 +37,8 @@ class Settings(BaseSettings):
     password_reset_token_expire_minutes: int = Field(default=20, ge=5, le=120)
     password_reset_rate_limit_seconds: int = Field(default=60, ge=10, le=3600)
     password_reset_hourly_limit: int = Field(default=5, ge=1, le=100)
-    admin_temporary_password: str = "12345678"
+    # 留空时每次由管理员重置密码都会生成随机高熵临时密码；仅在特殊验收场景显式配置固定值。
+    admin_temporary_password: str | None = None
     email_verification_url: str = "http://localhost:5173/verify-email"
     bootstrap_admin_username: str | None = None
     bootstrap_admin_password: str | None = None
@@ -48,10 +49,9 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     llm_timeout_seconds: int = 60
     # 本地垂类模型只接管学生学习和笔记类文本任务；教师备课、PPT 和 Agent
-    # 复杂工作流仍使用上面的 LLM_* 通用 API。功能列表支持逗号分隔，并可用
-    # note_ 前缀匹配全部笔记任务。
+    # 复杂工作流仍使用上面的 LLM_* 通用 API。默认关闭，仅在部署本地垂类模型后显式开启。
     llm_teacher_enabled: bool = Field(
-        default=True,
+        default=False,
         validation_alias=AliasChoices("LLM_TEACHER_ENABLED", "SZ_TEACHER_ENABLED"),
     )
     llm_teacher_base_url: str = Field(
@@ -229,6 +229,27 @@ class Settings(BaseSettings):
     agent_tool_timeout_seconds: float = Field(default=30.0, ge=1, le=300)
     agent_tool_max_retries: int = Field(default=1, ge=0, le=2)
     agent_execution_deadline_seconds: float = Field(default=300.0, ge=10, le=3600)
+
+    def validate_production_security(self) -> None:
+        """生产环境启动时校验核心密钥与加密配置，阻止弱默认密钥上线。"""
+        if self.app_env.strip().lower() != "production":
+            return
+        weak_secrets = {
+            "",
+            "please-change-this-development-secret",
+            "replace-with-a-long-random-secret",
+            "change-me",
+        }
+        jwt_secret = (self.jwt_secret_key or "").strip()
+        if jwt_secret in weak_secrets or len(jwt_secret) < 32:
+            raise RuntimeError(
+                "生产环境 JWT_SECRET_KEY 不可使用默认值且长度必须不少于 32 个字符"
+            )
+        enc_key = (self.ai_config_encryption_key or "").strip()
+        if enc_key in weak_secrets or len(enc_key) < 16:
+            raise RuntimeError(
+                "生产环境必须配置独立的 AI_CONFIG_ENCRYPTION_KEY（长度不少于 16 个字符），避免与 JWT_SECRET_KEY 耦合"
+            )
 
     model_config = SettingsConfigDict(
         env_file=BACKEND_DIR / ".env",

@@ -41,6 +41,11 @@ def get_session_user(
 def get_current_user(current_user: User = Depends(get_session_user)) -> User:
     """Require an active account for every business endpoint."""
 
+    if current_user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="请先修改临时密码后再继续使用平台",
+        )
     if current_user.role == "teacher" and current_user.approval_status != "approved":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

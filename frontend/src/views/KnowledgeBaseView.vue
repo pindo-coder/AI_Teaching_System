@@ -295,9 +295,12 @@ function formatTaskTime(value: string) {
   return formatBeijingDateTime(value)
 }
 
+let disposed = false
+
 function scheduleTaskPoll() {
   if (taskPollTimer) window.clearTimeout(taskPollTimer)
-  if (!activeBatchCount.value) return
+  taskPollTimer = undefined
+  if (disposed || !activeBatchCount.value) return
   taskPollTimer = window.setTimeout(() => loadBatchTasks(true), 3000)
 }
 
@@ -345,7 +348,8 @@ async function openBatchTask(item: MaterialBatchSummary) {
 
 function scheduleBatchPoll() {
   if (batchPollTimer) window.clearTimeout(batchPollTimer)
-  if (!batchResult.value || batchResult.value.status === 'completed' || batchResult.value.status === 'failed') return
+  batchPollTimer = undefined
+  if (disposed || !batchResult.value || batchResult.value.status === 'completed' || batchResult.value.status === 'failed') return
   batchPollTimer = window.setTimeout(pollBatch, 1500)
 }
 
@@ -517,7 +521,7 @@ function statusType(value: string) { return value === 'published' ? 'success' : 
 function materialLabel(value: string) { return ({ central: '中央材料', textbook: '教材正文', local: '地方材料', unclassified: '待分类' } as Record<string, string>)[value] || value }
 function canManageMaterial(document: KnowledgeDocument) { return auth.isAdmin || document.owner_user_id === auth.user?.id }
 function canEditScopes(document: KnowledgeDocument) { return document.material_type === 'local' ? canManageMaterial(document) : document.material_type === 'central' && auth.isAdmin }
-function canReindex(document: KnowledgeDocument) { return document.material_type === 'textbook' || canManageMaterial(document) }
+function canReindex(document: KnowledgeDocument) { return document.material_type === 'textbook' ? auth.isAdmin : canManageMaterial(document) }
 function openExternal(url: string) { window.open(url, '_blank', 'noopener,noreferrer') }
 
 onMounted(async () => {
@@ -525,6 +529,7 @@ onMounted(async () => {
   await loadBatchTasks()
 })
 onBeforeUnmount(() => {
+  disposed = true
   if (batchPollTimer) window.clearTimeout(batchPollTimer)
   if (taskPollTimer) window.clearTimeout(taskPollTimer)
 })

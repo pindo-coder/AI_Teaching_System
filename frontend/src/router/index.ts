@@ -30,7 +30,7 @@ const router = createRouter({
         { path: 'assignments', name: 'assignments', component: () => import('@/views/AssignmentsView.vue') },
         { path: 'classes', name: 'teaching-classes', component: () => import('@/views/TeachingClassesView.vue') },
         { path: 'knowledge', name: 'knowledge', component: () => import('@/views/KnowledgeBaseView.vue'), meta: { roles: ['teacher', 'admin'] } },
-        { path: 'knowledge/documents/:documentId/calibrate', name: 'document-calibration', component: () => import('@/views/DocumentCalibrationView.vue'), meta: { roles: ['teacher', 'admin'] } },
+        { path: 'knowledge/documents/:documentId/calibrate', name: 'document-calibration', component: () => import('@/views/DocumentCalibrationView.vue'), meta: { roles: ['admin'] } },
         {
           path: 'courses/:courseId/chapters/:chapterId/:stage(preview|review|exam)',
           name: 'learning-stage',
@@ -42,9 +42,19 @@ const router = createRouter({
   ],
 })
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore()
-  if (!to.meta.public && !auth.isAuthenticated) return { name: 'login', query: { redirect: to.fullPath } }
+  if (auth.token && (!auth.user || !auth.sessionChecked)) {
+    try {
+      await auth.loadCurrentUser()
+    } catch {
+      auth.logout(false)
+      if (!to.meta.public) return { name: 'login', query: { redirect: to.fullPath } }
+    }
+  }
+  if (!to.meta.public && (!auth.isAuthenticated || !auth.user)) {
+    return { name: 'login', query: { redirect: to.fullPath } }
+  }
   if (auth.user?.must_change_password && to.name !== 'change-password') return { name: 'change-password' }
   if (auth.user?.role === 'admin' && to.name === 'material-review') {
     return {
@@ -56,8 +66,8 @@ router.beforeEach((to) => {
   }
   if (auth.user?.role === 'teacher' && auth.user.approval_status !== 'approved' && to.name !== 'teacher-pending') return { name: 'teacher-pending' }
   if (to.name === 'teacher-pending' && auth.user?.approval_status === 'approved') return { name: 'dashboard' }
-  if (to.meta.public && auth.isAuthenticated && to.name !== 'verify-email') return { name: 'dashboard' }
-  if (to.meta.roles && auth.user && !(to.meta.roles as string[]).includes(auth.user.role)) return { name: 'dashboard' }
+  if (to.meta.public && auth.isAuthenticated && auth.user && to.name !== 'verify-email') return { name: 'dashboard' }
+  if (to.meta.roles && (!auth.user || !(to.meta.roles as string[]).includes(auth.user.role))) return { name: 'dashboard' }
 })
 
 export default router

@@ -11,7 +11,7 @@ from app.repositories.knowledge_repository import KnowledgeRepository
 from app.rag.document_loader import ExtractedPage
 
 
-def prepare_manager(db: Session, role: str = "teacher") -> tuple[dict[str, str], int, int]:
+def prepare_manager(db: Session, role: str = "admin") -> tuple[dict[str, str], int, int]:
     user = User(username=f"{role}_kb", password_hash=hash_password("secure-pass-123"), role=role)
     course = Course(name="毛泽东思想和中国特色社会主义理论体系概论", description="知识库测试")
     db.add_all([user, course])
@@ -86,6 +86,39 @@ def test_student_cannot_manage_knowledge_base(client: TestClient, db: Session) -
     headers, _, _ = prepare_manager(db, role="student")
     response = client.get("/api/v1/knowledge/documents", headers=headers)
     assert response.status_code == 403
+
+
+def test_teacher_cannot_mutate_global_textbook_documents(client: TestClient, db: Session) -> None:
+    admin_headers, course_id, chapter_id = prepare_manager(db, role="admin")
+    teacher = User(username="teacher_readonly", password_hash=hash_password("secure-pass-123"), role="teacher", approval_status="approved")
+    db.add(teacher)
+    db.commit()
+    db.refresh(teacher)
+    teacher_headers = {"Authorization": f"Bearer {create_access_token(str(teacher.id))}"}
+
+    # 教师不可上传全平台教材正文
+    upload_forbidden = client.post(
+        "/api/v1/knowledge/documents",
+        headers=teacher_headers,
+        data={"source_title": "非法教材", "course_id": str(course_id)},
+        files={"file": ("chapter.md", "# 越权测试\n内容", "text/markdown")},
+    )
+    assert upload_forbidden.status_code == 403
+
+    # 管理员上传教材后，教师可读但不可重建索引、自动校准、刷新 OCR 或删除
+    upload = client.post(
+        "/api/v1/knowledge/documents",
+        headers=admin_headers,
+        data={"source_title": "正式教材", "course_id": str(course_id), "chapter_id": str(chapter_id)},
+        files={"file": ("chapter.md", "# 正式教材\n马克思主义中国化时代化。", "text/markdown")},
+    )
+    assert upload.status_code == 201
+    doc_id = upload.json()["data"]["id"]
+    assert client.get("/api/v1/knowledge/documents", headers=teacher_headers).status_code == 200
+    assert client.post(f"/api/v1/knowledge/documents/{doc_id}/reindex", headers=teacher_headers).status_code == 403
+    assert client.post(f"/api/v1/knowledge/documents/{doc_id}/auto-calibrate", headers=teacher_headers).status_code == 403
+    assert client.post(f"/api/v1/knowledge/documents/{doc_id}/refresh-ocr", headers=teacher_headers).status_code == 403
+    assert client.delete(f"/api/v1/knowledge/documents/{doc_id}", headers=teacher_headers).status_code == 403
 
 
 def test_rejects_unsupported_file_type(client: TestClient, db: Session) -> None:

@@ -272,6 +272,18 @@ class MaterialCenterService:
             TeachingClassTeacher.user_id == user.id
         )).all())
 
+    def ensure_document_write_access(self, document: KnowledgeDocument, user: User) -> None:
+        """校验文档写操作权限：教材正文与中央材料仅管理员可修改/删除，地方材料仅创建者或管理员可操作。"""
+        if user.role == "admin":
+            return
+        if document.material_type == "central":
+            raise HTTPException(status_code=403, detail="只有管理员可以修改或删除中央材料")
+        if document.material_type == "local":
+            if document.owner_user_id == user.id:
+                return
+            raise HTTPException(status_code=403, detail="无权修改或删除其他教师的地方材料")
+        raise HTTPException(status_code=403, detail="只有管理员可以管理全平台教材正文")
+
     def ensure_document_access(self, document: KnowledgeDocument, user: User) -> None:
         """保护原文与分页接口，避免通过猜测 ID 越过资料发布和教学班边界。"""
         if user.role == "admin" or document.material_type == "textbook":

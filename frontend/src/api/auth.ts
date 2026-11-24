@@ -12,13 +12,14 @@ export const authApi = {
     http.post<ApiResponse<User>>('/auth/register', payload),
   login: (payload: { username: string; password: string }) =>
     http.post<ApiResponse<TokenData>>('/auth/login', payload),
+  logout: () => http.post<ApiResponse<Record<string, string>>>('/auth/logout'),
   me: () => http.get<ApiResponse<User>>('/auth/me'),
   requestPasswordReset: (identifier: string) =>
     http.post<ApiResponse<{ next_step: 'email' | 'verify_email' | 'admin' }>>('/auth/password-reset/request', { identifier }),
   confirmPasswordReset: (payload: { token?: string; identifier?: string; code?: string; new_password: string }) =>
     http.post<ApiResponse<Record<string, string>>>('/auth/password-reset/confirm', payload),
-  changePassword: (new_password: string) =>
-    http.post<ApiResponse<Record<string, string>>>('/auth/password/change', { new_password }),
+  changePassword: (current_password: string, new_password: string) =>
+    http.post<ApiResponse<Record<string, string>>>('/auth/password/change', { current_password, new_password }),
   requestEmailVerification: (email: string) =>
     http.post<ApiResponse<Record<string, string>>>('/auth/email/verification/request', { email }),
   confirmEmailVerification: (email: string, code: string) =>

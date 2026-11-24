@@ -221,14 +221,64 @@ def test_admin_temporary_password_forces_change_and_invalidates_session(client: 
     result = client.post(f"/api/v1/auth/users/{user.id}/temporary-password", headers=admin_headers)
     assert result.status_code == 200
     temporary = result.json()["data"]["temporary_password"]
-    assert temporary == "12345678"
+    assert temporary != "12345678"
+    assert len(temporary) >= 12
     login = client.post("/api/v1/auth/login", json={"username": "temp-user", "password": temporary})
     assert login.status_code == 200
     token = login.json()["data"]["access_token"]
     assert login.json()["data"]["user"]["must_change_password"] is True
-    changed = client.post("/api/v1/auth/password/change", headers={"Authorization": f"Bearer {token}"}, json={"new_password": "final-pass-456"})
+    # 未修改临时密码前，必须拦截业务接口但放行 /auth/me 与 /auth/password/change
+    assert client.get("/api/v1/courses", headers={"Authorization": f"Bearer {token}"}).status_code == 403
+    assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+    # 改密必须校验当前密码且不能与旧密码相同
+    assert client.post(
+        "/api/v1/auth/password/change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "wrong-temp-pass", "new_password": "final-pass-456"},
+    ).status_code == 400
+    assert client.post(
+        "/api/v1/auth/password/change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": temporary, "new_password": temporary},
+    ).status_code == 400
+    changed = client.post(
+        "/api/v1/auth/password/change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": temporary, "new_password": "final-pass-456"},
+    )
     assert changed.status_code == 200
     assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+
+def test_logout_revokes_token_and_login_rate_limit_blocks_brute_force(client: TestClient, db: Session) -> None:
+    user = User(username="sec-user", identity_no="S-SEC-01", password_hash=hash_password("secure-pass-123"), role="student", approval_status="approved")
+    db.add(user); db.commit()
+    login = client.post("/api/v1/auth/login", json={"username": "sec-user", "password": "secure-pass-123"})
+    assert login.status_code == 200
+    headers = {"Authorization": f"Bearer {login.json()['data']['access_token']}"}
+    assert client.post("/api/v1/auth/logout", headers=headers).status_code == 200
+    assert client.get("/api/v1/auth/me", headers=headers).status_code == 401
+
+    for _ in range(10):
+        resp = client.post("/api/v1/auth/login", json={"username": "sec-user", "password": "wrong-password"})
+        assert resp.status_code == 401
+    blocked = client.post("/api/v1/auth/login", json={"username": "sec-user", "password": "secure-pass-123"})
+    assert blocked.status_code == 429
+
+
+def test_production_security_validation_rejects_weak_secrets() -> None:
+    from app.core.config import Settings
+
+    weak_jwt = Settings(app_env="production", jwt_secret_key="please-change-this-development-secret", ai_config_encryption_key="a-valid-encryption-key-1234")
+    with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
+        weak_jwt.validate_production_security()
+
+    missing_enc = Settings(app_env="production", jwt_secret_key="x" * 40, ai_config_encryption_key=None)
+    with pytest.raises(RuntimeError, match="AI_CONFIG_ENCRYPTION_KEY"):
+        missing_enc.validate_production_security()
+
+    strong = Settings(app_env="production", jwt_secret_key="x" * 40, ai_config_encryption_key="y" * 24)
+    strong.validate_production_security()
 
 
 def test_unverified_email_login_is_blocked_and_reset_request_is_visible_to_admin(

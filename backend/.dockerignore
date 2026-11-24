@@ -5,3 +5,6 @@ tests
 __pycache__
 *.pyc
 .pytest_cache
+presentation_runtime/vendor
+presentation_runtime/node_modules
+presentation_runtime/fonts

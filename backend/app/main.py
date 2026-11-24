@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    settings.validate_production_security()
     init_db()
     recovered = recover_material_batches(engine)
     if recovered:

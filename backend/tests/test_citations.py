@@ -117,9 +117,18 @@ def test_citation_only_document_exposes_only_requested_page(client: TestClient, 
     assert cited_file.headers["content-type"].startswith("application/pdf")
     assert client.get(f"/api/v1/knowledge/documents/{document.id}/file", headers=_headers(teacher)).status_code == 200
 
-    excluded = client.put(
+    admin = User(username="cite_admin", password_hash=hash_password("pass-123456"), role="admin", approval_status="approved")
+    db.add(admin)
+    db.commit()
+
+    assert client.put(
         f"/api/v1/knowledge/documents/{document.id}/pages/1/text-blocks/p1-b0",
         headers=_headers(teacher), json={"excluded": True},
+    ).status_code == 403
+
+    excluded = client.put(
+        f"/api/v1/knowledge/documents/{document.id}/pages/1/text-blocks/p1-b0",
+        headers=_headers(admin), json={"excluded": True},
     )
     assert excluded.status_code == 200, excluded.text
     assert excluded.json()["data"]["text"] == ""
@@ -127,7 +136,7 @@ def test_citation_only_document_exposes_only_requested_page(client: TestClient, 
 
     restored = client.put(
         f"/api/v1/knowledge/documents/{document.id}/pages/1/text-blocks/p1-b0",
-        headers=_headers(teacher), json={"excluded": False},
+        headers=_headers(admin), json={"excluded": False},
     )
     assert restored.status_code == 200, restored.text
     assert restored.json()["data"]["text"] == page_text
