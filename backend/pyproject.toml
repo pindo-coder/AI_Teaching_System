@@ -1,0 +1,8 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+exclude = ["presentation_runtime/vendor", "alembic/versions"]
+
+[tool.ruff.lint]
+# 先强制阻断语法错误、未定义名称与高危逻辑缺陷，后续逐步收紧样式规则。
+select = ["E9", "F63", "F7", "F82"]

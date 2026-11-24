@@ -74,8 +74,8 @@ def stream_ai_summary(
                 yield f"event: chunk\ndata: {json.dumps({'text': chunk}, ensure_ascii=False)}\n\n"
             yield "event: sources\ndata: []\n\n"
             yield "event: done\ndata: {}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'message': str(exc)}, ensure_ascii=False)}\n\n"
+        except Exception:
+            yield f"event: error\ndata: {json.dumps({'message': 'AI 时政总结暂时不可用，请稍后重试'}, ensure_ascii=False)}\n\n"
         finally:
             close = getattr(chunks, "close", None)
             if callable(close):

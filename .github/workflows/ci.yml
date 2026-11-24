@@ -1,0 +1,60 @@
+name: Full CI quality gate
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend lint & tests (Python 3.12)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AI_MOCK_MODE: "true"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: "."
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-dev.txt
+      - name: Install backend dev dependencies
+        run: python -m pip install -r backend/requirements-dev.txt
+      - name: Run Ruff static checks
+        working-directory: backend
+        run: ruff check app tests
+      - name: Run backend test suite
+        working-directory: backend
+        # 原生 PPT LibreOffice 渲染集成测试由 presentation-workflow.yml 专项覆盖。
+        run: >-
+          python -m pytest -q
+          --ignore=tests/test_ppt_workflow.py
+          --ignore=tests/test_ppt_process.py
+          --ignore=tests/test_agents.py
+
+  frontend:
+    name: Frontend tests, type-check & build (Node 24)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - run: corepack enable
+      - name: Install, test, type-check, and build
+        working-directory: frontend
+        run: |
+          corepack pnpm install --frozen-lockfile
+          corepack pnpm test
+          corepack pnpm type-check
+          corepack pnpm build

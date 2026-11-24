@@ -6,7 +6,6 @@ from urllib.parse import quote
 import anyio
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import require_roles
@@ -41,6 +40,7 @@ from app.services.lesson_publication_service import LessonPublicationService
 
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+sleep = asyncio.sleep
 
 
 @router.get("/capabilities", response_model=ApiResponse[AgentCapabilities])
@@ -347,7 +347,7 @@ def run_events(
             if monotonic() - started_at >= max_stream_seconds:
                 yield f"event: error\ndata: {json.dumps({'message': '进度订阅已超时，请刷新任务状态'}, ensure_ascii=False)}\n\n"
                 return
-            await asyncio.sleep(0.5)
+            await sleep(0.5)
 
     return StreamingResponse(
         event_stream(),

@@ -9,6 +9,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     teachingClasses: [] as TeachingClass[],
     loading: false,
     initialized: false,
+    error: '' as string,
   }),
   getters: {
     currentCourse: (state) => state.dashboard?.current_course || null,
@@ -23,6 +24,7 @@ export const useWorkspaceStore = defineStore('workspace', {
     async initialize(force = false) {
       if (this.loading || (this.initialized && !force)) return
       this.loading = true
+      this.error = ''
       try {
         const [dashboardResult, classResult] = await Promise.allSettled([
           learningApi.dashboard(),
@@ -30,7 +32,11 @@ export const useWorkspaceStore = defineStore('workspace', {
         ])
         if (dashboardResult.status === 'fulfilled') this.dashboard = dashboardResult.value.data.data
         if (classResult.status === 'fulfilled') this.teachingClasses = classResult.value.data.data
-        this.initialized = true
+        if (dashboardResult.status === 'fulfilled' || classResult.status === 'fulfilled') {
+          this.initialized = true
+        } else {
+          this.error = '工作台上下文加载失败，请稍后重试'
+        }
       } finally {
         this.loading = false
       }
@@ -39,6 +45,7 @@ export const useWorkspaceStore = defineStore('workspace', {
       this.dashboard = null
       this.teachingClasses = []
       this.initialized = false
+      this.error = ''
     },
   },
 })

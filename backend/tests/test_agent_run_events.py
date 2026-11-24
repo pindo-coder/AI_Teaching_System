@@ -34,7 +34,7 @@ def test_slow_model_wait_sends_heartbeats_without_fabricating_progress(db, monke
     user, run = running_task(db)
     clock = [0.0]
     monkeypatch.setattr(agents, "monotonic", lambda: clock[0])
-    def advance(seconds):
+    async def advance(seconds):
         clock[0] += seconds
         if clock[0] >= 22:
             with Session(db.get_bind()) as writer:
@@ -54,7 +54,7 @@ def test_slow_model_wait_sends_heartbeats_without_fabricating_progress(db, monke
 def test_committed_progress_changes_stream_without_browser_reload(db, monkeypatch):
     user, run = running_task(db)
     sleeps = [0]
-    def advance(_seconds):
+    async def advance(_seconds):
         sleeps[0] += 1
         with Session(db.get_bind()) as writer:
             current = writer.get(AgentRun, run.id)

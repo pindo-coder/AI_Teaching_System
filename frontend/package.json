@@ -8,6 +8,7 @@
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview",
     "type-check": "vue-tsc -b",
+    "test": "pnpm test:workspace-ai && pnpm test:artifact-progress && pnpm test:agent-progress && pnpm test:lesson-publication",
     "test:workspace-ai": "node --experimental-strip-types --test tests/workspaceAiRequests.test.mjs",
     "test:artifact-progress": "node --experimental-strip-types --test tests/lessonArtifactProgress.test.mjs",
     "test:agent-progress": "node --experimental-strip-types --test tests/agentRunMonitor.test.mjs tests/agentEventStream.test.mjs",

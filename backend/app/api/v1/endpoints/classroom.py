@@ -1,5 +1,3 @@
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -97,24 +95,32 @@ def _class_access(db: Session, user: User, class_id: int) -> None:
         raise HTTPException(status_code=403, detail="你无权访问该教学班讨论")
 
 
-def _thread_read(thread: DiscussionThread, author: User) -> DiscussionThreadRead:
+def _thread_read(thread: DiscussionThread, author: User | None) -> DiscussionThreadRead:
     return DiscussionThreadRead(
         id=thread.id, teaching_class_id=thread.teaching_class_id, course_id=thread.course_id,
         chapter_id=thread.chapter_id, activity_id=thread.activity_id, title=thread.title,
         content=thread.content, status=thread.status, is_pinned=thread.is_pinned,
         reply_count=thread.reply_count, last_replied_time=thread.last_replied_time,
         created_time=thread.created_time, updated_time=thread.updated_time,
-        author=DiscussionAuthor(id=author.id, name=author.username, role=author.role),
+        author=DiscussionAuthor(
+            id=author.id if author else 0,
+            name=author.username if author else "已注销用户",
+            role=author.role if author else "student",
+        ),
     )
 
 
-def _reply_read(reply: DiscussionReply, author: User) -> DiscussionReplyRead:
+def _reply_read(reply: DiscussionReply, author: User | None) -> DiscussionReplyRead:
     return DiscussionReplyRead(
         id=reply.id, thread_id=reply.thread_id, parent_reply_id=reply.parent_reply_id,
         content="该回贴已删除" if reply.status == "deleted" else reply.content,
         status=reply.status, created_time=reply.created_time,
         updated_time=reply.updated_time,
-        author=DiscussionAuthor(id=author.id, name=author.username, role=author.role),
+        author=DiscussionAuthor(
+            id=author.id if author else 0,
+            name=author.username if author else "已注销用户",
+            role=author.role if author else "student",
+        ),
     )
 
 

@@ -271,7 +271,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.agent-dock { position: sticky; top: 64px; z-index: 100; margin: 0 28px; color: #21334f; background: rgba(255, 255, 255, .96); border: 1px solid #dfe7f4; border-top: 0; border-radius: 0 0 18px 18px; box-shadow: 0 10px 28px rgba(32, 58, 104, .08); backdrop-filter: blur(16px); }
+.agent-dock { position: sticky; top: var(--topbar-height, 76px); z-index: 100; margin: 0 28px; color: #21334f; background: rgba(255, 255, 255, .96); border: 1px solid #dfe7f4; border-top: 0; border-radius: 0 0 18px 18px; box-shadow: 0 10px 28px rgba(32, 58, 104, .08); backdrop-filter: blur(16px); }
 .agent-dock.is-expanded { display: flex; max-height: calc(100vh - 64px); flex-direction: column; box-shadow: 0 18px 48px rgba(25, 49, 94, .18); }
 .agent-dock-bar { display: flex; min-height: 62px; align-items: center; gap: 18px; padding: 8px 16px; }
 .agent-dock-brand { display: inline-flex; min-width: 206px; align-items: center; gap: 10px; padding: 0; color: inherit; text-align: left; background: transparent; border: 0; cursor: pointer; }

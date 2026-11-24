@@ -3,6 +3,9 @@ import { useAuthStore } from '@/stores/auth'
 
 const router = createRouter({
   history: createWebHistory(),
+  scrollBehavior(_to, _from, savedPosition) {
+    return savedPosition || { top: 0 }
+  },
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     { path: '/register', name: 'register', component: () => import('@/views/RegisterView.vue'), meta: { public: true } },
@@ -67,7 +70,20 @@ router.beforeEach(async (to) => {
   if (auth.user?.role === 'teacher' && auth.user.approval_status !== 'approved' && to.name !== 'teacher-pending') return { name: 'teacher-pending' }
   if (to.name === 'teacher-pending' && auth.user?.approval_status === 'approved') return { name: 'dashboard' }
   if (to.meta.public && auth.isAuthenticated && auth.user && to.name !== 'verify-email') return { name: 'dashboard' }
-  if (to.meta.roles && (!auth.user || !(to.meta.roles as string[]).includes(auth.user.role))) return { name: 'dashboard' }
+  if (to.meta.roles && (!auth.user || !to.meta.roles.includes(auth.user.role))) return { name: 'dashboard' }
+})
+
+const CHUNK_RELOAD_KEY = 'app_chunk_reload_at'
+router.onError((error, to) => {
+  const message = error instanceof Error ? error.message : String(error || '')
+  if (!/Failed to fetch dynamically imported module|Importing a module script failed|Loading chunk/i.test(message)) {
+    return
+  }
+  const now = Date.now()
+  const last = Number(sessionStorage.getItem(CHUNK_RELOAD_KEY) || '0')
+  if (now - last < 15_000) return
+  sessionStorage.setItem(CHUNK_RELOAD_KEY, String(now))
+  window.location.assign(to?.fullPath || window.location.href)
 })
 
 export default router

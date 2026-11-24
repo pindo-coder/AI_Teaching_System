@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.v1.router import router as api_v1_router
 from app.core.config import settings
-from app.core.logging import configure_logging, get_logger
+from app.core.logging import configure_logging, get_logger, request_id_context
 from app.db.init_db import init_db
 from app.db.session import engine
 from app.exceptions import register_exception_handlers
@@ -70,19 +70,22 @@ register_exception_handlers(app)
 async def request_context(request: Request, call_next):
     request_id = request.headers.get("X-Request-ID") or uuid4().hex
     request.state.request_id = request_id
+    token = request_id_context.set(request_id)
     started_at = perf_counter()
-    response = await call_next(request)
-    duration_ms = round((perf_counter() - started_at) * 1000, 2)
-    response.headers["X-Request-ID"] = request_id
-    logger.info(
-        "request method=%s path=%s status=%s duration_ms=%s request_id=%s",
-        request.method,
-        request.url.path,
-        response.status_code,
-        duration_ms,
-        request_id,
-    )
-    return response
+    try:
+        response = await call_next(request)
+        duration_ms = round((perf_counter() - started_at) * 1000, 2)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "request method=%s path=%s status=%s duration_ms=%s",
+            request.method,
+            request.url.path,
+            response.status_code,
+            duration_ms,
+        )
+        return response
+    finally:
+        request_id_context.reset(token)
 
 
 app.include_router(api_v1_router, prefix=settings.api_v1_prefix)

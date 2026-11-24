@@ -67,16 +67,16 @@ docker compose logs -f --tail=100
 
 Let's Encrypt 的 `shortlived` ACME profile 支持签发公网 IP 证书，有效期约 160
 小时，因此必须依赖 Caddy 持续运行和自动续期。它适合作为申请、备案正式域名前的
-试用方案。以当前服务器为例，在 `.env.production` 中配置：
+试用方案。以示例公网 IP `203.0.113.10` 为例，在 `.env.production` 中配置（请替换为实际服务器公网 IP）：
 
 ```env
-APP_SITE_ADDRESS=47.105.125.153
+APP_SITE_ADDRESS=203.0.113.10
 CADDYFILE_PATH=./deploy/Caddyfile.ip
 ```
 
-然后执行上面的 Compose 启动命令，并确保阿里云安全组和主机防火墙同时允许
+然后执行上面的 Compose 启动命令，并确保云服务器安全组和主机防火墙同时允许
 80/TCP、443/TCP；443/UDP 仅用于 HTTP/3，可选。证书首次签发后访问
-`https://47.105.125.153/`。不要手工删除 `caddy_data` volume，否则会丢失 ACME
+`https://203.0.113.10/`。不要手工删除 `caddy_data` volume，否则会丢失 ACME
 账户和现有证书。取得已备案域名后，应将地址换成正式域名，并恢复
 `CADDYFILE_PATH=./deploy/Caddyfile`，使用常规域名证书。
 
