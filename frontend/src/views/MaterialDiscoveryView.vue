@@ -1,11 +1,22 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Refresh, Search, Setting, Warning } from '@element-plus/icons-vue'
-import { knowledgeApi, type AuthoritySource, type CandidateDecisionSummary, type CandidateTopicGroup, type DiscoveryJob, type MaterialCandidate, type PolicyChange } from '@/api/knowledge'
+import { Refresh, Search, Setting, View, Warning } from '@element-plus/icons-vue'
+import {
+  knowledgeApi,
+  type AuthoritySource,
+  type AuthoritySourcePreview,
+  type CandidateDecisionSummary,
+  type CandidateTopicGroup,
+  type DiscoveryJob,
+  type DiscoveryRuntimeStatus,
+  type MaterialCandidate,
+  type MaterialSnapshot,
+  type PolicyChange,
+} from '@/api/knowledge'
 import { courseApi } from '@/api/courses'
-import type { Course } from '@/types'
+import type { CourseDetail } from '@/types'
 import UiCard from '@/components/ui/UiCard.vue'
 import UiPageHeader from '@/components/ui/UiPageHeader.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
@@ -15,26 +26,68 @@ import { formatBeijingDateTime } from '@/utils/time'
 const loading = ref(true)
 const route = useRoute()
 const running = ref(false)
+const publishing = ref(false)
 const sources = ref<AuthoritySource[]>([])
 const jobs = ref<DiscoveryJob[]>([])
 const candidates = ref<MaterialCandidate[]>([])
 const candidateSummary = ref<CandidateDecisionSummary>({ pending_review: 0, high_priority: 0, observed: 0, filtered: 0 })
+const runtimeStatus = ref<DiscoveryRuntimeStatus | null>(null)
 const topicGroups = ref<CandidateTopicGroup[]>([])
 const selectedCandidateIds = ref<number[]>([])
 const policyChanges = ref<PolicyChange[]>([])
-const courses = ref<Course[]>([])
+const courseDetails = ref<CourseDetail[]>([])
 const keyword = ref('')
+const candidateQuery = ref('')
+const candidateSourceFilter = ref<number | undefined>()
 const selectedSources = ref<number[]>([])
 const selectedCandidateId = ref<number | null>(null)
-const publishCourseId = ref<number | undefined>()
+
+// 完整发布元数据与教材/专题范围表单（自动回填系统推荐，管理员可随时补充修改）
+const publishForm = reactive({
+  source_title: '',
+  publisher: '',
+  published_date: '',
+  course_ids: [] as number[],
+  chapter_ids: [] as number[],
+  knowledge_tags: [] as string[],
+})
+
+// 完整正文快照按需加载
+const fullSnapshot = ref<MaterialSnapshot | null>(null)
+const fullTextExpanded = ref(false)
+const fullTextLoading = ref(false)
+
+// 来源试抓预览
+const previewVisible = ref(false)
+const previewLoading = ref(false)
+const previewTitle = ref('')
+const previewResult = ref<AuthoritySourcePreview | null>(null)
+
 const runVisible = ref(false)
 const sourceVisible = ref(false)
 const editingSourceId = ref<number | null>(null)
-const sourceForm = ref({ name: '', domain: '', source_level: 'A' as AuthoritySource['source_level'], adapter_type: 'html_list' as AuthoritySource['adapter_type'], entry_url: '', fetch_interval_minutes: 360, request_interval_seconds: 3, allow_full_text: true, allow_alert: true, is_enabled: true })
-const candidateFilters = new Set(['pending_review', 'published', 'rejected', 'observed', 'filtered'])
+const sourceForm = ref({
+  name: '',
+  domain: '',
+  source_level: 'A' as AuthoritySource['source_level'],
+  adapter_type: 'html_list' as AuthoritySource['adapter_type'],
+  entry_url: '',
+  fetch_interval_minutes: 1440,
+  request_interval_seconds: 3,
+  allow_full_text: true,
+  allow_alert: true,
+  is_enabled: true,
+})
+const candidateFilters = new Set(['pending_review', 'observed', 'filtered', 'published', 'rejected'])
 const requestedFilter = String(route.query.filter || '')
 const activeFilter = ref(candidateFilters.has(requestedFilter) ? requestedFilter : 'pending_review')
 const selectedCandidate = computed(() => candidates.value.find((item) => item.id === selectedCandidateId.value) || candidates.value[0] || null)
+const availableChapterGroups = computed(() => {
+  const chosenCourses = publishForm.course_ids.length
+    ? courseDetails.value.filter((course) => publishForm.course_ids.includes(course.id))
+    : courseDetails.value
+  return chosenCourses.filter((course) => course.chapters.length > 0)
+})
 const candidateAnalysisState = computed(() => {
   const candidate = selectedCandidate.value
   if (!candidate) return { label: '等待分析', status: 'neutral' as const, retry: true }
@@ -49,6 +102,49 @@ const candidateAnalysisState = computed(() => {
 const runningJob = computed(() => jobs.value.find((item) => ['queued', 'running'].includes(item.status)))
 let jobPollTimer: ReturnType<typeof setTimeout> | undefined
 
+function syncPublishForm(candidate: MaterialCandidate | null) {
+  fullSnapshot.value = null
+  fullTextExpanded.value = false
+  if (!candidate) {
+    publishForm.source_title = ''
+    publishForm.publisher = ''
+    publishForm.published_date = ''
+    publishForm.course_ids = []
+    publishForm.chapter_ids = []
+    publishForm.knowledge_tags = []
+    return
+  }
+  const source = sources.value.find((item) => item.id === candidate.source_registry_id)
+  publishForm.source_title = candidate.title || ''
+  publishForm.publisher = candidate.publisher || source?.name || ''
+  publishForm.published_date = candidate.published_date || ''
+  const validCourseIds = new Set(courseDetails.value.map((course) => course.id))
+  const validChapterIds = new Set(courseDetails.value.flatMap((course) => course.chapters.map((ch) => ch.id)))
+  const baseCourses = candidate.course_ids.length ? candidate.course_ids : (candidate.suggested_course_ids || [])
+  const baseChapters = candidate.chapter_ids.length ? candidate.chapter_ids : (candidate.suggested_chapter_ids || [])
+  publishForm.course_ids = baseCourses.filter((id) => validCourseIds.has(id))
+  publishForm.chapter_ids = baseChapters.filter((id) => validChapterIds.has(id))
+  publishForm.knowledge_tags = [...(candidate.knowledge_tags.length ? candidate.knowledge_tags : (candidate.suggested_knowledge_tags || []))]
+}
+
+function handlePublishCoursesChange(courseIds: number[]) {
+  if (!courseIds.length) return
+  const allowedChapterIds = new Set(
+    courseDetails.value
+      .filter((course) => courseIds.includes(course.id))
+      .flatMap((course) => course.chapters.map((chapter) => chapter.id)),
+  )
+  publishForm.chapter_ids = publishForm.chapter_ids.filter((id) => allowedChapterIds.has(id))
+}
+
+async function loadCourseDetails() {
+  const courseList = (await courseApi.list()).data.data
+  const details = await Promise.all(
+    courseList.map((course) => courseApi.detail(course.id).then((res) => res.data.data).catch(() => null)),
+  )
+  courseDetails.value = details.filter((item): item is CourseDetail => Boolean(item))
+}
+
 async function loadPolicyChanges(candidateId: number | null) {
   policyChanges.value = []
   if (!candidateId) return
@@ -57,21 +153,57 @@ async function loadPolicyChanges(candidateId: number | null) {
   } catch { /* 旧数据库尚未迁移时不阻断候选材料审核 */ }
 }
 
+async function toggleFullText() {
+  const candidate = selectedCandidate.value
+  if (!candidate) return
+  if (fullTextExpanded.value) {
+    fullTextExpanded.value = false
+    return
+  }
+  if (fullSnapshot.value && fullSnapshot.value.candidate_id === candidate.id) {
+    fullTextExpanded.value = true
+    return
+  }
+  fullTextLoading.value = true
+  try {
+    const snapshots = (await knowledgeApi.candidateSnapshots(candidate.id)).data.data
+    if (!snapshots.length) {
+      ElMessage.warning('该候选材料暂无完整正文快照')
+      return
+    }
+    fullSnapshot.value = snapshots[0]
+    fullTextExpanded.value = true
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '读取完整正文快照失败'))
+  } finally {
+    fullTextLoading.value = false
+  }
+}
+
 async function load() {
   loading.value = true
   try {
-    const [sourceResult, jobResult, candidateResult, summaryResult, groupResult, courseResult] = await Promise.all([
-      knowledgeApi.authoritySources(), knowledgeApi.discoveryJobs(30),
-      knowledgeApi.discoveryCandidates({ status: activeFilter.value, limit: 200 }),
-      knowledgeApi.candidateDecisionSummary(), knowledgeApi.candidateTopicGroups(), courseApi.list(),
+    const [sourceResult, jobResult, candidateResult, summaryResult, groupResult, runtimeResult] = await Promise.all([
+      knowledgeApi.authoritySources(),
+      knowledgeApi.discoveryJobs(30),
+      knowledgeApi.discoveryCandidates({
+        status: activeFilter.value,
+        source_registry_id: candidateSourceFilter.value,
+        q: candidateQuery.value.trim() || undefined,
+        limit: 200,
+      }),
+      knowledgeApi.candidateDecisionSummary(),
+      knowledgeApi.candidateTopicGroups(),
+      knowledgeApi.discoveryRuntimeStatus().catch(() => null),
+      courseDetails.value.length ? Promise.resolve() : loadCourseDetails(),
     ])
     sources.value = sourceResult.data.data
     jobs.value = jobResult.data.data
     candidates.value = candidateResult.data.data
     candidateSummary.value = summaryResult.data.data
     topicGroups.value = groupResult.data.data
+    if (runtimeResult) runtimeStatus.value = runtimeResult.data.data
     selectedCandidateIds.value = selectedCandidateIds.value.filter((id) => candidates.value.some((item) => item.id === id))
-    courses.value = courseResult.data.data
     if (!selectedSources.value.length) selectedSources.value = sources.value.filter((item) => item.is_enabled).map((item) => item.id)
     const requested = Number(route.query.candidate)
     if (!candidates.value.some((item) => item.id === selectedCandidateId.value)) {
@@ -79,6 +211,7 @@ async function load() {
         ? requested
         : (candidates.value[0]?.id || null)
     }
+    syncPublishForm(selectedCandidate.value)
     await loadPolicyChanges(selectedCandidateId.value)
     window.dispatchEvent(new Event('notifications-changed'))
   } catch (error: unknown) {
@@ -113,7 +246,6 @@ function scheduleJobPoll() {
     if (disposed) return
     const previousId = runningJob.value?.id
     try {
-      // 页面不可见时不发请求；只有任务运行中才以低频查询任务状态。
       if (document.visibilityState === 'visible') {
         jobs.value = (await knowledgeApi.discoveryJobs(30)).data.data
         if (disposed) return
@@ -153,12 +285,58 @@ async function saveSource() {
   finally { running.value = false }
 }
 
+async function previewSourceConfig(source?: AuthoritySource) {
+  previewTitle.value = source ? `${source.name}（${source.domain}）` : `${sourceForm.value.name || '未保存来源'}（${sourceForm.value.domain}）`
+  previewResult.value = null
+  previewVisible.value = true
+  previewLoading.value = true
+  try {
+    if (source) {
+      previewResult.value = (await knowledgeApi.previewAuthoritySource(source.id)).data.data
+    } else {
+      if (!sourceForm.value.domain.trim() || !sourceForm.value.entry_url.trim()) {
+        previewVisible.value = false
+        ElMessage.warning('请先填写白名单域名和栏目入口网址')
+        return
+      }
+      previewResult.value = (await knowledgeApi.previewDraftAuthoritySource({
+        domain: sourceForm.value.domain.trim(),
+        adapter_type: sourceForm.value.adapter_type,
+        entry_url: sourceForm.value.entry_url.trim(),
+        allow_full_text: sourceForm.value.allow_full_text,
+        fetch_sample_article: true,
+      })).data.data
+    }
+  } catch (error: unknown) {
+    previewResult.value = {
+      ok: false,
+      adapter: 'unknown',
+      discovered_count: 0,
+      sample_links: [],
+      sample_article: null,
+      error: getErrorMessage(error, '试抓请求失败'),
+    }
+  } finally {
+    previewLoading.value = false
+  }
+}
+
 async function toggleSource(source: AuthoritySource) {
   try {
     await knowledgeApi.updateAuthoritySource(source.id, { is_enabled: !source.is_enabled })
     ElMessage.success(source.is_enabled ? '来源已停用' : '来源已启用')
     await load()
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '来源状态更新失败')) }
+}
+
+async function deleteSource(source: AuthoritySource) {
+  await ElMessageBox.confirm(`确定删除权威来源“${source.name}”吗？若该来源下已有历史候选材料将禁止删除（可改为停用）。`, '删除权威来源', { type: 'warning' })
+  try {
+    await knowledgeApi.deleteAuthoritySource(source.id)
+    selectedSources.value = selectedSources.value.filter((id) => id !== source.id)
+    ElMessage.success('权威来源已删除')
+    await load()
+  } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '删除权威来源失败')) }
 }
 
 async function retryJob(job: DiscoveryJob) {
@@ -188,11 +366,18 @@ async function deleteJob(job: DiscoveryJob) {
 
 async function analyze() {
   if (!selectedCandidate.value) return
+  running.value = true
   try {
-    await knowledgeApi.analyzeDiscoveryCandidate(selectedCandidate.value.id)
-    ElMessage.success('已完成全教材关联和原文差异分析')
+    const updated = (await knowledgeApi.analyzeDiscoveryCandidate(selectedCandidate.value.id)).data.data
+    const statusText = candidateStatusLabel(updated.status)
+    ElMessage.success(`分析完成（当前状态：${statusText}）`)
+    if (candidateFilters.has(updated.status) && updated.status !== activeFilter.value) {
+      activeFilter.value = updated.status
+    }
+    selectedCandidateId.value = updated.id
     await load()
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '自动分析失败')) }
+  finally { running.value = false }
 }
 
 async function reviewChange(change: PolicyChange, action: 'confirm' | 'dismiss' | 'observe') {
@@ -217,14 +402,29 @@ async function syncChange(change: PolicyChange) {
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '知识库同步失败')) }
 }
 
-async function review(action: 'reject' | 'duplicate') {
+async function review(action: 'reject' | 'duplicate' | 'restore' | 'observe') {
   if (!selectedCandidate.value) return
-  const title = action === 'reject' ? '驳回候选材料' : '标记为重复材料'
-  await ElMessageBox.confirm(`确定要${title}“${selectedCandidate.value.title}”吗？`, title, { type: 'warning' })
-  await knowledgeApi.reviewDiscoveryCandidate(selectedCandidate.value.id, { action })
-  window.dispatchEvent(new Event('notifications-changed'))
-  ElMessage.success('审核状态已更新')
-  await load()
+  const labels: Record<typeof action, string> = {
+    reject: '驳回候选材料',
+    duplicate: '标记为重复材料',
+    restore: '移回待审核队列',
+    observe: '转入观察中',
+  }
+  if (action === 'reject' || action === 'duplicate') {
+    await ElMessageBox.confirm(`确定要${labels[action]}“${selectedCandidate.value.title}”吗？`, labels[action], { type: 'warning' })
+  }
+  try {
+    const res = await knowledgeApi.reviewDiscoveryCandidate(selectedCandidate.value.id, { action })
+    window.dispatchEvent(new Event('notifications-changed'))
+    ElMessage.success(res.data.message || '审核状态已更新')
+    if (action === 'restore') {
+      activeFilter.value = 'pending_review'
+      selectedCandidateId.value = res.data.data.id
+    }
+    await load()
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '状态更新失败'))
+  }
 }
 
 async function deleteCandidate() {
@@ -249,10 +449,19 @@ function selectAllCandidates(selected: boolean | string | number) {
   selectedCandidateIds.value = Boolean(selected) ? candidates.value.map((item) => item.id) : []
 }
 
-async function batchCandidates(action: 'reject' | 'observe' | 'delete') {
+async function batchCandidates(action: 'reject' | 'observe' | 'delete' | 'restore') {
   if (!selectedCandidateIds.value.length) return ElMessage.warning('请先选择候选材料')
-  const label = action === 'reject' ? '批量忽略' : action === 'observe' ? '批量加入观察' : '批量删除'
-  const detail = action === 'delete' ? '正文快照和差异证据也会永久删除。' : '这些材料将退出待决策列表。'
+  const label = {
+    reject: '批量忽略',
+    observe: '批量加入观察',
+    delete: '批量删除',
+    restore: '批量移回待审核',
+  }[action]
+  const detail = action === 'delete'
+    ? '正文快照和差异证据也会永久删除。'
+    : action === 'restore'
+      ? '这些材料将回到待审核队列且不再被自动过滤。'
+      : '这些材料将退出当前列表。'
   await ElMessageBox.confirm(`确定${label}所选 ${selectedCandidateIds.value.length} 条材料吗？${detail}`, label, { type: 'warning' })
   try {
     await knowledgeApi.batchDiscoveryCandidates({ candidate_ids: selectedCandidateIds.value, action })
@@ -260,6 +469,7 @@ async function batchCandidates(action: 'reject' | 'observe' | 'delete') {
     selectedCandidateId.value = null
     window.dispatchEvent(new Event('notifications-changed'))
     ElMessage.success(`${label}完成`)
+    if (action === 'restore') activeFilter.value = 'pending_review'
     await load()
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, `${label}失败`)) }
 }
@@ -292,23 +502,54 @@ function openTopicPrimary(group: CandidateTopicGroup) {
 }
 
 async function publish() {
-  if (!selectedCandidate.value || !publishCourseId.value) return ElMessage.warning('发布前请选择关联教材')
-  const course = courses.value.find((item) => item.id === publishCourseId.value)
-  await ElMessageBox.confirm(`确认将该材料发布到“${course?.name || '所选教材'}”的中央材料层吗？`, '确认发布', { type: 'warning' })
+  if (!selectedCandidate.value) return
+  const title = publishForm.source_title.trim()
+  const publisher = publishForm.publisher.trim()
+  const publishedDate = publishForm.published_date.trim()
+  if (!title) return ElMessage.warning('请填写发布标题')
+  if (!publisher) return ElMessage.warning('发布前请补全发布机构')
+  if (!publishedDate) return ElMessage.warning('发布前请补全发布日期')
+  if (!publishForm.course_ids.length && !publishForm.chapter_ids.length) {
+    return ElMessage.warning('发布前请至少选择一本关联教材或一个专题章节')
+  }
+  const courseNames = courseDetails.value
+    .filter((item) => publishForm.course_ids.includes(item.id))
+    .map((item) => item.name)
+    .join('、')
+  await ElMessageBox.confirm(
+    `确认将《${title}》发布到“${courseNames || '所选专题对应教材'}”（${publishForm.chapter_ids.length} 个专题章节）的中央材料层吗？`,
+    '确认发布',
+    { type: 'warning' },
+  )
+  publishing.value = true
   try {
     await knowledgeApi.reviewDiscoveryCandidate(selectedCandidate.value.id, {
-      action: 'publish', course_ids: [publishCourseId.value],
-      source_title: selectedCandidate.value.title, publisher: selectedCandidate.value.publisher || undefined,
-      published_date: selectedCandidate.value.published_date || undefined,
+      action: 'publish',
+      course_ids: publishForm.course_ids,
+      chapter_ids: publishForm.chapter_ids,
+      knowledge_tags: publishForm.knowledge_tags,
+      source_title: title,
+      publisher,
+      published_date: publishedDate,
     })
     window.dispatchEvent(new Event('notifications-changed'))
     ElMessage.success('候选材料已发布并进入中央知识库')
-    publishCourseId.value = undefined
     await load()
   } catch (error: unknown) { ElMessage.error(getErrorMessage(error, '材料发布失败')) }
+  finally { publishing.value = false }
 }
 
 function sourceLevelLabel(level: string) { return ({ A: 'A级·中央机关', B: 'B级·权威媒体', C: 'C级·地方来源', D: 'D级·线索来源' } as Record<string, string>)[level] || level }
+function candidateStatusLabel(status: string) {
+  return ({
+    pending_review: '待审核',
+    observed: '观察中',
+    filtered: '已过滤',
+    published: '已发布',
+    rejected: '已驳回',
+    duplicate: '重复',
+  } as Record<string, string>)[status] || status
+}
 function jobStatusLabel(status: string) { return ({ queued: '排队中', running: '运行中', completed: '已完成', failed: '执行失败', cancelled: '已停止' } as Record<string, string>)[status] || status }
 function jobTitle(job: DiscoveryJob) { return job.query_text || (job.trigger_type === 'scheduled' ? '每日权威资料巡检' : '全量来源巡检') }
 function jobSources(job: DiscoveryJob) { return job.source_ids.map((id) => sources.value.find((source) => source.id === id)?.name).filter(Boolean).join('、') || '已配置来源' }
@@ -344,7 +585,10 @@ onBeforeUnmount(() => {
   if (jobPollTimer) clearTimeout(jobPollTimer)
 })
 watch(runningJob, scheduleJobPoll)
-watch(selectedCandidateId, (value) => { void loadPolicyChanges(value) })
+watch(selectedCandidateId, (value) => {
+  syncPublishForm(selectedCandidate.value)
+  void loadPolicyChanges(value)
+})
 watch(() => route.query.filter, async (value) => {
   const nextFilter = String(value || '')
   if (candidateFilters.has(nextFilter) && nextFilter !== activeFilter.value) {
@@ -361,7 +605,7 @@ watch(() => route.hash, () => { void focusCandidatePool() })
     <UiPageHeader
       eyebrow="AUTHORITY DISCOVERY"
       title="资料动态"
-      description="先从白名单权威来源发现线索，再抓取快照、去重并交由管理员确认；未确认材料不会进入正式知识库。"
+      description="从白名单权威来源发现线索、试抓验证、抓取全文快照并交由管理员核验发布；未确认材料不会进入正式知识库。"
     >
       <template #actions>
         <el-button :icon="Refresh" @click="refresh">刷新状态</el-button>
@@ -376,21 +620,41 @@ watch(() => route.hash, () => { void focusCandidatePool() })
     </UiPageHeader>
 
     <section class="discovery-metrics">
-      <UiCard><span>启用来源</span><strong>{{ sources.filter(item => item.is_enabled).length }}</strong><small>仅白名单来源参与抓取</small></UiCard>
-      <UiCard><span>待人工决策</span><strong>{{ candidateSummary.pending_review }}</strong><small>其中 {{ candidateSummary.high_priority }} 条为高优先级</small></UiCard>
+      <UiCard><span>启用来源</span><strong>{{ sources.filter(item => item.is_enabled).length }}</strong><small>共 {{ sources.length }} 个白名单栏目</small></UiCard>
+      <UiCard><span>待人工决策</span><strong>{{ candidateSummary.pending_review }}</strong><small>高优 {{ candidateSummary.high_priority }} · 观察 {{ candidateSummary.observed }}</small></UiCard>
       <UiCard><span>后台任务</span><strong>{{ runningJob ? '运行中' : '空闲' }}</strong><small>{{ runningJob?.progress_stage || '可启动新的发现任务' }}</small></UiCard>
+      <UiCard>
+        <span>自动定时巡检</span>
+        <strong>{{ runtimeStatus?.scheduler_enabled ? '已开启' : '未开启' }}</strong>
+        <small>{{ runtimeStatus?.scheduler_enabled ? `每 ${Math.round((runtimeStatus.scheduler_poll_seconds || 300) / 60)} 分钟检查到期来源` : '当前仅支持手动启动（.env 可开启）' }}</small>
+      </UiCard>
     </section>
 
     <section class="discovery-grid">
       <UiCard>
         <template #title><div><p class="eyebrow">SOURCE REGISTRY</p><h2>权威来源白名单</h2></div></template>
-        <template #actions><el-button size="small" :icon="Setting" @click="editSource()">新增来源</el-button></template>
+        <template #actions><el-button size="small" :icon="Setting" @click="editSource()">新增栏目来源</el-button></template>
         <div class="source-list">
           <div v-for="source in sources" :key="source.id" class="source-item">
             <el-checkbox v-model="selectedSources" :value="source.id" :disabled="!source.is_enabled" />
-            <span><strong>{{ source.name }}</strong><small>{{ sourceLevelLabel(source.source_level) }} · {{ source.domain }}</small><small>最近抓取：{{ source.last_success_time ? formatBeijingDateTime(source.last_success_time) : '尚未抓取' }}</small></span>
+            <span>
+              <strong>{{ source.name }}</strong>
+              <small>{{ sourceLevelLabel(source.source_level) }} · {{ source.domain }} · {{ source.adapter_type }}</small>
+              <small :title="source.entry_url">{{ source.entry_url }}</small>
+              <small>最近抓取：{{ source.last_success_time ? formatBeijingDateTime(source.last_success_time) : '尚未抓取' }}</small>
+            </span>
             <StatusChip :label="source.is_enabled ? '启用' : '停用'" :status="source.is_enabled ? 'success' : 'neutral'" />
-            <el-dropdown trigger="click"><el-button text :icon="Setting" /><template #dropdown><el-dropdown-menu><el-dropdown-item @click="editSource(source)">编辑设置</el-dropdown-item><el-dropdown-item @click="toggleSource(source)">{{ source.is_enabled ? '停用来源' : '启用来源' }}</el-dropdown-item></el-dropdown-menu></template></el-dropdown>
+            <el-dropdown trigger="click">
+              <el-button text :icon="Setting" />
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item @click="previewSourceConfig(source)">试抓预览</el-dropdown-item>
+                  <el-dropdown-item @click="editSource(source)">编辑设置</el-dropdown-item>
+                  <el-dropdown-item @click="toggleSource(source)">{{ source.is_enabled ? '停用来源' : '启用来源' }}</el-dropdown-item>
+                  <el-dropdown-item divided @click="deleteSource(source)">删除来源</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
           </div>
         </div>
       </UiCard>
@@ -411,13 +675,30 @@ watch(() => route.hash, () => { void focusCandidatePool() })
       <template #title><div><p class="eyebrow">CANDIDATE MATERIALS</p><h2>候选材料池</h2></div></template>
       <template #actions>
         <el-radio-group v-model="activeFilter" size="small" @change="load">
-          <el-radio-button label="pending_review">待审核</el-radio-button>
-          <el-radio-button label="published">已发布</el-radio-button>
-          <el-radio-button label="rejected">已驳回</el-radio-button>
-          <el-radio-button label="observed">观察中</el-radio-button>
-          <el-radio-button label="filtered">已过滤</el-radio-button>
+          <el-radio-button value="pending_review">待审核 ({{ candidateSummary.pending_review }})</el-radio-button>
+          <el-radio-button value="observed">观察中 ({{ candidateSummary.observed }})</el-radio-button>
+          <el-radio-button value="filtered">已过滤 ({{ candidateSummary.filtered }})</el-radio-button>
+          <el-radio-button value="published">已发布</el-radio-button>
+          <el-radio-button value="rejected">已驳回</el-radio-button>
         </el-radio-group>
       </template>
+
+      <div class="candidate-filter-bar">
+        <el-input
+          v-model="candidateQuery"
+          :prefix-icon="Search"
+          clearable
+          size="small"
+          placeholder="按标题或发布机构检索当前候选池"
+          @keyup.enter="load"
+          @clear="load"
+        />
+        <el-select v-model="candidateSourceFilter" clearable size="small" placeholder="全部来源" @change="load">
+          <el-option v-for="source in sources" :key="source.id" :label="source.name" :value="source.id" />
+        </el-select>
+        <el-button size="small" @click="load">筛选</el-button>
+      </div>
+
       <section v-if="activeFilter === 'pending_review' && topicGroups.length" class="topic-groups" aria-label="同类材料议题包">
         <div class="topic-groups-heading"><div><p class="eyebrow">TOPIC GROUPS</p><h3>同类材料议题包</h3></div><span>{{ topicGroups.length }} 组可合并审核</span></div>
         <div class="topic-group-list">
@@ -431,30 +712,145 @@ watch(() => route.hash, () => { void focusCandidatePool() })
           </article>
         </div>
       </section>
-      <div v-if="activeFilter === 'pending_review'" class="batch-toolbar">
+
+      <div v-if="activeFilter !== 'published'" class="batch-toolbar">
         <el-checkbox
           :model-value="Boolean(candidates.length) && selectedCandidateIds.length === candidates.length"
           :indeterminate="selectedCandidateIds.length > 0 && selectedCandidateIds.length < candidates.length"
           @change="selectAllCandidates"
         >全选当前列表</el-checkbox>
         <span>已选择 {{ selectedCandidateIds.length }} 条</span>
-        <el-button size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('observe')">加入观察</el-button>
-        <el-button size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('reject')">批量忽略</el-button>
+        <el-button v-if="activeFilter !== 'pending_review'" size="small" type="success" plain :disabled="!selectedCandidateIds.length" @click="batchCandidates('restore')">移回待审核</el-button>
+        <el-button v-if="activeFilter === 'pending_review'" size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('observe')">加入观察</el-button>
+        <el-button v-if="activeFilter !== 'rejected'" size="small" :disabled="!selectedCandidateIds.length" @click="batchCandidates('reject')">批量忽略</el-button>
         <el-button size="small" type="danger" plain :disabled="!selectedCandidateIds.length" @click="batchCandidates('delete')">批量删除</el-button>
       </div>
+
       <div v-if="candidates.length" class="candidate-layout">
         <div class="candidate-list">
           <div v-for="item in candidates" :key="item.id" :class="['candidate-item', { active: selectedCandidate?.id === item.id }]" @click="selectedCandidateId = item.id">
-            <el-checkbox v-if="activeFilter === 'pending_review'" :model-value="selectedCandidateIds.includes(item.id)" @click.stop @change="toggleCandidate(item.id, $event)" />
-            <div class="candidate-copy"><div class="candidate-badges"><StatusChip :label="sourceLevelLabel(item.source_level)" :status="item.source_level === 'A' ? 'authority' : 'info'" /><StatusChip :label="`${importanceLabel(item.importance_level)} ${Math.round(item.importance_score * 100)}%`" :status="item.importance_level === 'high' ? 'danger' : item.importance_level === 'medium' ? 'warning' : 'neutral'" /></div><strong>{{ item.title }}</strong><span>{{ item.publisher || '来源待确认' }} · {{ item.published_date || '日期待确认' }}</span><span>抓取于 {{ formatDateTime(item.created_time) }}</span></div>
+            <el-checkbox v-if="activeFilter !== 'published'" :model-value="selectedCandidateIds.includes(item.id)" @click.stop @change="toggleCandidate(item.id, $event)" />
+            <div class="candidate-copy">
+              <div class="candidate-badges">
+                <StatusChip :label="sourceLevelLabel(item.source_level)" :status="item.source_level === 'A' ? 'authority' : 'info'" />
+                <StatusChip :label="`${importanceLabel(item.importance_level)} ${Math.round(item.importance_score * 100)}%`" :status="item.importance_level === 'high' ? 'danger' : item.importance_level === 'medium' ? 'warning' : 'neutral'" />
+              </div>
+              <strong>{{ item.title }}</strong>
+              <span>{{ item.publisher || '机构待补全' }} · {{ item.published_date || '日期待补全' }}</span>
+              <span>抓取于 {{ formatDateTime(item.created_time) }}</span>
+            </div>
           </div>
         </div>
         <div v-if="selectedCandidate" class="candidate-detail">
-          <div class="candidate-heading"><div><StatusChip label="正文快照" status="success" /><h3>{{ selectedCandidate.title }}</h3></div><div class="candidate-heading-actions"><a :href="selectedCandidate.source_url" target="_blank" rel="noreferrer">查看原文 ↗</a><el-button v-if="selectedCandidate.status !== 'published'" text type="danger" size="small" @click="deleteCandidate">删除候选</el-button></div></div>
-          <p class="candidate-preview">{{ selectedCandidate.content_preview || '暂无正文预览' }}</p>
+          <div class="candidate-heading">
+            <div>
+              <div class="candidate-badges">
+                <StatusChip :label="candidateStatusLabel(selectedCandidate.status)" :status="selectedCandidate.status === 'published' ? 'success' : selectedCandidate.status === 'pending_review' ? 'warning' : 'neutral'" />
+                <StatusChip label="正文快照" status="info" />
+              </div>
+              <h3>{{ selectedCandidate.title }}</h3>
+            </div>
+            <div class="candidate-heading-actions">
+              <el-button text size="small" :icon="View" :loading="fullTextLoading" @click="toggleFullText">
+                {{ fullTextExpanded ? '收起为摘要预览' : '查看完整正文' }}
+              </el-button>
+              <a :href="selectedCandidate.source_url" target="_blank" rel="noreferrer">查看原文 ↗</a>
+              <el-button v-if="selectedCandidate.status !== 'published'" text type="danger" size="small" @click="deleteCandidate">删除候选</el-button>
+            </div>
+          </div>
+          <div class="candidate-preview-wrap">
+            <p class="candidate-preview" :class="{ expanded: fullTextExpanded }">
+              {{ fullTextExpanded && fullSnapshot ? fullSnapshot.content : (selectedCandidate.content_preview || '暂无正文预览') }}
+            </p>
+            <small v-if="fullTextExpanded && fullSnapshot" class="snapshot-meta">
+              完整快照共 {{ fullSnapshot.content.length }} 字符 · 解析器 {{ fullSnapshot.parser_version }} · 抓取于 {{ formatDateTime(fullSnapshot.fetched_time) }}
+            </small>
+          </div>
           <dl class="candidate-meta"><div><dt>抓取时间</dt><dd>{{ formatDateTime(selectedCandidate.created_time) }}</dd></div><div><dt>来源等级</dt><dd>{{ sourceLevelLabel(selectedCandidate.source_level) }}</dd></div><div><dt>主题相关度</dt><dd>{{ selectedCandidate.relevance_score ? `${Math.round(selectedCandidate.relevance_score * 100)}%` : '全量巡检，未设单一主题' }}</dd></div><div><dt>教材关联度</dt><dd>{{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</dd></div><div><dt>正文质量</dt><dd>{{ Math.round((selectedCandidate.extraction_quality_score || 0) * 100) }}%</dd></div><div><dt>教学重要度</dt><dd>{{ importanceLabel(selectedCandidate.importance_level) }} · {{ Math.round((selectedCandidate.importance_score || 0) * 100) }}%</dd></div><div><dt>分析说明</dt><dd>{{ selectedCandidate.analysis_reason || selectedCandidate.importance_reason || '待补充' }}</dd></div></dl>
+
+          <section v-if="selectedCandidate.status !== 'published'" class="publish-panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">PUBLISH &amp; REVIEW</p>
+                <h4>核验元数据并发布到中央材料</h4>
+              </div>
+              <StatusChip
+                v-if="selectedCandidate.suggested_chapter_ids?.length"
+                :label="`已自动带入 ${selectedCandidate.suggested_chapter_ids.length} 个推荐专题`"
+                status="info"
+              />
+            </div>
+            <el-form label-position="top" size="small" class="publish-form">
+              <el-form-item label="发布标题（可修订）">
+                <el-input v-model="publishForm.source_title" maxlength="500" placeholder="填写正式入库的资料标题" />
+              </el-form-item>
+              <div class="publish-meta-grid">
+                <el-form-item label="发布机构（必填）">
+                  <el-input v-model="publishForm.publisher" maxlength="255" placeholder="例如：国务院 / 教育部 / 中国政府网" />
+                </el-form-item>
+                <el-form-item label="发布日期（必填）">
+                  <el-date-picker
+                    v-model="publishForm.published_date"
+                    type="date"
+                    value-format="YYYY-MM-DD"
+                    placeholder="补全原文发布日期"
+                    style="width: 100%"
+                  />
+                </el-form-item>
+              </div>
+              <div class="publish-meta-grid">
+                <el-form-item label="关联教材（支持多选）">
+                  <el-select
+                    v-model="publishForm.course_ids"
+                    multiple
+                    collapse-tags
+                    collapse-tags-tooltip
+                    placeholder="选择关联教材"
+                    style="width: 100%"
+                    @change="handlePublishCoursesChange"
+                  >
+                    <el-option v-for="course in courseDetails" :key="course.id" :label="course.name" :value="course.id" />
+                  </el-select>
+                </el-form-item>
+                <el-form-item label="关联专题章节（建议勾选以支持后续政策对比）">
+                  <el-select
+                    v-model="publishForm.chapter_ids"
+                    multiple
+                    filterable
+                    collapse-tags
+                    collapse-tags-tooltip
+                    placeholder="选择具体专题章节"
+                    style="width: 100%"
+                  >
+                    <el-option-group v-for="course in availableChapterGroups" :key="course.id" :label="course.name">
+                      <el-option v-for="chapter in course.chapters" :key="chapter.id" :label="chapter.title" :value="chapter.id" />
+                    </el-option-group>
+                  </el-select>
+                </el-form-item>
+              </div>
+              <el-form-item label="知识点标签（可选）">
+                <el-select
+                  v-model="publishForm.knowledge_tags"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  placeholder="输入关键词回车添加标签"
+                  style="width: 100%"
+                />
+              </el-form-item>
+            </el-form>
+            <div class="decision-area">
+              <el-button type="primary" :loading="publishing" @click="publish">确认发布到中央材料</el-button>
+              <el-button v-if="selectedCandidate.status !== 'pending_review'" type="success" plain @click="review('restore')">移回待审核</el-button>
+              <el-button v-if="selectedCandidate.status === 'pending_review'" @click="review('observe')">加入观察</el-button>
+              <el-button v-if="selectedCandidate.status !== 'rejected'" @click="review('reject')">驳回</el-button>
+              <el-button text type="warning" @click="review('duplicate')">标记重复</el-button>
+            </div>
+          </section>
+
           <section class="association-panel">
-            <div class="panel-heading"><div><p class="eyebrow">SCOPE & EVIDENCE</p><h4>教材关联与政策变化</h4></div><div class="analysis-actions"><StatusChip :label="candidateAnalysisState.label" :status="candidateAnalysisState.status" /><el-button size="small" :loading="running" @click="analyze">{{ candidateAnalysisState.retry ? '重试分析' : '重新分析' }}</el-button></div></div>
+            <div class="panel-heading"><div><p class="eyebrow">SCOPE &amp; EVIDENCE</p><h4>教材关联与政策变化</h4></div><div class="analysis-actions"><StatusChip :label="candidateAnalysisState.label" :status="candidateAnalysisState.status" /><el-button size="small" :loading="running" @click="analyze">{{ candidateAnalysisState.retry ? '重试分析' : '重新分析' }}</el-button></div></div>
             <div class="association-summary">
               <span>章节匹配置信度 {{ Math.round((selectedCandidate.association_confidence || 0) * 100) }}%</span>
               <span>{{ selectedCandidate.suggested_chapter_ids?.length || 0 }} 个专题</span>
@@ -475,16 +871,8 @@ watch(() => route.hash, () => { void focusCandidatePool() })
                 </div>
               </article>
             </div>
-            <div v-else class="empty-evidence">暂无可对照的变化证据；这不代表材料无效，请先核对建议教材范围。</div>
+            <div v-else class="empty-evidence">暂无可对照的变化证据；这不代表材料无效，请结合上方发布面板核对范围后发布。</div>
           </section>
-          <div v-if="selectedCandidate.status === 'pending_review'" class="decision-area">
-            <el-select v-model="publishCourseId" placeholder="选择关联教材后发布" clearable style="min-width: 260px">
-              <el-option v-for="course in courses" :key="course.id" :label="course.name" :value="course.id" />
-            </el-select>
-            <el-button type="primary" @click="publish">确认发布到中央材料</el-button>
-            <el-button @click="review('reject')">驳回</el-button>
-            <el-button text type="warning" @click="review('duplicate')">标记重复</el-button>
-          </div>
         </div>
       </div>
       <div v-else class="empty-line"><el-icon><Warning /></el-icon>当前筛选下没有候选材料</div>
@@ -492,34 +880,71 @@ watch(() => route.hash, () => { void focusCandidatePool() })
 
     <el-dialog v-model="runVisible" title="启动权威资料发现" width="min(92vw, 620px)">
       <el-form label-position="top">
-        <el-alert title="系统会读取来源文章详情页，提取正文后进行相关度和教材关联筛选；低相关材料不会进入待审核队列。任务转入后台后可以关闭页面。" type="info" :closable="false" show-icon />
-        <el-form-item label="检索主题"><el-input v-model="keyword" placeholder="例如：全过程人民民主 思政课 建设；留空表示每日权威资料巡检" /></el-form-item>
-        <el-form-item label="参与来源"><el-checkbox-group v-model="selectedSources"><el-checkbox v-for="source in sources.filter(item => item.is_enabled)" :key="source.id" :label="source.id">{{ source.name }}</el-checkbox></el-checkbox-group></el-form-item>
+        <el-alert title="系统会读取来源文章详情页，提取正文后进行相关度和教材关联筛选；低相关材料可在观察中/已过滤查看并随时手动发布。" type="info" :closable="false" show-icon />
+        <el-form-item label="检索主题"><el-input v-model="keyword" placeholder="例如：全过程人民民主 思政课 建设；留空表示全量权威巡检" /></el-form-item>
+        <el-form-item label="参与来源"><el-checkbox-group v-model="selectedSources"><el-checkbox v-for="source in sources.filter(item => item.is_enabled)" :key="source.id" :value="source.id">{{ source.name }}</el-checkbox></el-checkbox-group></el-form-item>
       </el-form>
       <template #footer><el-button @click="runVisible = false">取消</el-button><el-button type="primary" :loading="running" @click="runDiscovery">开始后台发现</el-button></template>
     </el-dialog>
 
-    <el-dialog v-model="sourceVisible" :title="editingSourceId ? '编辑权威来源' : '新增权威来源'" width="min(92vw, 680px)">
+    <el-dialog v-model="sourceVisible" :title="editingSourceId ? '编辑权威来源' : '新增权威栏目来源'" width="min(92vw, 680px)">
       <el-form label-position="top">
-        <div class="source-form-grid"><el-form-item label="来源名称"><el-input v-model="sourceForm.name" /></el-form-item><el-form-item label="白名单域名"><el-input v-model="sourceForm.domain" :disabled="Boolean(editingSourceId)" placeholder="例如 gov.cn" /></el-form-item></div>
-        <el-form-item label="栏目入口（必须为 HTTPS 且属于白名单域名）"><el-input v-model="sourceForm.entry_url" /></el-form-item>
+        <el-alert title="同一白名单域名允许配置多个不同栏目入口（如中国政府网政策库与要闻、教育部社科司与新闻发布）或单篇权威原文，按入口网址判重。" type="info" :closable="false" show-icon style="margin-bottom: 12px" />
+        <div class="source-form-grid"><el-form-item label="来源名称"><el-input v-model="sourceForm.name" placeholder="例如：教育部·社科司" /></el-form-item><el-form-item label="白名单域名"><el-input v-model="sourceForm.domain" :disabled="Boolean(editingSourceId)" placeholder="例如 moe.gov.cn" /></el-form-item></div>
+        <el-form-item label="栏目入口（必须为 HTTPS 且属于白名单域名）"><el-input v-model="sourceForm.entry_url" placeholder="https://www.moe.gov.cn/s78/A13/" /></el-form-item>
         <div class="source-form-grid"><el-form-item label="来源级别"><el-select v-model="sourceForm.source_level"><el-option v-for="level in ['A','B','C','D']" :key="level" :label="sourceLevelLabel(level)" :value="level" /></el-select></el-form-item><el-form-item label="适配器"><el-select v-model="sourceForm.adapter_type"><el-option label="HTML 列表页" value="html_list" /><el-option label="单篇权威原文" value="single_article" /><el-option label="RSS" value="rss" /><el-option label="Sitemap" value="sitemap" /></el-select></el-form-item></div>
         <div class="source-form-grid"><el-form-item label="检查周期（分钟）"><el-input-number v-model="sourceForm.fetch_interval_minutes" :min="5" :max="10080" /></el-form-item><el-form-item label="请求间隔（秒）"><el-input-number v-model="sourceForm.request_interval_seconds" :min="1" :max="60" /></el-form-item></div>
         <el-space wrap><el-checkbox v-model="sourceForm.allow_full_text">允许抓取全文</el-checkbox><el-checkbox v-model="sourceForm.allow_alert">允许生成提醒</el-checkbox><el-checkbox v-model="sourceForm.is_enabled">立即启用</el-checkbox></el-space>
       </el-form>
-      <template #footer><el-button @click="sourceVisible = false">取消</el-button><el-button type="primary" :loading="running" @click="saveSource">保存来源</el-button></template>
+      <template #footer>
+        <el-button @click="sourceVisible = false">取消</el-button>
+        <el-button :loading="previewLoading" @click="previewSourceConfig()">试抓预览</el-button>
+        <el-button type="primary" :loading="running" @click="saveSource">保存来源</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="previewVisible" :title="`试抓预览 · ${previewTitle}`" width="min(92vw, 760px)">
+      <div v-loading="previewLoading" class="preview-dialog-body">
+        <template v-if="previewResult">
+          <el-alert
+            :type="previewResult.ok ? 'success' : 'warning'"
+            :title="previewResult.ok ? `连接与正文解析正常（适配器：${previewResult.adapter}，发现 ${previewResult.discovered_count} 条链接）` : (previewResult.error || '试抓未通过')"
+            :closable="false"
+            show-icon
+          />
+          <div v-if="previewResult.sample_article" class="preview-article-card">
+            <strong>首篇正文试抓结果：{{ previewResult.sample_article.title }}</strong>
+            <div class="preview-article-meta">
+              <span>机构：{{ previewResult.sample_article.publisher || '未识别（发布时可手填）' }}</span>
+              <span>日期：{{ previewResult.sample_article.published_date || '未识别（发布时可手填）' }}</span>
+              <span>字数：{{ previewResult.sample_article.content_length }}</span>
+              <span>质量分：{{ Math.round(previewResult.sample_article.extraction_quality_score * 100) }}%</span>
+            </div>
+            <p>{{ previewResult.sample_article.content_preview }}</p>
+          </div>
+          <div v-if="previewResult.sample_links.length" class="preview-link-list">
+            <strong>前 {{ previewResult.sample_links.length }} 条解析链接</strong>
+            <ul>
+              <li v-for="link in previewResult.sample_links" :key="link.url">
+                <a :href="link.url" target="_blank" rel="noreferrer">{{ link.title }}</a>
+              </li>
+            </ul>
+          </div>
+        </template>
+      </div>
+      <template #footer><el-button @click="previewVisible = false">关闭</el-button></template>
     </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .discovery-page { display: grid; gap: var(--space-5); }
-.discovery-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+.discovery-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); }
 .discovery-metrics > * { display: grid; gap: var(--space-2); }
 .discovery-metrics span { color: var(--ink-600); }
-.discovery-metrics strong { color: var(--ink-900); font-size: 30px; }
+.discovery-metrics strong { color: var(--ink-900); font-size: 28px; }
 .discovery-metrics small { color: var(--ink-400); }
-.discovery-grid { display: grid; grid-template-columns: minmax(280px, .8fr) minmax(360px, 1.2fr); gap: var(--space-4); align-items: start; }
+.discovery-grid { display: grid; grid-template-columns: minmax(280px, .85fr) minmax(360px, 1.15fr); gap: var(--space-4); align-items: start; }
 .discovery-grid h2, .candidate-card h2 { margin: var(--space-1) 0 0; font-size: var(--fs-section); }
 .source-list, .job-list { display: grid; gap: var(--space-2); }
 .source-item, .job-item { display: flex; align-items: center; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-input); }
@@ -531,8 +956,9 @@ watch(() => route.hash, () => { void focusCandidatePool() })
 .job-steps { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
 .job-steps span { padding: 2px 7px; color: var(--ink-400); background: var(--surface-page); border-radius: 999px; font-size: 11px; }
 .job-steps span.active { color: var(--action-blue); background: var(--action-soft); }
-.source-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
+.source-form-grid, .publish-meta-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); }
 .empty-line { display: flex; justify-content: center; align-items: center; gap: var(--space-2); min-height: 100px; color: var(--ink-400); }
+.candidate-filter-bar { display: grid; grid-template-columns: minmax(220px, 1fr) 210px auto; gap: var(--space-2); margin-bottom: var(--space-3); }
 .topic-groups { display: grid; gap: var(--space-3); margin-bottom: var(--space-4); padding-bottom: var(--space-4); border-bottom: 1px solid var(--line); }
 .topic-groups-heading, .topic-group-item, .topic-group-actions { display: flex; align-items: center; gap: var(--space-3); }
 .topic-groups-heading { justify-content: space-between; }
@@ -548,7 +974,7 @@ watch(() => route.hash, () => { void focusCandidatePool() })
 .batch-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); padding: var(--space-3); color: var(--ink-500); background: var(--surface-page); border: 1px solid var(--line); border-radius: var(--radius-input); }
 .batch-toolbar > span { margin-right: auto; font-size: var(--fs-meta); }
 .candidate-layout { display: grid; grid-template-columns: minmax(250px, .7fr) minmax(0, 1.3fr); gap: var(--space-4); }
-.candidate-list { display: grid; gap: var(--space-2); max-height: 650px; overflow: auto; }
+.candidate-list { display: grid; gap: var(--space-2); max-height: 760px; overflow: auto; }
 .candidate-item { display: flex; align-items: start; gap: var(--space-2); width: 100%; padding: var(--space-3); color: var(--ink-900); background: transparent; border: 1px solid var(--line); border-radius: var(--radius-input); cursor: pointer; text-align: left; }
 .candidate-copy { display: grid; justify-items: start; min-width: 0; gap: var(--space-2); flex: 1; }
 .candidate-item:hover, .candidate-item.active { background: var(--action-soft); border-color: var(--action-line); }
@@ -557,15 +983,20 @@ watch(() => route.hash, () => { void focusCandidatePool() })
 .candidate-detail { display: grid; gap: var(--space-3); min-width: 0; }
 .candidate-heading { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); }
 .candidate-heading > div { display: grid; gap: var(--space-2); }
-.candidate-heading > .candidate-heading-actions { display: flex; align-items: center; gap: var(--space-3); }
+.candidate-heading > .candidate-heading-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .candidate-heading h3 { margin: 0; font-size: 21px; line-height: 1.5; }
 .candidate-heading a { color: var(--action-blue); white-space: nowrap; }
-.candidate-preview { max-height: 300px; margin: 0; padding: var(--space-4); overflow: auto; color: var(--ink-700); background: var(--surface-page); border-radius: var(--radius-input); line-height: 1.8; white-space: pre-wrap; }
+.candidate-preview-wrap { display: grid; gap: 6px; }
+.candidate-preview { max-height: 260px; margin: 0; padding: var(--space-4); overflow: auto; color: var(--ink-700); background: var(--surface-page); border-radius: var(--radius-input); line-height: 1.8; white-space: pre-wrap; }
+.candidate-preview.expanded { max-height: 540px; }
+.snapshot-meta { color: var(--ink-400); font-size: 12px; }
 .candidate-meta { display: grid; gap: 0; margin: 0; }
 .candidate-meta div { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: var(--space-2); padding: var(--space-2) 0; border-bottom: 1px solid var(--line); }
 .candidate-meta dt { color: var(--ink-400); }
 .candidate-meta dd { margin: 0; color: var(--ink-700); }
-.decision-area { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-top: var(--space-2); }
+.publish-panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--line); border-left: 3px solid var(--authority-red); border-radius: var(--radius-card); background: var(--surface-card); }
+.publish-form :deep(.el-form-item) { margin-bottom: 10px; }
+.decision-area { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); padding-top: var(--space-1); }
 .association-panel { display: grid; gap: var(--space-3); padding: var(--space-4); border: 1px solid var(--action-line); border-radius: var(--radius-card); background: color-mix(in srgb, var(--action-soft) 45%, white); }
 .panel-heading, .change-title { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .analysis-actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
@@ -587,6 +1018,13 @@ watch(() => route.hash, () => { void focusCandidatePool() })
 .reviewed-label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); color: var(--ink-400); font-size: var(--fs-meta); }
 .sync-state { color: var(--action-blue); }
 .empty-evidence { padding: var(--space-3); color: var(--ink-400); background: white; border-radius: var(--radius-input); }
+.preview-dialog-body { display: grid; gap: 14px; min-height: 120px; }
+.preview-article-card { display: grid; gap: 8px; padding: 12px 14px; background: var(--surface-page); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.preview-article-meta { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 12px; color: var(--ink-500); }
+.preview-article-card p { margin: 0; font-size: 13px; line-height: 1.7; color: var(--ink-700); white-space: pre-wrap; max-height: 220px; overflow: auto; }
+.preview-link-list ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 5px; font-size: 13px; }
+.preview-link-list a { color: var(--action-blue); }
+@media (max-width: 1100px) { .discovery-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 900px) { .discovery-grid, .candidate-layout { grid-template-columns: 1fr; } }
-@media (max-width: 767px) { .discovery-metrics, .source-form-grid { grid-template-columns: 1fr; } .candidate-heading, .topic-group-item { display: grid; } .topic-group-actions { justify-content: start; } .evidence-grid { grid-template-columns: 1fr; } }
+@media (max-width: 767px) { .discovery-metrics, .source-form-grid, .publish-meta-grid, .candidate-filter-bar { grid-template-columns: 1fr; } .candidate-heading, .topic-group-item { display: grid; } .topic-group-actions { justify-content: start; } .evidence-grid { grid-template-columns: 1fr; } }
 </style>

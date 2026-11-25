@@ -214,7 +214,11 @@ class GovCnAdapter(AuthoritySourceAdapter):
     content_markers = (
         "pages_content", "ucap-content", "article", "article-content", "content", "detail", "editor",
     )
-    detail_path_patterns = (r"^/zhengce/(?:content/)?20\d{4}/content_\d+\.htm$",)
+    detail_path_patterns = (
+        r"^/zhengce/(?:content/)?20\d{4}/content_\d+\.htm$",
+        r"^/yaowen/(?:liebiao/)?20\d{4}/content_\d+\.htm$",
+        r"^/lianbo/(?:[^/]+/)*20\d{4}/content_\d+\.htm$",
+    )
     default_publisher = "中国政府网"
 
 
@@ -225,7 +229,8 @@ class MoeGovCnAdapter(AuthoritySourceAdapter):
         "trs_editor", "trs_preappend", "article", "article-content", "content_body", "content",
     )
     detail_path_patterns = (
-        r"^/jyb_xwfb/gzdt_gzdt/(?:[^/]+/)+20\d{4}/t20\d{6}_\d+\.html$",
+        r"^/jyb_xwfb/(?:[^/]+/)+20\d{4}/t20\d{6}_\d+\.html$",
+        r"^/srcsite/A\d+/(?:[^/]+/)+20\d{4}/t20\d{6}_\d+\.html$",
     )
     default_publisher = "教育部"
 
@@ -236,7 +241,10 @@ class QstheoryCnAdapter(AuthoritySourceAdapter):
     content_markers = (
         "article-content", "article_content", "article", "text", "content", "detail",
     )
-    detail_path_patterns = (r"^/20\d{6}/[0-9a-f]+/c\.html$",)
+    detail_path_patterns = (
+        r"^/20\d{6}/[0-9a-f]+/c\.html$",
+        r"^/dukan/qs/20\d{2}-\d{2}/\d{2}/c_\d+\.htm$",
+    )
     default_publisher = "求是网"
 
 

@@ -146,6 +146,52 @@ export interface CandidateDecisionSummary {
   filtered: number
 }
 
+export interface DiscoveryRuntimeStatus {
+  scheduler_enabled: boolean
+  scheduler_poll_seconds: number
+  reranker_enabled: boolean
+  nli_enabled: boolean
+  cooldown_minutes: number
+  daily_fetch_limit: number
+}
+
+export interface SourcePreviewLink {
+  url: string
+  title: string
+}
+
+export interface SourcePreviewArticle {
+  url: string
+  title: string | null
+  publisher: string | null
+  published_date: string | null
+  content_length: number
+  extraction_quality_score: number
+  content_preview: string
+  parser_version: string
+}
+
+export interface AuthoritySourcePreview {
+  ok: boolean
+  adapter: string
+  discovered_count: number
+  sample_links: SourcePreviewLink[]
+  sample_article: SourcePreviewArticle | null
+  error: string | null
+}
+
+export interface MaterialSnapshot {
+  id: number
+  candidate_id: number
+  fetched_url: string
+  content: string
+  content_hash: string
+  response_etag: string | null
+  last_modified: string | null
+  parser_version: string
+  fetched_time: string
+}
+
 export interface CandidateTopicMember {
   id: number
   title: string
@@ -397,22 +443,31 @@ export const knowledgeApi = {
     http.post<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/archive`),
   classifyMaterial: (id: number, payload: { material_type: 'central' | 'textbook' | 'local'; publisher?: string; published_date?: string; applicable_scope?: string }) =>
     http.put<ApiResponse<KnowledgeDocument>>(`/knowledge/materials/${id}/classification`, payload, { timeout: 120_000 }),
+  discoveryRuntimeStatus: () =>
+    http.get<ApiResponse<DiscoveryRuntimeStatus>>('/knowledge/discovery/runtime-status'),
   authoritySources: () => http.get<ApiResponse<AuthoritySource[]>>('/knowledge/discovery/sources'),
   createAuthoritySource: (payload: Partial<AuthoritySource>) => http.post<ApiResponse<AuthoritySource>>('/knowledge/discovery/sources', payload),
   updateAuthoritySource: (id: number, payload: Partial<AuthoritySource>) => http.patch<ApiResponse<AuthoritySource>>(`/knowledge/discovery/sources/${id}`, payload),
+  deleteAuthoritySource: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/knowledge/discovery/sources/${id}`),
+  previewDraftAuthoritySource: (payload: { domain: string; adapter_type: AuthoritySource['adapter_type']; entry_url: string; allow_full_text?: boolean; fetch_sample_article?: boolean }) =>
+    http.post<ApiResponse<AuthoritySourcePreview>>('/knowledge/discovery/sources/preview', payload, { timeout: 60_000 }),
+  previewAuthoritySource: (id: number) =>
+    http.post<ApiResponse<AuthoritySourcePreview>>(`/knowledge/discovery/sources/${id}/preview`, undefined, { timeout: 60_000 }),
   discoveryJobs: (limit = 30) => http.get<ApiResponse<DiscoveryJob[]>>('/knowledge/discovery/jobs', { params: { limit } }),
   createDiscoveryJob: (payload: { query_text?: string; keywords?: string[]; start_date?: string; end_date?: string; source_ids?: number[] }) =>
     http.post<ApiResponse<DiscoveryJob>>('/knowledge/discovery/jobs', payload),
   retryDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/retry`),
   cancelDiscoveryJob: (id: number) => http.post<ApiResponse<DiscoveryJob>>(`/knowledge/discovery/jobs/${id}/cancel`),
   deleteDiscoveryJob: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/knowledge/discovery/jobs/${id}`),
-  discoveryCandidates: (params?: { status?: string; source_level?: string; limit?: number }) =>
+  discoveryCandidates: (params?: { status?: string; source_level?: string; source_registry_id?: number; q?: string; limit?: number }) =>
     http.get<ApiResponse<MaterialCandidate[]>>('/knowledge/discovery/candidates', { params }),
+  candidateSnapshots: (id: number) =>
+    http.get<ApiResponse<MaterialSnapshot[]>>(`/knowledge/discovery/candidates/${id}/snapshots`),
   candidateDecisionSummary: () =>
     http.get<ApiResponse<CandidateDecisionSummary>>('/knowledge/discovery/candidates/summary'),
   candidateTopicGroups: () =>
     http.get<ApiResponse<CandidateTopicGroup[]>>('/knowledge/discovery/candidates/groups'),
-  batchDiscoveryCandidates: (payload: { candidate_ids: number[]; action: 'reject' | 'observe' | 'duplicate' | 'delete'; note?: string }) =>
+  batchDiscoveryCandidates: (payload: { candidate_ids: number[]; action: 'reject' | 'observe' | 'duplicate' | 'delete' | 'restore'; note?: string }) =>
     http.post<ApiResponse<{ updated: number }>>('/knowledge/discovery/candidates/batch', payload),
   deleteDiscoveryCandidate: (id: number) => http.delete<ApiResponse<{ id: number }>>(`/knowledge/discovery/candidates/${id}`),
   analyzeDiscoveryCandidate: (id: number) =>
@@ -425,6 +480,6 @@ export const knowledgeApi = {
     http.post<ApiResponse<PolicyChange>>(`/knowledge/discovery/changes/${id}/review`, payload),
   syncPolicyChange: (id: number) =>
     http.post<ApiResponse<PolicyChange>>(`/knowledge/discovery/changes/${id}/sync`),
-  reviewDiscoveryCandidate: (id: number, payload: { action: 'publish' | 'reject' | 'duplicate'; source_title?: string; publisher?: string; published_date?: string; applicable_scope?: string; course_ids?: number[]; chapter_ids?: number[]; knowledge_tags?: string[]; review_notes?: string }) =>
+  reviewDiscoveryCandidate: (id: number, payload: { action: 'publish' | 'reject' | 'duplicate' | 'restore' | 'observe'; source_title?: string; publisher?: string; published_date?: string; applicable_scope?: string; course_ids?: number[]; chapter_ids?: number[]; knowledge_tags?: string[]; review_notes?: string }) =>
     http.post<ApiResponse<MaterialCandidate>>(`/knowledge/discovery/candidates/${id}/review`, payload, { timeout: 180_000 }),
 }

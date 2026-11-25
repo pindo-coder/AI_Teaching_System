@@ -38,7 +38,8 @@ from app.models.material_scope import DocumentChapterScope, DocumentCourseScope
 from app.models.user import User
 from app.models.teaching_notification import TeachingNotification
 from app.schemas.authority_discovery import (
-    AuthoritySourceCreate, AuthoritySourceUpdate, CandidateBatchAction, CandidateReview, DiscoveryJobCreate,
+    AuthoritySourceCreate, AuthoritySourcePreviewRequest, AuthoritySourceUpdate,
+    CandidateBatchAction, CandidateReview, DiscoveryJobCreate,
 )
 from app.services.material_center_service import _assert_public_https
 from app.services.material_center_service import MaterialCenterService
@@ -264,7 +265,14 @@ def _fetch_source_bytes(
     forbidden.
     """
     _validate_source_url(url, source.domain)
-    headers = {"User-Agent": "AI-Teaching-Authority-Discovery/1.0"}
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36"
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
+    }
     current_url = url
     original_host = (urlparse(url).hostname or "").lower()
     downgraded = False
@@ -412,10 +420,17 @@ class AuthorityDiscoveryService:
         return self.ensure_default_sources(self.db)
 
     def create_source(self, payload: AuthoritySourceCreate) -> AuthoritySourceRegistry:
-        _validate_source_url(payload.entry_url, payload.domain)
-        if self.db.scalar(select(AuthoritySourceRegistry).where(AuthoritySourceRegistry.domain == payload.domain)):
-            raise HTTPException(status_code=409, detail="该白名单域名已经存在")
-        source = AuthoritySourceRegistry(**payload.model_dump())
+        domain = payload.domain.strip().lower().removeprefix("www.").rstrip(".")
+        entry_url = payload.entry_url.strip()
+        _validate_source_url(entry_url, domain)
+        wanted_canonical = _canonical_url(entry_url)
+        existing_sources = list(self.db.scalars(select(AuthoritySourceRegistry)).all())
+        if any(_canonical_url(item.entry_url) == wanted_canonical for item in existing_sources):
+            raise HTTPException(status_code=409, detail="该栏目入口网址已存在，无需重复添加")
+        data = payload.model_dump()
+        data["domain"] = domain
+        data["entry_url"] = entry_url
+        source = AuthoritySourceRegistry(**data)
         self.db.add(source)
         self.db.commit()
         self.db.refresh(source)
@@ -427,12 +442,137 @@ class AuthorityDiscoveryService:
             raise HTTPException(status_code=404, detail="权威来源不存在")
         values = payload.model_dump(exclude_unset=True)
         if "entry_url" in values:
-            _validate_source_url(values["entry_url"], source.domain)
+            entry_url = values["entry_url"].strip()
+            _validate_source_url(entry_url, source.domain)
+            wanted_canonical = _canonical_url(entry_url)
+            others = list(self.db.scalars(select(AuthoritySourceRegistry).where(
+                AuthoritySourceRegistry.id != source.id,
+            )).all())
+            if any(_canonical_url(item.entry_url) == wanted_canonical for item in others):
+                raise HTTPException(status_code=409, detail="该栏目入口网址已被其他来源使用")
+            values["entry_url"] = entry_url
         for key, value in values.items():
             setattr(source, key, value)
         self.db.commit()
         self.db.refresh(source)
         return source
+
+    def delete_source(self, source_id: int) -> int:
+        source = self.db.get(AuthoritySourceRegistry, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="权威来源不存在")
+        used_count = self.db.scalar(select(func.count(MaterialCandidate.id)).where(
+            MaterialCandidate.source_registry_id == source.id,
+        )) or 0
+        if used_count > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"该来源下已有 {used_count} 条候选材料记录，无法删除；如需停止抓取请将其停用",
+            )
+        self.db.delete(source)
+        self.db.commit()
+        return source_id
+
+    @staticmethod
+    def preview_source(payload: AuthoritySourcePreviewRequest) -> dict[str, object]:
+        domain = payload.domain.strip().lower().removeprefix("www.").rstrip(".")
+        entry_url = payload.entry_url.strip()
+        adapter = get_source_adapter(domain)
+        try:
+            _validate_source_url(entry_url, domain)
+        except HTTPException as exc:
+            return {
+                "ok": False,
+                "adapter": adapter.name,
+                "discovered_count": 0,
+                "sample_links": [],
+                "sample_article": None,
+                "error": str(exc.detail),
+            }
+        temp_source = AuthoritySourceRegistry(
+            name="预览测试",
+            domain=domain,
+            source_level="A",
+            adapter_type=payload.adapter_type,
+            entry_url=entry_url,
+            allow_full_text=payload.allow_full_text,
+            allow_alert=False,
+            is_enabled=True,
+        )
+        try:
+            links = _candidate_links(temp_source, [])
+        except HTTPException as exc:
+            return {
+                "ok": False,
+                "adapter": adapter.name,
+                "discovered_count": 0,
+                "sample_links": [],
+                "sample_article": None,
+                "error": str(exc.detail),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "adapter": adapter.name,
+                "discovered_count": 0,
+                "sample_links": [],
+                "sample_article": None,
+                "error": f"入口抓取失败：{str(exc)[:300]}",
+            }
+        sample_links = [{"url": href, "title": title or href} for href, title in links[:10]]
+        sample_article = None
+        article_error = None
+        if payload.fetch_sample_article and payload.allow_full_text and links:
+            sample_url = links[0][0]
+            try:
+                content, final_url, title, publisher, published_date, parser_version = _fetch_source_article(
+                    temp_source, sample_url,
+                )
+                sample_article = {
+                    "url": final_url,
+                    "title": title or links[0][1] or final_url,
+                    "publisher": publisher,
+                    "published_date": published_date,
+                    "content_length": len(re.sub(r"\s+", "", content)),
+                    "extraction_quality_score": _estimate_content_quality(content),
+                    "content_preview": content[:800],
+                    "parser_version": parser_version,
+                }
+            except HTTPException as exc:
+                article_error = f"列表抓取成功，但首篇详情提取失败：{exc.detail}"
+            except Exception as exc:
+                article_error = f"列表抓取成功，但首篇详情提取失败：{str(exc)[:240]}"
+        return {
+            "ok": bool(links) and article_error is None,
+            "adapter": adapter.name,
+            "discovered_count": len(links),
+            "sample_links": sample_links,
+            "sample_article": sample_article,
+            "error": article_error or (None if links else "未在入口页解析出符合当前适配器规则的文章链接"),
+        }
+
+    def preview_existing_source(self, source_id: int) -> dict[str, object]:
+        source = self.db.get(AuthoritySourceRegistry, source_id)
+        if source is None:
+            raise HTTPException(status_code=404, detail="权威来源不存在")
+        return self.preview_source(AuthoritySourcePreviewRequest(
+            domain=source.domain,
+            adapter_type=source.adapter_type,  # type: ignore[arg-type]
+            entry_url=source.entry_url,
+            allow_full_text=source.allow_full_text,
+            fetch_sample_article=True,
+        ))
+
+    @staticmethod
+    def runtime_status() -> dict[str, object]:
+        return {
+            "scheduler_enabled": bool(settings.authority_discovery_scheduler_enabled),
+            "scheduler_poll_seconds": int(settings.authority_discovery_scheduler_poll_seconds),
+            "reranker_enabled": bool(settings.authority_matching_reranker_enabled),
+            "nli_enabled": bool(settings.authority_matching_nli_enabled),
+            "cooldown_minutes": int(settings.authority_discovery_cooldown_minutes),
+            "daily_fetch_limit": int(settings.authority_discovery_daily_fetch_limit),
+        }
 
     def create_job(self, user: User, payload: DiscoveryJobCreate, trigger_type: str = "manual") -> DiscoveryJob:
         if payload.start_date and payload.end_date and payload.start_date > payload.end_date:
@@ -525,6 +665,8 @@ class AuthorityDiscoveryService:
         relevance_retention = float(settings.authority_matching_candidate_relevance_score)
         low_association = list(self.db.scalars(select(MaterialCandidate).where(
             MaterialCandidate.status == "pending_review",
+            # 管理员已显式移回待审核的条目不再被自动归一化踢回观察/过滤区。
+            MaterialCandidate.reviewed_by.is_(None),
             or_(
                 MaterialCandidate.association_confidence < threshold,
                 and_(
@@ -559,13 +701,29 @@ class AuthorityDiscoveryService:
             self.db.commit()
         return len(low_association)
 
-    def list_candidates(self, *, status: str | None = None, source_level: str | None = None, limit: int = 100) -> list[MaterialCandidate]:
+    def list_candidates(
+        self,
+        *,
+        status: str | None = None,
+        source_level: str | None = None,
+        source_registry_id: int | None = None,
+        q: str | None = None,
+        limit: int = 100,
+    ) -> list[MaterialCandidate]:
         self._normalize_pending_candidates()
         query = select(MaterialCandidate).order_by(MaterialCandidate.importance_score.desc(), MaterialCandidate.created_time.desc())
         if status:
             query = query.where(MaterialCandidate.status == status)
         if source_level:
             query = query.where(MaterialCandidate.source_level == source_level)
+        if source_registry_id:
+            query = query.where(MaterialCandidate.source_registry_id == source_registry_id)
+        if q and q.strip():
+            pattern = f"%{q.strip()}%"
+            query = query.where(or_(
+                MaterialCandidate.title.ilike(pattern),
+                MaterialCandidate.publisher.ilike(pattern),
+            ))
         return list(self.db.scalars(query.limit(limit)).all())
 
     def candidate_decision_summary(self) -> dict[str, int]:
@@ -654,19 +812,28 @@ class AuthorityDiscoveryService:
         )).all())
         if len(candidates) != len(candidate_ids):
             raise HTTPException(status_code=400, detail="批量操作包含不存在的候选材料")
-        if payload.action in {"reject", "observe", "duplicate"}:
-            invalid = [item for item in candidates if item.status not in {"pending_review", "fetched", "analyzed"}]
+        if payload.action in {"reject", "observe", "duplicate", "restore"}:
+            invalid = [
+                item for item in candidates
+                if item.status == "published" or item.document_id is not None
+            ]
             if invalid:
-                raise HTTPException(status_code=409, detail="批量审核只适用于尚未处理的候选材料")
+                raise HTTPException(status_code=409, detail="批量操作只适用于尚未发布的候选材料")
             now = _now()
+            status_map = {
+                "reject": "rejected",
+                "observe": "observed",
+                "duplicate": "duplicate",
+                "restore": "pending_review",
+            }
             for candidate in candidates:
-                candidate.status = {
-                    "reject": "rejected", "observe": "observed", "duplicate": "duplicate",
-                }[payload.action]
+                candidate.status = status_map[payload.action]
                 candidate.reviewed_by = user.id
                 candidate.reviewed_time = now
-                candidate.review_notes = payload.note
-                NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
+                if payload.note:
+                    candidate.review_notes = payload.note
+                if payload.action != "restore":
+                    NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
             self.db.commit()
             return len(candidates)
         if any(item.status == "published" or item.document_id is not None for item in candidates):
@@ -710,11 +877,25 @@ class AuthorityDiscoveryService:
 
     def review_candidate(self, candidate_id: int, user: User, payload: CandidateReview) -> MaterialCandidate:
         candidate = self.require_candidate(candidate_id)
-        if candidate.status not in {"pending_review", "fetched", "analyzed"}:
+        if candidate.status == "published" or candidate.document_id is not None:
+            raise HTTPException(status_code=409, detail="该候选材料已正式发布，不能重复审核")
+        if candidate.status not in {"pending_review", "fetched", "analyzed", "observed", "filtered", "rejected", "duplicate"}:
             raise HTTPException(status_code=409, detail="当前候选材料状态不允许审核")
         candidate.reviewed_by = user.id
         candidate.reviewed_time = _now()
-        candidate.review_notes = payload.review_notes
+        if payload.review_notes is not None:
+            candidate.review_notes = payload.review_notes
+        if payload.action == "restore":
+            candidate.status = "pending_review"
+            self.db.commit()
+            self.db.refresh(candidate)
+            return candidate
+        if payload.action == "observe":
+            candidate.status = "observed"
+            NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
+            self.db.commit()
+            self.db.refresh(candidate)
+            return candidate
         if payload.action == "reject":
             candidate.status = "rejected"
             NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
@@ -725,7 +906,12 @@ class AuthorityDiscoveryService:
             NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
             self.db.commit()
             return candidate
-        if not payload.course_ids and not payload.chapter_ids:
+        course_ids = list(dict.fromkeys(payload.course_ids))
+        chapter_ids = list(dict.fromkeys(payload.chapter_ids))
+        if chapter_ids:
+            chapter_courses = list(self.db.scalars(select(Chapter.course_id).where(Chapter.id.in_(chapter_ids))).all())
+            course_ids = list(dict.fromkeys([*course_ids, *chapter_courses]))
+        if not course_ids and not chapter_ids:
             raise HTTPException(status_code=400, detail="发布中央材料前至少选择一本教材或一个专题")
         snapshot = self.db.scalar(select(MaterialSnapshot).where(
             MaterialSnapshot.candidate_id == candidate.id
@@ -742,19 +928,22 @@ class AuthorityDiscoveryService:
             content=snapshot.content.encode("utf-8"), source_title=title, publisher=publisher,
             published_date=published_date, applicable_scope=payload.applicable_scope,
             version_label=None, supersedes_document_id=None, access_policy="full_preview",
-            course_ids=payload.course_ids, chapter_ids=payload.chapter_ids, class_ids=[],
+            course_ids=course_ids, chapter_ids=chapter_ids, class_ids=[],
             knowledge_tags=payload.knowledge_tags, source_url=candidate.source_url,
             snapshot_time=snapshot.fetched_time,
         )
         MaterialCenterService(self.db).replace_scopes(
-            document, user, course_ids=payload.course_ids, chapter_ids=payload.chapter_ids,
+            document, user, course_ids=course_ids, chapter_ids=chapter_ids,
             class_ids=[], knowledge_tags=payload.knowledge_tags, confirmed=True,
         )
         MaterialCenterService(self.db).publish(document.id, user)
         candidate.status = "published"
         candidate.document_id = document.id
-        candidate.course_ids = list(dict.fromkeys(payload.course_ids))
-        candidate.chapter_ids = list(dict.fromkeys(payload.chapter_ids))
+        candidate.title = title
+        candidate.publisher = publisher
+        candidate.published_date = published_date
+        candidate.course_ids = course_ids
+        candidate.chapter_ids = chapter_ids
         candidate.knowledge_tags = list(dict.fromkeys(payload.knowledge_tags))
         NotificationService(self.db).resolve_candidate_review_notifications(candidate.id, commit=False)
         self.db.commit()
@@ -1294,10 +1483,37 @@ class AuthorityDiscoveryService:
     def analyze_candidate(self, candidate_id: int) -> MaterialCandidate:
         candidate = self.associate_candidate(candidate_id)
         changes = self.detect_policy_changes(candidate.id)
-        candidate.status = "pending_review"
-        candidate.analysis_reason = f"{candidate.association_reason or ''} 已生成 {len(changes)} 条新旧原文差异证据，等待管理员确认。"[:4000]
+        if candidate.status != "published":
+            weak_association = candidate.association_confidence < float(settings.authority_discovery_min_association_score)
+            weak_relevance = bool(
+                candidate.relevance_score > 0
+                and candidate.relevance_score < float(settings.authority_discovery_min_relevance_score)
+            )
+            if candidate.reviewed_by is not None or (not weak_association and not weak_relevance):
+                candidate.status = "pending_review"
+                candidate.analysis_reason = f"{candidate.association_reason or ''} 已生成 {len(changes)} 条新旧原文差异证据，等待管理员确认。"[:4000]
+            elif (
+                candidate.association_confidence >= float(settings.authority_matching_candidate_retention_score)
+                and candidate.suggested_chapter_ids
+                and (
+                    candidate.relevance_score == 0
+                    or candidate.relevance_score >= float(settings.authority_matching_candidate_relevance_score)
+                )
+            ):
+                candidate.status = "observed"
+                candidate.analysis_reason = (
+                    f"{candidate.association_reason or ''} 关联度未达高优阈值，已归入观察中（可随时手动发布或移回待审核），已生成 {len(changes)} 条候选差异证据。"
+                )[:4000]
+            else:
+                candidate.status = "filtered"
+                candidate.analysis_reason = (
+                    f"{candidate.association_reason or ''} 教材关联度 {candidate.association_confidence:.0%} 低于自动审核阈值，已归入已过滤（仍可手动移回待审核或发布）。"
+                )[:4000]
+        else:
+            candidate.analysis_reason = f"{candidate.association_reason or ''} 已刷新 {len(changes)} 条新旧原文差异证据。"[:4000]
         self.db.commit(); self.db.refresh(candidate)
-        NotificationService(self.db).create_candidate_review_notifications(candidate, evidence_count=len(changes))
+        if candidate.status == "pending_review":
+            NotificationService(self.db).create_candidate_review_notifications(candidate, evidence_count=len(changes))
         return candidate
 
     def list_changes(self, *, status: str | None = None, importance: str | None = None, candidate_id: int | None = None, limit: int = 100) -> list[PolicyChange]:

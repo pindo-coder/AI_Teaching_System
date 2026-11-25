@@ -613,3 +613,178 @@ def test_batch_delete_rejects_published_candidate(db) -> None:
 
     assert protected.value.status_code == 409
     assert db.get(MaterialCandidate, published.id) is not None
+
+
+def test_same_domain_allows_multiple_columns_and_delete_protection(client, db, monkeypatch) -> None:
+    from app.core.security import create_access_token, hash_password
+
+    monkeypatch.setattr(discovery, "_validate_source_url", lambda url, domain, allow_http=False: None)
+    admin = User(username="multi-col-admin", password_hash=hash_password("secure-pass-123"), role="admin")
+    db.add(admin); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(admin.id))}"}
+
+    # 触发默认来源初始化（已包含 gov.cn 政策库）
+    initial = client.get("/api/v1/knowledge/discovery/sources", headers=headers)
+    assert initial.status_code == 200
+
+    # 同域名 gov.cn 允许新增第二个栏目（要闻）
+    second = client.post(
+        "/api/v1/knowledge/discovery/sources",
+        headers=headers,
+        json={
+            "name": "中国政府网·要闻",
+            "domain": "gov.cn",
+            "source_level": "A",
+            "adapter_type": "html_list",
+            "entry_url": "https://www.gov.cn/yaowen/liebiao/index.htm",
+        },
+    )
+    assert second.status_code == 201
+    second_id = second.json()["data"]["id"]
+
+    # 完全相同的入口网址仍然返回 409
+    dup = client.post(
+        "/api/v1/knowledge/discovery/sources",
+        headers=headers,
+        json={
+            "name": "重复要闻入口",
+            "domain": "gov.cn",
+            "source_level": "A",
+            "adapter_type": "html_list",
+            "entry_url": "https://www.gov.cn/yaowen/liebiao/index.htm",
+        },
+    )
+    assert dup.status_code == 409
+
+    # 没有候选材料引用的来源可直接删除
+    deleted = client.delete(f"/api/v1/knowledge/discovery/sources/{second_id}", headers=headers)
+    assert deleted.status_code == 200
+
+    # 有候选材料引用的来源禁止删除
+    first_id = initial.json()["data"][0]["id"]
+    db.add(MaterialCandidate(
+        source_registry_id=first_id, title="关联候选", source_url="https://www.gov.cn/used",
+        canonical_url="https://www.gov.cn/used", source_level="A", status="observed",
+    ))
+    db.commit()
+    blocked = client.delete(f"/api/v1/knowledge/discovery/sources/{first_id}", headers=headers)
+    assert blocked.status_code == 409
+
+
+def test_source_preview_and_runtime_status_api(client, db, monkeypatch) -> None:
+    from app.core.security import create_access_token, hash_password
+
+    monkeypatch.setattr(discovery, "_validate_source_url", lambda url, domain, allow_http=False: None)
+    listing_html = (
+        '<html><body>'
+        '<a href="/yaowen/liebiao/202611/content_12345.htm">中共中央印发思政课建设新部署</a>'
+        '</body></html>'
+    ).encode("utf-8")
+    article_html = (
+        '<html><head><meta name="publishdate" content="2026-11-20"></head><body>'
+        '<div class="pages_content"><h1>中共中央印发思政课建设新部署</h1>'
+        '<p>要坚持思政课建设与党的创新理论武装同步推进，不断增强高校思政课针对性和吸引力。</p>'
+        '<p>各地各高校要结合实际落实立德树人根本任务，完善实践教学与权威资料动态更新机制。</p>'
+        '</div></body></html>'
+    ).encode("utf-8")
+
+    def fake_fetch(_source, url, *, limit):
+        if "content_12345" in url:
+            return article_html, url, {"content-type": "text/html; charset=utf-8"}, "utf-8"
+        return listing_html, url, {"content-type": "text/html; charset=utf-8"}, "utf-8"
+
+    monkeypatch.setattr(discovery, "_fetch_source_bytes", fake_fetch)
+    admin = User(username="preview-admin", password_hash=hash_password("secure-pass-123"), role="admin")
+    db.add(admin); db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(admin.id))}"}
+
+    preview = client.post(
+        "/api/v1/knowledge/discovery/sources/preview",
+        headers=headers,
+        json={
+            "domain": "gov.cn",
+            "adapter_type": "html_list",
+            "entry_url": "https://www.gov.cn/yaowen/liebiao/index.htm",
+        },
+    )
+    assert preview.status_code == 200
+    data = preview.json()["data"]
+    assert data["ok"] is True
+    assert data["adapter"] == "gov-cn"
+    assert data["discovered_count"] == 1
+    assert data["sample_article"]["published_date"] == "2026-11-20"
+    assert data["sample_article"]["content_length"] >= 50
+    # 试抓只读，不向数据库写入候选材料
+    assert db.query(MaterialCandidate).count() == 0
+
+    runtime = client.get("/api/v1/knowledge/discovery/runtime-status", headers=headers)
+    assert runtime.status_code == 200
+    assert "scheduler_enabled" in runtime.json()["data"]
+
+
+def test_restore_and_publish_observed_candidate_with_chapter_scope(client, db) -> None:
+    from app.core.security import create_access_token, hash_password
+
+    admin = User(username="restore-publish-admin", password_hash=hash_password("secure-pass-123"), role="admin")
+    course = Course(name="思政核心课", description="测试教材")
+    db.add_all([admin, course]); db.flush()
+    chapter = Chapter(course_id=course.id, title="第一章 理论创新", sort_order=1, content="理论创新内容")
+    db.add(chapter); db.flush()
+    source = AuthorityDiscoveryService(db).list_sources()[0]
+    candidate = MaterialCandidate(
+        source_registry_id=source.id, title="观察区重要材料",
+        source_url="https://www.gov.cn/obs-1", canonical_url="https://www.gov.cn/obs-1",
+        source_level="A", status="observed", recommended_material_type="central",
+        association_confidence=0.25, relevance_score=0.40,
+        content_preview="观察区摘要",
+    )
+    db.add(candidate); db.flush()
+    full_text = "这是完整正文快照，包含足够详细的政策说明与理论阐述，用于验证观察区材料可恢复并直接发布到具体章节。" * 4
+    db.add(MaterialSnapshot(
+        candidate_id=candidate.id, fetched_url=candidate.source_url,
+        content=full_text, content_hash="b" * 64, fetched_time=discovery._now(),
+    ))
+    db.commit()
+    headers = {"Authorization": f"Bearer {create_access_token(str(admin.id))}"}
+
+    # 1. 快照接口返回完整正文
+    snaps = client.get(f"/api/v1/knowledge/discovery/candidates/{candidate.id}/snapshots", headers=headers)
+    assert snaps.status_code == 200
+    assert snaps.json()["data"][0]["content"] == full_text
+
+    # 2. 从观察中移回待审核后，GET /candidates 不会再次将其踢回观察中
+    restored = client.post(
+        f"/api/v1/knowledge/discovery/candidates/{candidate.id}/review",
+        headers=headers,
+        json={"action": "restore"},
+    )
+    assert restored.status_code == 200
+    assert restored.json()["data"]["status"] == "pending_review"
+
+    listed = client.get(
+        "/api/v1/knowledge/discovery/candidates",
+        headers=headers,
+        params={"status": "pending_review", "q": "观察区重要"},
+    )
+    assert listed.status_code == 200
+    assert [item["id"] for item in listed.json()["data"]] == [candidate.id]
+
+    # 3. 补全发布机构和发布日期，仅传 chapter_ids 发布，自动补齐 course_ids 并成功发布
+    published = client.post(
+        f"/api/v1/knowledge/discovery/candidates/{candidate.id}/review",
+        headers=headers,
+        json={
+            "action": "publish",
+            "source_title": "观察区重要材料（修订标题）",
+            "publisher": "国务院",
+            "published_date": "2026-11-24",
+            "chapter_ids": [chapter.id],
+            "knowledge_tags": ["理论创新"],
+        },
+    )
+    assert published.status_code == 200
+    pub_data = published.json()["data"]
+    assert pub_data["status"] == "published"
+    assert pub_data["course_ids"] == [course.id]
+    assert pub_data["chapter_ids"] == [chapter.id]
+    assert pub_data["document_id"] is not None

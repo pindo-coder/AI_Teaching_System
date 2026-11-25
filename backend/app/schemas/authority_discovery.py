@@ -50,6 +50,48 @@ class AuthoritySourceRead(BaseModel):
     updated_time: datetime
 
 
+class AuthoritySourcePreviewRequest(BaseModel):
+    domain: str = Field(min_length=3, max_length=255)
+    adapter_type: Literal["html_list", "rss", "sitemap", "single_article"] = "html_list"
+    entry_url: str = Field(min_length=8, max_length=1000)
+    allow_full_text: bool = True
+    fetch_sample_article: bool = True
+
+
+class SourcePreviewLink(BaseModel):
+    url: str
+    title: str
+
+
+class SourcePreviewArticle(BaseModel):
+    url: str
+    title: str | None = None
+    publisher: str | None = None
+    published_date: date | None = None
+    content_length: int
+    extraction_quality_score: float
+    content_preview: str
+    parser_version: str
+
+
+class AuthoritySourcePreviewRead(BaseModel):
+    ok: bool
+    adapter: str
+    discovered_count: int = 0
+    sample_links: list[SourcePreviewLink] = Field(default_factory=list)
+    sample_article: SourcePreviewArticle | None = None
+    error: str | None = None
+
+
+class DiscoveryRuntimeStatus(BaseModel):
+    scheduler_enabled: bool
+    scheduler_poll_seconds: int
+    reranker_enabled: bool
+    nli_enabled: bool
+    cooldown_minutes: int
+    daily_fetch_limit: int
+
+
 class DiscoveryJobCreate(BaseModel):
     query_text: str | None = Field(default=None, max_length=500)
     keywords: list[str] = Field(default_factory=list, max_length=30)
@@ -89,7 +131,7 @@ class DiscoveryJobRead(BaseModel):
 
 
 class CandidateReview(BaseModel):
-    action: Literal["publish", "reject", "duplicate"]
+    action: Literal["publish", "reject", "duplicate", "restore", "observe"]
     source_title: str | None = Field(default=None, max_length=500)
     publisher: str | None = Field(default=None, max_length=255)
     published_date: date | None = None
@@ -102,7 +144,7 @@ class CandidateReview(BaseModel):
 
 class CandidateBatchAction(BaseModel):
     candidate_ids: list[int] = Field(min_length=1, max_length=200)
-    action: Literal["reject", "observe", "duplicate", "delete"]
+    action: Literal["reject", "observe", "duplicate", "delete", "restore"]
     note: str | None = Field(default=None, max_length=2000)
 
 
@@ -181,6 +223,7 @@ class MaterialSnapshotRead(BaseModel):
     id: int
     candidate_id: int
     fetched_url: str
+    content: str
     content_hash: str
     response_etag: str | None
     last_modified: str | None

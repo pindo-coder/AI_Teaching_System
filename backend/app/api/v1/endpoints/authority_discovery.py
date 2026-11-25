@@ -7,9 +7,11 @@ from app.api.dependencies import require_roles
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.authority_discovery import (
-    AuthoritySourceCreate, AuthoritySourceRead, AuthoritySourceUpdate,
-    CandidateBatchAction, CandidateDecisionSummary, CandidateReview, CandidateTopicGroup, DiscoveryJobCreate,
-    DiscoveryJobRead, MaterialCandidateRead, MaterialSnapshotRead, PolicyChangeRead, PolicyChangeReview,
+    AuthoritySourceCreate, AuthoritySourcePreviewRead, AuthoritySourcePreviewRequest,
+    AuthoritySourceRead, AuthoritySourceUpdate,
+    CandidateBatchAction, CandidateDecisionSummary, CandidateReview, CandidateTopicGroup,
+    DiscoveryJobCreate, DiscoveryJobRead, DiscoveryRuntimeStatus,
+    MaterialCandidateRead, MaterialSnapshotRead, PolicyChangeRead, PolicyChangeReview,
 )
 from app.schemas.common import ApiResponse
 from app.services.authority_discovery_service import (
@@ -21,9 +23,26 @@ router = APIRouter(prefix="/knowledge/discovery", tags=["authority-discovery"])
 admin_only = require_roles("admin")
 
 
+@router.get("/runtime-status", response_model=ApiResponse[DiscoveryRuntimeStatus])
+def discovery_runtime_status(_: User = Depends(admin_only)) -> ApiResponse[DiscoveryRuntimeStatus]:
+    return ApiResponse(data=DiscoveryRuntimeStatus(**AuthorityDiscoveryService.runtime_status()))
+
+
 @router.get("/sources", response_model=ApiResponse[list[AuthoritySourceRead]])
 def list_sources(_: User = Depends(admin_only), db: Session = Depends(get_db)) -> ApiResponse[list[AuthoritySourceRead]]:
     return ApiResponse(data=[AuthoritySourceRead.model_validate(item) for item in AuthorityDiscoveryService(db).list_sources()])
+
+
+@router.post("/sources/preview", response_model=ApiResponse[AuthoritySourcePreviewRead])
+def preview_draft_source(
+    payload: AuthoritySourcePreviewRequest,
+    _: User = Depends(admin_only),
+) -> ApiResponse[AuthoritySourcePreviewRead]:
+    result = AuthorityDiscoveryService.preview_source(payload)
+    return ApiResponse(
+        message="试抓预览完成" if result["ok"] else (str(result["error"]) or "试抓未提取到有效文章"),
+        data=AuthoritySourcePreviewRead(**result),
+    )
 
 
 @router.post("/sources", response_model=ApiResponse[AuthoritySourceRead], status_code=status.HTTP_201_CREATED)
@@ -45,6 +64,29 @@ def update_source(
 ) -> ApiResponse[AuthoritySourceRead]:
     item = AuthorityDiscoveryService(db).update_source(source_id, payload)
     return ApiResponse(message="权威来源配置已更新", data=AuthoritySourceRead.model_validate(item))
+
+
+@router.delete("/sources/{source_id}", response_model=ApiResponse[dict[str, int]])
+def delete_source(
+    source_id: int,
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict[str, int]]:
+    deleted_id = AuthorityDiscoveryService(db).delete_source(source_id)
+    return ApiResponse(message="权威来源已删除", data={"id": deleted_id})
+
+
+@router.post("/sources/{source_id}/preview", response_model=ApiResponse[AuthoritySourcePreviewRead])
+def preview_existing_source(
+    source_id: int,
+    _: User = Depends(admin_only),
+    db: Session = Depends(get_db),
+) -> ApiResponse[AuthoritySourcePreviewRead]:
+    result = AuthorityDiscoveryService(db).preview_existing_source(source_id)
+    return ApiResponse(
+        message="试抓预览完成" if result["ok"] else (str(result["error"]) or "试抓未提取到有效文章"),
+        data=AuthoritySourcePreviewRead(**result),
+    )
 
 
 @router.post("/jobs", response_model=ApiResponse[DiscoveryJobRead], status_code=status.HTTP_202_ACCEPTED)
@@ -123,13 +165,19 @@ def delete_job(
 def list_candidates(
     candidate_status: str | None = Query(default=None, alias="status"),
     source_level: str | None = Query(default=None, pattern="^[ABCD]$"),
+    source_registry_id: int | None = Query(default=None, ge=1),
+    q: str | None = Query(default=None, max_length=120),
     limit: int = Query(default=100, ge=1, le=500),
     _: User = Depends(admin_only),
     db: Session = Depends(get_db),
 ) -> ApiResponse[list[MaterialCandidateRead]]:
     service = AuthorityDiscoveryService(db)
     return ApiResponse(data=[MaterialCandidateRead.model_validate(item) for item in service.list_candidates(
-        status=candidate_status, source_level=source_level, limit=limit,
+        status=candidate_status,
+        source_level=source_level,
+        source_registry_id=source_registry_id,
+        q=q,
+        limit=limit,
     )])
 
 
@@ -287,5 +335,11 @@ def review_candidate(
     db: Session = Depends(get_db),
 ) -> ApiResponse[MaterialCandidateRead]:
     item = AuthorityDiscoveryService(db).review_candidate(candidate_id, user, payload)
-    message = {"publish": "候选材料已进入中央材料并完成发布", "reject": "候选材料已驳回", "duplicate": "候选材料已标记为重复"}[payload.action]
+    message = {
+        "publish": "候选材料已进入中央材料并完成发布",
+        "reject": "候选材料已驳回",
+        "duplicate": "候选材料已标记为重复",
+        "restore": "候选材料已移回待审核队列",
+        "observe": "候选材料已转入观察中",
+    }[payload.action]
     return ApiResponse(message=message, data=MaterialCandidateRead.model_validate(item))

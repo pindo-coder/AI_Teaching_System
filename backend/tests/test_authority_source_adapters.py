@@ -106,3 +106,19 @@ def test_editor_author_is_not_used_as_official_publisher() -> None:
     """)
 
     assert parsed.publisher == "中国政府网"
+
+
+def test_adapters_cover_yaowen_and_moe_srcsite_columns() -> None:
+    gov_links = get_source_adapter("gov.cn").parse_listing(
+        '<a href="/yaowen/liebiao/202611/content_99901.htm">重要讲话</a>'
+        '<a href="/index.htm">首页</a>',
+        "https://www.gov.cn/yaowen/liebiao/",
+    )
+    assert gov_links == [("https://www.gov.cn/yaowen/liebiao/202611/content_99901.htm", "重要讲话")]
+
+    moe_links = get_source_adapter("moe.gov.cn").parse_listing(
+        '<a href="/srcsite/A13/moe_772/202611/t20261120_112233.html">教育部社科司思政文件</a>'
+        '<a href="/s78/A13/">栏目页</a>',
+        "https://www.moe.gov.cn/s78/A13/",
+    )
+    assert moe_links == [("https://www.moe.gov.cn/srcsite/A13/moe_772/202611/t20261120_112233.html", "教育部社科司思政文件")]
