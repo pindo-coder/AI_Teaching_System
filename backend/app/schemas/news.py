@@ -71,3 +71,31 @@ class NewsStudyNoteSaveResult(BaseModel):
     chapter_id: int
     created: bool
     appended: bool
+
+
+NewsClassroomActivityType = Literal["judgment", "qa", "group"]
+
+
+class NewsDebateDraftRequest(BaseModel):
+    course_id: int = Field(gt=0)
+    chapter_id: int = Field(gt=0)
+    activity_type: NewsClassroomActivityType = "judgment"
+
+
+class NewsDebateSourceCitation(BaseModel):
+    news_id: int
+    title: str
+    source_name: str
+    published_time: str
+    article_url: str
+
+
+class NewsDebateDraftData(BaseModel):
+    activity_type: NewsClassroomActivityType
+    question: str
+    options: list[str] = Field(default_factory=list)
+    suggested_minutes: int = Field(default=8, ge=3, le=60)
+    teaching_guide: list[str] = Field(default_factory=list)
+    textbook_position: str
+    source_citation: NewsDebateSourceCitation
+    model: str

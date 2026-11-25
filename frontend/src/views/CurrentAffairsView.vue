@@ -3,19 +3,31 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AiAssistData, type AiSource } from '@/api/ai'
+import { agentApi } from '@/api/agents'
+import { classroomApi } from '@/api/classroom'
 import { courseApi } from '@/api/courses'
 import { getErrorMessage } from '@/utils/error'
-import { newsApi, type NewsItem, type TextbookRelationItem } from '@/api/news'
+import {
+  newsApi,
+  type NewsClassroomActivityType,
+  type NewsDebateSourceCitation,
+  type NewsItem,
+  type TextbookRelationItem,
+} from '@/api/news'
 import { studyApi } from '@/api/study'
+import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import type { CourseDetail } from '@/types'
 import { renderTeachingDocument } from '@/utils/richText'
+import { saveClassroomDebateHandoff, saveLessonPrepNewsHandoff } from '@/utils/newsTeachingHandoff'
 import { Calendar, MagicStick, Refresh, Search } from '@element-plus/icons-vue'
 import PdfCitationViewer from '@/components/PdfCitationViewer.vue'
+import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/workspace'
 import { formatBeijingDateTime } from '@/utils/time'
 
 const router = useRouter()
 const route = useRoute()
+const auth = useAuthStore()
 const workspace = useWorkspaceStore()
 const loading = ref(false)
 const newsLoading = ref(true)
@@ -56,6 +68,50 @@ let textbookPromise: Promise<CourseDetail | null> | null = null
 let aiStreamController: AbortController | null = null
 let aiRequestSequence = 0
 let lastNewsLoadedAt = 0
+
+// 教师端：带入备课素材 & 生成课堂辨析草稿状态
+const teachingClasses = ref<TeachingClass[]>([])
+let teachingClassesLoaded = false
+const prepDialogVisible = ref(false)
+const prepCourseId = ref<number | null>(null)
+const prepChapterId = ref<number | null>(null)
+const prepTeachingClassId = ref<number | null>(null)
+const prepRelations = ref<TextbookRelationItem[]>([])
+const prepRelationLoading = ref(false)
+const prepTeachingGoal = ref('')
+const prepCreating = ref(false)
+
+const debateDialogVisible = ref(false)
+const debateCourseId = ref<number | null>(null)
+const debateChapterId = ref<number | null>(null)
+const debateTeachingClassId = ref<number | null>(null)
+const debateRelations = ref<TextbookRelationItem[]>([])
+const debateRelationLoading = ref(false)
+const debateActivityType = ref<NewsClassroomActivityType>('judgment')
+const debateQuestion = ref('')
+const debateOptionsText = ref('')
+const debateMinutes = ref(8)
+const debateGuide = ref<string[]>([])
+const debateTextbookPosition = ref('')
+const debateCitation = ref<NewsDebateSourceCitation | null>(null)
+const debateModel = ref('')
+const debateGenerating = ref(false)
+const debatePublishing = ref(false)
+const debatePublished = ref(false)
+
+const availableTextbookCourses = computed(() => textbookOptions.value.filter((item) => item.chapters.length > 0))
+const prepCourse = computed(() => availableTextbookCourses.value.find((item) => item.id === prepCourseId.value) || null)
+const prepEligibleClasses = computed(() => teachingClasses.value.filter(
+  (item) => !prepCourseId.value || !item.material_ids.length || item.material_ids.includes(prepCourseId.value),
+))
+const prepSelectedRelation = computed(() => prepRelations.value.find((item) => item.chapter_id === prepChapterId.value) || null)
+
+const debateCourse = computed(() => availableTextbookCourses.value.find((item) => item.id === debateCourseId.value) || null)
+const debateEligibleClasses = computed(() => teachingClasses.value.filter(
+  (item) => !debateCourseId.value || !item.material_ids.length || item.material_ids.includes(debateCourseId.value),
+))
+const debateSelectedRelation = computed(() => debateRelations.value.find((item) => item.chapter_id === debateChapterId.value) || null)
+
 const renderedAnswer = computed(() => renderTeachingDocument(aiResult.value?.answer || ''))
 const sourceNames = computed(() => availableSources.value.length ? availableSources.value : [...new Set(news.value.map((item) => item.source_name))])
 const hasFilters = computed(() => Boolean(searchKeyword.value.trim() || selectedSources.value.length || timeDays.value !== 90 || sortBy.value !== 'latest'))
@@ -350,6 +406,306 @@ function openSavedNote() {
   if (!savedChapterId.value) return
   void router.push({ path: '/notes', query: { chapter_id: String(savedChapterId.value) } })
 }
+
+async function ensureTeachingClasses() {
+  if (teachingClassesLoaded || !auth.isTeacher) return
+  try {
+    const list = (await teachingClassApi.list()).data.data
+    teachingClasses.value = list.filter((item) => item.status === 'active' || item.status === 'not_started')
+    teachingClassesLoaded = true
+  } catch {
+    teachingClasses.value = []
+  }
+}
+
+function buildDefaultPrepGoal(newsTitle: string, chapterTitle?: string) {
+  return chapterTitle
+    ? `围绕“${chapterTitle}”，结合时政热点“${newsTitle}”开展案例剖析与课堂思辨。`
+    : `结合时政热点“${newsTitle}”开展案例剖析与课堂思辨。`
+}
+
+async function loadPrepRelations(newsId: number, courseId: number) {
+  prepRelationLoading.value = true
+  prepRelations.value = []
+  try {
+    prepRelations.value = (await newsApi.textbookRelations(newsId, courseId)).data.data
+    const course = availableTextbookCourses.value.find((item) => item.id === courseId)
+    const recommended = prepRelations.value[0]?.chapter_id || course?.chapters[0]?.id || null
+    prepChapterId.value = recommended
+    const chapterTitle = course?.chapters.find((c) => c.id === recommended)?.title
+    if (selectedNews.value) {
+      prepTeachingGoal.value = buildDefaultPrepGoal(selectedNews.value.title, chapterTitle)
+    }
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '暂时无法匹配教材章节'))
+  } finally {
+    prepRelationLoading.value = false
+  }
+}
+
+async function openLessonPrepDialog(item: NewsItem) {
+  const course = await ensureTextbook()
+  const targetCourse = (course && course.chapters.length ? course : availableTextbookCourses.value[0]) || null
+  if (!targetCourse) {
+    ElMessage.warning('当前还没有可用的教材专题，请先导入教材并完成章节拆分')
+    return
+  }
+  await ensureTeachingClasses()
+  selectedNews.value = item
+  prepCourseId.value = targetCourse.id
+  prepChapterId.value = null
+  prepTeachingGoal.value = buildDefaultPrepGoal(item.title)
+  prepDialogVisible.value = true
+  const matchedClass = teachingClasses.value.find((c) => !c.material_ids.length || c.material_ids.includes(targetCourse.id))
+  prepTeachingClassId.value = matchedClass?.id || null
+  await loadPrepRelations(item.id, targetCourse.id)
+}
+
+async function handlePrepCourseChange(courseId: number) {
+  if (!selectedNews.value) return
+  if (!prepEligibleClasses.value.some((item) => item.id === prepTeachingClassId.value)) {
+    prepTeachingClassId.value = prepEligibleClasses.value[0]?.id || null
+  }
+  await loadPrepRelations(selectedNews.value.id, courseId)
+}
+
+function handlePrepChapterChange(chapterId: number) {
+  if (!selectedNews.value) return
+  const chapterTitle = prepCourse.value?.chapters.find((item) => item.id === chapterId)?.title
+  prepTeachingGoal.value = buildDefaultPrepGoal(selectedNews.value.title, chapterTitle)
+}
+
+function sendToLessonPrepWorkspace() {
+  const item = selectedNews.value
+  if (!item || !prepCourseId.value || !prepChapterId.value) {
+    ElMessage.warning('请先选择目标课程与教材专题')
+    return
+  }
+  saveLessonPrepNewsHandoff({
+    newsItem: item,
+    courseId: prepCourseId.value,
+    chapterId: prepChapterId.value,
+    teachingClassId: prepTeachingClassId.value,
+    teachingGoal: prepTeachingGoal.value.trim(),
+    relationReason: prepSelectedRelation.value?.reason || '',
+  })
+  prepDialogVisible.value = false
+  void router.push({ path: '/lesson-prep', query: { news_id: String(item.id) } })
+}
+
+async function createLessonPrepWithNews() {
+  const item = selectedNews.value
+  if (!item || !prepCourseId.value || !prepChapterId.value) {
+    ElMessage.warning('请先选择目标课程与教材专题')
+    return
+  }
+  prepCreating.value = true
+  try {
+    const response = await agentApi.create({
+      agent_type: 'teacher_lesson_prep',
+      course_id: prepCourseId.value,
+      chapter_id: prepChapterId.value,
+      teaching_class_id: prepTeachingClassId.value || null,
+      input: {
+        lesson_hours: 2,
+        learning_stage: 'preview',
+        student_level: '本科生',
+        completion_condition: '教材阅读',
+        teaching_goal: prepTeachingGoal.value.trim() || null,
+        output_types: ['outline'],
+        news_item_ids: [item.id],
+      },
+    })
+    const run = response.data.data
+    prepDialogVisible.value = false
+    if (run.status === 'failed') {
+      ElMessage.error(run.error_message || '备课证据包构建失败')
+    } else {
+      ElMessage.success('已将时政素材注入备课证据包，请核验后确认生成课纲')
+    }
+    void router.push({ path: '/lesson-prep', query: { run_id: String(run.id) } })
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '创建备课证据包失败'))
+  } finally {
+    prepCreating.value = false
+  }
+}
+
+async function loadDebateRelations(newsId: number, courseId: number) {
+  debateRelationLoading.value = true
+  debateRelations.value = []
+  try {
+    debateRelations.value = (await newsApi.textbookRelations(newsId, courseId)).data.data
+    const course = availableTextbookCourses.value.find((item) => item.id === courseId)
+    debateChapterId.value = debateRelations.value[0]?.chapter_id || course?.chapters[0]?.id || null
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '暂时无法匹配教材章节'))
+  } finally {
+    debateRelationLoading.value = false
+  }
+}
+
+async function openDebateDialog(item: NewsItem) {
+  const course = await ensureTextbook()
+  const targetCourse = (course && course.chapters.length ? course : availableTextbookCourses.value[0]) || null
+  if (!targetCourse) {
+    ElMessage.warning('当前还没有可用的教材专题，请先导入教材并完成章节拆分')
+    return
+  }
+  await ensureTeachingClasses()
+  selectedNews.value = item
+  debateCourseId.value = targetCourse.id
+  debateChapterId.value = null
+  debateActivityType.value = 'judgment'
+  debateQuestion.value = ''
+  debateOptionsText.value = ''
+  debateMinutes.value = 8
+  debateGuide.value = []
+  debateTextbookPosition.value = ''
+  debateCitation.value = null
+  debateModel.value = ''
+  debatePublished.value = false
+  debateDialogVisible.value = true
+  const matchedClass = teachingClasses.value.find((c) => !c.material_ids.length || c.material_ids.includes(targetCourse.id))
+  debateTeachingClassId.value = matchedClass?.id || null
+  await loadDebateRelations(item.id, targetCourse.id)
+}
+
+async function handleDebateCourseChange(courseId: number) {
+  if (!selectedNews.value) return
+  if (!debateEligibleClasses.value.some((item) => item.id === debateTeachingClassId.value)) {
+    debateTeachingClassId.value = debateEligibleClasses.value[0]?.id || null
+  }
+  await loadDebateRelations(selectedNews.value.id, courseId)
+}
+
+async function generateDebateDraft() {
+  const item = selectedNews.value
+  if (!item || !debateCourseId.value || !debateChapterId.value) {
+    ElMessage.warning('请先选择关联的教材课程与章节')
+    return
+  }
+  debateGenerating.value = true
+  debatePublished.value = false
+  try {
+    const data = (await newsApi.classroomDebateDraft(item.id, {
+      course_id: debateCourseId.value,
+      chapter_id: debateChapterId.value,
+      activity_type: debateActivityType.value,
+    })).data.data
+    debateQuestion.value = data.question
+    debateOptionsText.value = data.options.join('\n')
+    debateMinutes.value = data.suggested_minutes
+    debateGuide.value = data.teaching_guide
+    debateTextbookPosition.value = data.textbook_position
+    debateCitation.value = data.source_citation
+    debateModel.value = data.model
+    ElMessage.success('课堂互动草稿已生成，请核验修改后再发布')
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '生成课堂辨析草稿失败，请稍后重试'))
+  } finally {
+    debateGenerating.value = false
+  }
+}
+
+function parsedDebateOptions() {
+  return debateOptionsText.value.split('\n').map((line) => line.trim()).filter(Boolean)
+}
+
+function sendDebateToInteractionPage() {
+  const item = selectedNews.value
+  if (!item || !debateCourseId.value || !debateChapterId.value) {
+    ElMessage.warning('请先选择教材课程与章节')
+    return
+  }
+  if (!debateQuestion.value.trim()) {
+    ElMessage.warning('请先生成或填写课堂互动题干')
+    return
+  }
+  const citation: NewsDebateSourceCitation = debateCitation.value || {
+    news_id: item.id,
+    title: item.title,
+    source_name: item.source_name,
+    published_time: formatPublishedTime(item.published_time),
+    article_url: item.article_url,
+  }
+  saveClassroomDebateHandoff({
+    teachingClassId: debateTeachingClassId.value,
+    courseId: debateCourseId.value,
+    chapterId: debateChapterId.value,
+    activityType: debateActivityType.value,
+    question: debateQuestion.value.trim(),
+    options: debateActivityType.value === 'judgment' ? parsedDebateOptions() : [],
+    minutes: debateMinutes.value,
+    teachingGuide: debateGuide.value,
+    textbookPosition: debateTextbookPosition.value,
+    sourceCitation: citation,
+  })
+  debateDialogVisible.value = false
+  void router.push('/interaction')
+}
+
+async function publishDebateDirectly() {
+  const item = selectedNews.value
+  if (!item || !debateCourseId.value || !debateChapterId.value) {
+    ElMessage.warning('请先选择关联的教材与章节')
+    return
+  }
+  if (!debateTeachingClassId.value) {
+    ElMessage.warning('直接发布需要选择目标教学班，也可点击“带入课堂互动页”稍后再选')
+    return
+  }
+  const question = debateQuestion.value.trim()
+  if (question.length < 5) {
+    ElMessage.warning('课堂题干至少需要 5 个字')
+    return
+  }
+  const options = parsedDebateOptions()
+  if (debateActivityType.value === 'judgment' && options.length < 2) {
+    ElMessage.warning('观点辨析至少需要 2 个立场选项（每行一个）')
+    return
+  }
+  const citation = debateCitation.value || {
+    news_id: item.id,
+    title: item.title,
+    source_name: item.source_name,
+    published_time: formatPublishedTime(item.published_time),
+    article_url: item.article_url,
+  }
+  debatePublishing.value = true
+  try {
+    await classroomApi.publish({
+      teaching_class_id: debateTeachingClassId.value,
+      course_id: debateCourseId.value,
+      chapter_id: debateChapterId.value,
+      question,
+      minutes: debateMinutes.value,
+      activity_type: debateActivityType.value,
+      response_limit: 1,
+      grouping_mode: debateActivityType.value === 'group' ? 'manual' : null,
+      config: {
+        ...(debateActivityType.value === 'judgment' ? { options } : {}),
+        source_news_id: citation.news_id,
+        source_title: citation.title,
+        source_name: citation.source_name,
+        source_url: citation.article_url,
+        published_time: citation.published_time,
+        teaching_guide: debateGuide.value,
+      },
+    })
+    debatePublished.value = true
+    ElMessage.success('课堂互动已发布到所选教学班')
+  } catch (error: unknown) {
+    ElMessage.error(getErrorMessage(error, '发布课堂互动失败'))
+  } finally {
+    debatePublishing.value = false
+  }
+}
+
+function goInteractionPage() {
+  debateDialogVisible.value = false
+  void router.push('/interaction')
+}
 </script>
 
 <template>
@@ -416,7 +772,11 @@ function openSavedNote() {
                 <div class="news-actions">
                   <el-button size="small" class="news-action news-action-ai" @click="openAi(item, 'summary')">AI总结</el-button>
                   <el-button size="small" class="news-action news-action-relation" @click="openAi(item, 'relation')">关联课本</el-button>
-                  <el-button size="small" class="news-action news-action-note" @click="openStudyNote(item)">生成研学笔记</el-button>
+                  <template v-if="auth.isTeacher">
+                    <el-button size="small" class="news-action news-action-prep" @click="openLessonPrepDialog(item)">带入备课素材</el-button>
+                    <el-button size="small" class="news-action news-action-debate" @click="openDebateDialog(item)">生成课堂辨析</el-button>
+                  </template>
+                  <el-button v-else size="small" class="news-action news-action-note" @click="openStudyNote(item)">生成研学笔记</el-button>
                 </div>
               </div>
               <div class="news-item-aside">
@@ -444,7 +804,7 @@ function openSavedNote() {
       <template #footer><el-button @click="closeAiDialog">关闭</el-button></template>
     </el-dialog>
     <PdfCitationViewer v-model:visible="citationVisible" :source="selectedSource" />
-    <el-dialog v-model="studyDialogVisible" title="生成时政研学笔记" width="880px" class="study-note-dialog">
+    <el-dialog v-if="!auth.isTeacher" v-model="studyDialogVisible" title="生成时政研学笔记" width="880px" class="study-note-dialog">
       <div v-if="selectedNews" class="selected-news"><strong>{{ selectedNews.title }}</strong><p>{{ selectedNews.summary || '暂无摘要，请以原文为准。' }}</p></div>
       <div class="study-note-steps">
         <section v-loading="relationLoading" class="study-note-step">
@@ -471,5 +831,225 @@ function openSavedNote() {
       </div>
       <template #footer><el-button @click="studyDialogVisible = false">关闭</el-button></template>
     </el-dialog>
+
+    <el-dialog v-if="auth.isTeacher" v-model="prepDialogVisible" title="将时政热点带入备课素材" width="820px" class="study-note-dialog">
+      <div v-if="selectedNews" class="selected-news">
+        <strong>{{ selectedNews.title }}</strong>
+        <p>{{ selectedNews.summary || '暂无摘要，请结合原文链接核对具体事实。' }}</p>
+        <div class="teacher-news-meta">
+          <span>来源：{{ selectedNews.source_name }} · {{ formatPublishedTime(selectedNews.published_time) }}</span>
+          <el-link :href="selectedNews.article_url" target="_blank" type="primary" underline="never">核验原文 →</el-link>
+        </div>
+      </div>
+      <div class="study-note-steps">
+        <section v-loading="prepRelationLoading" class="study-note-step">
+          <div class="step-title">
+            <span>1</span>
+            <div><strong>确认目标课程、专题与教学班</strong><small>系统自动推荐关联专题，该时政将作为真实证据卡进入备课证据快照</small></div>
+          </div>
+          <div class="teacher-scope-grid">
+            <el-select v-model="prepCourseId" placeholder="选择教材课程" @change="handlePrepCourseChange">
+              <el-option v-for="option in availableTextbookCourses" :key="option.id" :label="option.name" :value="option.id" />
+            </el-select>
+            <el-select v-model="prepChapterId" placeholder="选择教材专题" @change="handlePrepChapterChange">
+              <el-option v-for="chapter in prepCourse?.chapters || []" :key="chapter.id" :label="chapter.title" :value="chapter.id" />
+            </el-select>
+            <el-select v-model="prepTeachingClassId" clearable placeholder="关联教学班（可选）">
+              <el-option v-for="item in prepEligibleClasses" :key="item.id" :label="`${item.name} · ${item.term_name}`" :value="item.id" />
+            </el-select>
+          </div>
+          <el-radio-group v-if="prepRelations.length" v-model="prepChapterId" class="relation-options" @change="handlePrepChapterChange">
+            <el-radio v-for="relation in prepRelations" :key="relation.chapter_id" :value="relation.chapter_id" border>
+              <strong>{{ relation.chapter_title }}</strong><span>{{ relation.reason }}</span><small>{{ relation.position }}</small>
+            </el-radio>
+          </el-radio-group>
+        </section>
+        <section class="study-note-step">
+          <div class="step-title">
+            <span>2</span>
+            <div><strong>补充教学任务要求（可选）</strong><small>确认证据前仍可在备课工作台调整课时、对象与输出成果</small></div>
+          </div>
+          <el-input v-model="prepTeachingGoal" type="textarea" :rows="3" maxlength="1000" show-word-limit placeholder="说明如何将本条时政融入课堂导入、案例剖析或课堂讨论" />
+        </section>
+      </div>
+      <template #footer>
+        <el-button @click="prepDialogVisible = false">取消</el-button>
+        <el-button :disabled="!prepCourseId || !prepChapterId" @click="sendToLessonPrepWorkspace">带入备课工作台调整</el-button>
+        <el-button type="primary" :loading="prepCreating" :disabled="!prepCourseId || !prepChapterId" @click="createLessonPrepWithNews">直接构建备课证据包</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-if="auth.isTeacher" v-model="debateDialogVisible" title="从时政热点生成课堂辨析草稿" width="880px" class="study-note-dialog">
+      <div v-if="selectedNews" class="selected-news">
+        <strong>{{ selectedNews.title }}</strong>
+        <p>{{ selectedNews.summary || '暂无摘要，请结合原文链接核对具体事实。' }}</p>
+        <div class="teacher-news-meta">
+          <span>来源：{{ selectedNews.source_name }} · {{ formatPublishedTime(selectedNews.published_time) }}</span>
+          <el-link :href="selectedNews.article_url" target="_blank" type="primary" underline="never">核验原文 →</el-link>
+        </div>
+      </div>
+      <div class="study-note-steps">
+        <section v-loading="debateRelationLoading" class="study-note-step">
+          <div class="step-title">
+            <span>1</span>
+            <div><strong>选择教学范围与活动类型</strong><small>支持观点辨析、随堂问答与小组讨论；仅产出草稿，发布前须人工核验</small></div>
+            <el-button type="primary" :loading="debateGenerating" :disabled="!debateCourseId || !debateChapterId" @click="generateDebateDraft">{{ debateQuestion ? '重新生成草稿' : 'AI 生成草稿' }}</el-button>
+          </div>
+          <div class="teacher-scope-grid">
+            <el-select v-model="debateTeachingClassId" clearable placeholder="目标教学班（直发必选）">
+              <el-option v-for="item in debateEligibleClasses" :key="item.id" :label="`${item.name} · ${item.term_name}`" :value="item.id" />
+            </el-select>
+            <el-select v-model="debateCourseId" placeholder="选择教材课程" @change="handleDebateCourseChange">
+              <el-option v-for="option in availableTextbookCourses" :key="option.id" :label="option.name" :value="option.id" />
+            </el-select>
+            <el-select v-model="debateChapterId" placeholder="选择教材专题">
+              <el-option v-for="chapter in debateCourse?.chapters || []" :key="chapter.id" :label="chapter.title" :value="chapter.id" />
+            </el-select>
+          </div>
+          <div class="debate-type-row">
+            <span class="debate-type-label">互动类型</span>
+            <el-radio-group v-model="debateActivityType" size="small">
+              <el-radio-button value="judgment">观点辨析</el-radio-button>
+              <el-radio-button value="qa">随堂问答</el-radio-button>
+              <el-radio-button value="group">小组讨论</el-radio-button>
+            </el-radio-group>
+            <span v-if="debateSelectedRelation" class="debate-match-hint">推荐依据：{{ debateSelectedRelation.position }}</span>
+          </div>
+        </section>
+        <section class="study-note-step">
+          <div class="step-title">
+            <span>2</span>
+            <div><strong>编辑课堂题干与选项</strong><small>题干与立场选项均可自由修改{{ debateModel ? ` · 模型：${debateModel}` : '' }}</small></div>
+          </div>
+          <div class="ai-draft-hint" role="note">
+            <el-icon><MagicStick /></el-icon>
+            <span><strong>AI 教学草稿提示</strong>草稿仅依据当前新闻摘要与所选教材章节片段生成，请结合班级学情核对修改后再发布。</span>
+          </div>
+          <el-input v-model="debateQuestion" type="textarea" :rows="4" maxlength="2000" show-word-limit placeholder="点击上方“AI 生成草稿”或直接输入课堂辨析命题……" />
+          <div v-if="debateActivityType === 'judgment'" class="debate-options-editor">
+            <label class="debate-field-label">辨析立场选项（每行一个，至少 2 项）</label>
+            <el-input v-model="debateOptionsText" type="textarea" :rows="3" placeholder="例如：\n赞同核心观点，但需补充前提条件\n以偏概全，忽视了长期战略与制度逻辑" />
+          </div>
+          <div class="debate-minutes-row">
+            <label class="debate-field-label">建议讨论时长</label>
+            <el-input-number v-model="debateMinutes" :min="3" :max="60" size="small" />
+            <span>分钟</span>
+          </div>
+          <div v-if="debateGuide.length" class="teacher-guide-box">
+            <strong>教师课堂追问与点评参考（仅教师可见）</strong>
+            <small v-if="debateTextbookPosition">关联教材位置：{{ debateTextbookPosition }}</small>
+            <ul>
+              <li v-for="(tip, idx) in debateGuide" :key="idx">{{ tip }}</li>
+            </ul>
+          </div>
+        </section>
+      </div>
+      <template #footer>
+        <el-button @click="debateDialogVisible = false">关闭</el-button>
+        <el-button v-if="debatePublished" type="success" @click="goInteractionPage">前往课堂互动查看</el-button>
+        <template v-else>
+          <el-button :disabled="!debateQuestion.trim() || !debateCourseId || !debateChapterId" @click="sendDebateToInteractionPage">带入课堂互动页继续编辑</el-button>
+          <el-button type="primary" :loading="debatePublishing" :disabled="!debateQuestion.trim() || !debateTeachingClassId || !debateCourseId || !debateChapterId" @click="publishDebateDirectly">直接发布到教学班</el-button>
+        </template>
+      </template>
+    </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.news-action-prep {
+  color: #1f5c99;
+  background: #edf5ff;
+  border-color: #c5ddfb;
+}
+.news-action-prep:hover {
+  color: #164778;
+  background: #dfeeff;
+  border-color: #9ec5f8;
+}
+.news-action-debate {
+  color: #9a3412;
+  background: #fff3ec;
+  border-color: #fed7aa;
+}
+.news-action-debate:hover {
+  color: #7c2d12;
+  background: #ffe8d9;
+  border-color: #fdba74;
+}
+.teacher-news-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  font-size: 13px;
+  color: var(--ink-500);
+}
+.teacher-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.teacher-scope-grid :deep(.el-select) {
+  width: 100%;
+}
+.debate-type-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin-top: 6px;
+}
+.debate-type-label,
+.debate-field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-700);
+}
+.debate-match-hint {
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.debate-options-editor {
+  display: grid;
+  gap: 6px;
+}
+.debate-minutes-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--ink-600);
+}
+.teacher-guide-box {
+  padding: 12px 14px;
+  background: var(--surface-soft);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--action-blue);
+  border-radius: 10px;
+}
+.teacher-guide-box strong {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-800);
+}
+.teacher-guide-box small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.teacher-guide-box ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--ink-700);
+  font-size: 13px;
+  line-height: 1.65;
+}
+@media (max-width: 720px) {
+  .teacher-scope-grid {
+    grid-template-columns: 1fr;
+  }
+}
+</style>

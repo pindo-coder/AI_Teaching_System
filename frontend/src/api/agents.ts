@@ -281,6 +281,7 @@ export interface CreateLessonPrepRun {
     completion_condition: string | null
     teaching_goal: string | null
     output_types: Array<'outline' | 'lesson_plan' | 'ppt'>
+    news_item_ids?: number[]
   }
 }
 

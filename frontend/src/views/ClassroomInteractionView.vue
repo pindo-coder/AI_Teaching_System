@@ -10,6 +10,7 @@ import { classroomApi, type ClassroomActivity, type ClassroomResponse, type Disc
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
 import { agentApi, type LessonPublication } from '@/api/agents'
 import { getErrorMessage } from '@/utils/error'
+import { consumeClassroomDebateHandoff, type ClassroomDebateHandoff } from '@/utils/newsTeachingHandoff'
 import { beijingTimestamp, formatBeijingDateTime } from '@/utils/time'
 
 const loading = ref(true)
@@ -56,6 +57,8 @@ const activityResponses = ref<ClassroomResponse[]>([])
 const responseCount = ref(0)
 const responseLoading = ref(false)
 const commentDrafts = ref<Record<number, string>>({})
+const pendingDebateSource = ref<Pick<ClassroomDebateHandoff, 'sourceCitation' | 'teachingGuide' | 'textbookPosition'> | null>(null)
+const hydratingHandoff = ref(false)
 let activityPollTimer: number | undefined
 const firstChapter = computed(() => textbook.value?.chapters.find((item) => item.id === selectedChapterId.value) || textbook.value?.chapters[0] || null)
 const discussionCourseOptions = computed(() => {
@@ -101,6 +104,16 @@ function activityOptions(item: ClassroomActivity) {
   return Array.isArray(options) ? options.map(String) : []
 }
 
+function activitySourceMeta(item: ClassroomActivity) {
+  const cfg = item.config || {}
+  const title = typeof cfg.source_title === 'string' ? cfg.source_title : ''
+  const name = typeof cfg.source_name === 'string' ? cfg.source_name : ''
+  const url = typeof cfg.source_url === 'string' ? cfg.source_url : ''
+  const guide = Array.isArray(cfg.teaching_guide) ? cfg.teaching_guide.map(String).filter(Boolean) : []
+  if (!title && !guide.length) return null
+  return { title, name, url, guide }
+}
+
 function activityTypeLabel(type: ActivityType) {
   return patterns.find((item) => item.type === type)?.title || '课堂活动'
 }
@@ -116,14 +129,59 @@ onMounted(async () => {
     teachingClasses.value = (await teachingClassApi.list()).data.data.filter((item) => item.status === 'active' || item.status === 'not_started')
     const courses = (await courseApi.list()).data.data
     allCourses.value = (await Promise.all(courses.map((item) => courseApi.detail(item.id).then((response) => response.data.data).catch(() => null)))).filter((item): item is CourseDetail => Boolean(item))
-    selectedClassId.value = teachingClasses.value[0]?.id
-    await loadSelectedTextbook()
-    if (route.query.mode === 'free') activeMode.value = 'free'
-    const newsTitle = typeof route.query.news_title === 'string' ? route.query.news_title : ''
-    if (newsTitle) activity.question = `围绕时政“${newsTitle}”，联系教材专题开展课堂讨论。`
+    const debateHandoff = auth.isTeacher ? consumeClassroomDebateHandoff() : null
+    if (debateHandoff) {
+      hydratingHandoff.value = true
+      try {
+        activeMode.value = 'classroom'
+        if (debateHandoff.teachingClassId && teachingClasses.value.some((item) => item.id === debateHandoff.teachingClassId)) {
+          selectedClassId.value = debateHandoff.teachingClassId
+        } else {
+          selectedClassId.value = teachingClasses.value[0]?.id
+        }
+        await loadSelectedTextbook()
+        if (availableCourses.value.some((item) => item.id === debateHandoff.courseId)) {
+          selectedCourseId.value = debateHandoff.courseId
+          textbook.value = availableCourses.value.find((item) => item.id === debateHandoff.courseId) || textbook.value
+        } else if (allCourses.value.some((item) => item.id === debateHandoff.courseId)) {
+          const matchedCourse = allCourses.value.find((item) => item.id === debateHandoff.courseId)!
+          availableCourses.value = [matchedCourse, ...availableCourses.value.filter((item) => item.id !== matchedCourse.id)]
+          selectedCourseId.value = matchedCourse.id
+          textbook.value = matchedCourse
+        }
+        if (textbook.value?.chapters.some((item) => item.id === debateHandoff.chapterId)) {
+          selectedChapterId.value = debateHandoff.chapterId
+        }
+        activity.activityType = debateHandoff.activityType
+        activity.question = debateHandoff.question
+        activity.minutes = debateHandoff.minutes
+        if (debateHandoff.activityType === 'judgment' && debateHandoff.options.length) {
+          activity.judgmentOptions = debateHandoff.options.join('\n')
+        }
+        pendingDebateSource.value = {
+          sourceCitation: debateHandoff.sourceCitation,
+          teachingGuide: debateHandoff.teachingGuide,
+          textbookPosition: debateHandoff.textbookPosition,
+        }
+        activityDrawerOpen.value = true
+        ElMessage.success('已载入时政课堂辨析草稿，请核对修改后发布')
+      } finally {
+        hydratingHandoff.value = false
+      }
+    } else {
+      selectedClassId.value = teachingClasses.value[0]?.id
+      await loadSelectedTextbook()
+      if (route.query.mode === 'free') activeMode.value = 'free'
+      const newsTitle = typeof route.query.news_title === 'string' ? route.query.news_title : ''
+      if (newsTitle) activity.question = `围绕时政“${newsTitle}”，联系教材专题开展课堂讨论。`
+    }
     activities.value = (await classroomApi.list()).data.data
     await loadDiscussions()
     publications.value = (await agentApi.publications()).data.data
+    if (debateHandoff) {
+      selectedActivity.value = drawerActivities.value[0] || null
+      if (selectedActivity.value) void loadActivityResponses(selectedActivity.value)
+    }
   } finally { loading.value = false }
 })
 
@@ -135,8 +193,9 @@ async function loadSelectedTextbook() {
   textbook.value = availableCourses.value.find((item) => item.id === selectedCourseId.value) || null
   selectedChapterId.value = textbook.value?.chapters[0]?.id
 }
-watch(selectedClassId, async () => { await loadSelectedTextbook(); await loadDiscussions() })
+watch(selectedClassId, async () => { if (hydratingHandoff.value) return; await loadSelectedTextbook(); await loadDiscussions() })
 watch(selectedCourseId, () => {
+  if (hydratingHandoff.value) return
   textbook.value = availableCourses.value.find((item) => item.id === selectedCourseId.value) || null
   selectedChapterId.value = textbook.value?.chapters[0]?.id
 })
@@ -310,14 +369,25 @@ async function launchActivity() {
   if (!selectedClassId.value || !textbook.value || !firstChapter.value) return ElMessage.warning('请先选择教学班及教材专题')
   if (activity.activityType === 'group' && !activity.groupingMode) return ElMessage.warning('请选择分组方式')
   const options = activity.judgmentOptions.split('\n').map((item) => item.trim()).filter(Boolean)
+  const config: Record<string, unknown> = {}
+  if (activity.activityType === 'judgment') config.options = options
+  if (pendingDebateSource.value) {
+    config.source_news_id = pendingDebateSource.value.sourceCitation.news_id
+    config.source_title = pendingDebateSource.value.sourceCitation.title
+    config.source_name = pendingDebateSource.value.sourceCitation.source_name
+    config.source_url = pendingDebateSource.value.sourceCitation.article_url
+    config.published_time = pendingDebateSource.value.sourceCitation.published_time
+    config.teaching_guide = pendingDebateSource.value.teachingGuide
+  }
   await classroomApi.publish({
     teaching_class_id: selectedClassId.value, course_id: textbook.value.id, chapter_id: firstChapter.value.id,
     question: activity.question.trim(), minutes: activity.minutes, activity_type: activity.activityType,
     response_limit: activity.responseLimit,
     deadline_time: activity.deadlineTime ? new Date(activity.deadlineTime).toISOString() : null,
     grouping_mode: activity.activityType === 'group' ? activity.groupingMode : null,
-    config: activity.activityType === 'judgment' ? { options } : undefined,
+    config: Object.keys(config).length ? config : undefined,
   })
+  pendingDebateSource.value = null
   activities.value = (await classroomApi.list()).data.data
   selectedActivity.value = drawerActivities.value[0] || null
   if (selectedActivity.value) await loadActivityResponses(selectedActivity.value)
@@ -474,6 +544,17 @@ async function downloadPublishedPpt(item: LessonPublication) {
     </section>
     <el-drawer v-model="activityDrawerOpen" :title="`${activePattern.title} · ${auth.isTeacher ? '活动工作台' : '活动列表'}`" size="min(620px, 100%)" :destroy-on-close="false" class="activity-drawer">
       <template v-if="auth.isTeacher">
+        <div v-if="pendingDebateSource" class="debate-source-banner">
+          <div class="debate-source-header">
+            <el-tag size="small" type="danger" effect="light">来自时政热点</el-tag>
+            <strong>{{ pendingDebateSource.sourceCitation.title }}</strong>
+            <el-button text size="small" @click="pendingDebateSource = null">清除关联</el-button>
+          </div>
+          <small>{{ pendingDebateSource.sourceCitation.source_name }} · {{ pendingDebateSource.sourceCitation.published_time }}<template v-if="pendingDebateSource.textbookPosition"> · {{ pendingDebateSource.textbookPosition }}</template></small>
+          <ul v-if="pendingDebateSource.teachingGuide.length" class="debate-guide-list">
+            <li v-for="(tip, idx) in pendingDebateSource.teachingGuide" :key="idx">{{ tip }}</li>
+          </ul>
+        </div>
         <el-alert v-if="activity.activityType === 'group'" title="小组讨论仅允许组长提交；请先在教学班管理中完成手动或随机分组。" type="info" :closable="false" show-icon />
         <el-form label-position="top" class="activity-drawer-form">
           <el-form-item label="活动问题"><el-input v-model="activity.question" type="textarea" :rows="3" maxlength="2000" show-word-limit /></el-form-item>
@@ -495,6 +576,16 @@ async function downloadPublishedPpt(item: LessonPublication) {
       </div>
       <el-empty v-else :description="auth.isTeacher ? `还没有布置${activePattern.title}` : `当前还没有${activePattern.title}`" />
       <template v-if="selectedActivity">
+        <div v-if="activitySourceMeta(selectedActivity)" class="activity-source-box">
+          <div v-if="activitySourceMeta(selectedActivity)?.title" class="activity-source-row">
+            <el-tag size="small" type="danger" effect="light">时政出处</el-tag>
+            <span>{{ activitySourceMeta(selectedActivity)?.title }}</span>
+            <el-link v-if="activitySourceMeta(selectedActivity)?.url" :href="activitySourceMeta(selectedActivity)?.url" target="_blank" type="primary" underline="never">核验原文 →</el-link>
+          </div>
+          <ul v-if="auth.isTeacher && activitySourceMeta(selectedActivity)?.guide.length" class="debate-guide-list">
+            <li v-for="(tip, idx) in activitySourceMeta(selectedActivity)?.guide" :key="idx">{{ tip }}</li>
+          </ul>
+        </div>
         <el-divider content-position="left">{{ auth.isTeacher ? '学生回答' : '回答内容' }} · {{ responseCount }} 人</el-divider>
         <div v-if="!auth.isTeacher && canSubmitActivity(selectedActivity)" class="student-activity-response">
           <el-radio-group v-if="selectedActivity.activity_type === 'judgment'" v-model="judgmentChoice[selectedActivity.id]" class="judgment-options"><el-radio v-for="option in activityOptions(selectedActivity)" :key="option" :value="option">{{ option }}</el-radio></el-radio-group>
@@ -596,6 +687,11 @@ async function downloadPublishedPpt(item: LessonPublication) {
 .ai-review, .teacher-review { padding: 9px 10px; margin: 8px 0 0; font-size: 13px; line-height: 1.55; white-space: pre-wrap; }
 .ai-review { color: #725519; background: #fff7e5; border-left: 3px solid #d6a44c; }
 .teacher-review { color: var(--action-blue); background: #eef5fb; border-left: 3px solid var(--action-blue); }
+.debate-source-banner, .activity-source-box { padding: 11px 13px; margin-bottom: 12px; background: #fff7f5; border: 1px solid #f7d6cf; border-left: 3px solid var(--authority-red); border-radius: 10px; }
+.debate-source-header, .activity-source-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-800); }
+.debate-source-header strong { flex: 1; min-width: 160px; }
+.debate-source-banner small { display: block; margin-top: 4px; font-size: 12px; color: var(--ink-500); }
+.debate-guide-list { margin: 8px 0 0; padding-left: 18px; font-size: 12px; color: var(--ink-700); line-height: 1.6; }
 @media (max-width: 767px) {
   .mode-tabs { align-items: stretch; flex-direction: column; padding: 0 0 12px; }
   .mode-tab-list { width: 100%; }

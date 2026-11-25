@@ -224,3 +224,230 @@ def test_source_names_only_include_recent_configured_news(db: Session) -> None:
     db.commit()
 
     assert NewsService(db).source_names(days=30) == ["中国新闻网时政"]
+
+
+def test_teacher_classroom_debate_draft_and_role_guard(client: TestClient, db: Session) -> None:
+    from app.models.chapter import Chapter
+    from app.models.course import Course
+
+    student = User(username="debate_student", password_hash=hash_password("secure-pass-123"), role="student")
+    teacher = User(
+        username="debate_teacher",
+        password_hash=hash_password("secure-pass-123"),
+        role="teacher",
+        approval_status="approved",
+    )
+    course = Course(name="思政测试课程", description="测试教材")
+    db.add_all([student, teacher, course])
+    db.flush()
+    chapter = Chapter(
+        course_id=course.id,
+        title="生态文明建设专题",
+        sort_order=1,
+        content="绿水青山就是金山银山，必须坚持统筹高质量发展和高水平保护，推进生态文明建设。",
+    )
+    now = utc_now()
+    news = NewsItem(
+        title="全国多地推进绿色低碳转型与生态补偿机制建设",
+        summary="各地结合实际深化生态文明制度改革，推动绿色产业发展与生态环境保护协同共进。",
+        source_name="中国新闻网时政",
+        source_url="https://a.example/rss",
+        article_url="https://a.example/eco-2026",
+        published_time=now - timedelta(hours=3),
+        fetched_time=now,
+    )
+    db.add_all([chapter, news])
+    db.commit()
+
+    student_headers = {"Authorization": f"Bearer {create_access_token(str(student.id))}"}
+    teacher_headers = {"Authorization": f"Bearer {create_access_token(str(teacher.id))}"}
+
+    # 详情接口可用
+    detail = client.get(f"/api/v1/current-affairs/{news.id}", headers=teacher_headers)
+    assert detail.status_code == 200
+    assert detail.json()["data"]["title"] == news.title
+
+    # 学生无权调用教师课堂辨析草稿接口
+    forbidden = client.post(
+        f"/api/v1/current-affairs/{news.id}/classroom-debate-draft",
+        headers=student_headers,
+        json={"course_id": course.id, "chapter_id": chapter.id, "activity_type": "judgment"},
+    )
+    assert forbidden.status_code == 403
+
+    # 教师生成观点辨析草稿
+    resp = client.post(
+        f"/api/v1/current-affairs/{news.id}/classroom-debate-draft",
+        headers=teacher_headers,
+        json={"course_id": course.id, "chapter_id": chapter.id, "activity_type": "judgment"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["activity_type"] == "judgment"
+    assert len(data["question"]) >= 15
+    assert len(data["options"]) >= 2
+    assert len(data["teaching_guide"]) >= 2
+    assert data["source_citation"]["news_id"] == news.id
+    assert data["source_citation"]["article_url"] == "https://a.example/eco-2026"
+    assert "生态文明建设专题" in data["textbook_position"]
+
+    # 随堂问答模式不返回判断选项
+    qa_resp = client.post(
+        f"/api/v1/current-affairs/{news.id}/classroom-debate-draft",
+        headers=teacher_headers,
+        json={"course_id": course.id, "chapter_id": chapter.id, "activity_type": "qa"},
+    )
+    assert qa_resp.status_code == 200
+    assert qa_resp.json()["data"]["options"] == []
+
+
+def test_lesson_prep_agent_injects_current_affairs_evidence(client: TestClient, db: Session) -> None:
+    from app.models.agent_run import AgentRun
+    from app.models.chapter import Chapter
+    from app.models.course import Course
+
+    teacher = User(
+        username="prep_news_teacher",
+        password_hash=hash_password("secure-pass-123"),
+        role="teacher",
+        approval_status="approved",
+    )
+    course = Course(name="中国式现代化专题课", description="测试教材")
+    db.add_all([teacher, course])
+    db.flush()
+    chapter = Chapter(
+        course_id=course.id,
+        title="高质量发展与新质生产力",
+        sort_order=1,
+        content="高质量发展是全面建设社会主义现代化国家的首要任务，要加快发展新质生产力。",
+    )
+    now = utc_now()
+    news = NewsItem(
+        title="人工智能赋能制造业高质量发展新案例发布",
+        summary="相关部门发布制造业智能化转型典型案例，强调科技创新引领现代化产业体系建设。",
+        source_name="中国新闻网要闻",
+        source_url="https://b.example/rss",
+        article_url="https://b.example/ai-mfg",
+        published_time=now - timedelta(hours=5),
+        fetched_time=now,
+    )
+    db.add_all([chapter, news])
+    db.commit()
+
+    headers = {"Authorization": f"Bearer {create_access_token(str(teacher.id))}"}
+    resp = client.post(
+        "/api/v1/agent/runs",
+        headers=headers,
+        json={
+            "agent_type": "teacher_lesson_prep",
+            "course_id": course.id,
+            "chapter_id": chapter.id,
+            "input": {
+                "lesson_hours": 2,
+                "learning_stage": "preview",
+                "student_level": "本科生",
+                "teaching_goal": "结合制造业智能化案例讲透新质生产力",
+                "news_item_ids": [news.id, news.id],
+            },
+        },
+    )
+    assert resp.status_code == 200
+    run_data = resp.json()["data"]
+    assert run_data["status"] == "waiting_confirmation"
+    assert run_data["input_data"]["news_item_ids"] == [news.id]
+    news_evidence = [item for item in run_data["evidence_snapshot"] if item["material_type"] == "current_affairs"]
+    assert len(news_evidence) == 1
+    assert news_evidence[0]["source_title"] == news.title
+    assert news_evidence[0]["publisher"] == "中国新闻网要闻"
+    assert news_evidence[0]["source_url"] == "https://b.example/ai-mfg"
+
+    run_row = db.get(AgentRun, run_data["id"])
+    assert run_row is not None
+    assert news.title in (run_row.context_snapshot or "")
+
+    # 不存在的时政 ID 返回 404
+    missing = client.post(
+        "/api/v1/agent/runs",
+        headers=headers,
+        json={
+            "agent_type": "teacher_lesson_prep",
+            "course_id": course.id,
+            "chapter_id": chapter.id,
+            "input": {"news_item_ids": [999999]},
+        },
+    )
+    assert missing.status_code == 404
+
+
+def test_lesson_prep_degrades_gracefully_when_vector_retrieval_fails(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+) -> None:
+    from app.models.chapter import Chapter
+    from app.models.course import Course
+    from app.models.knowledge_document import KnowledgeDocument
+
+    teacher = User(
+        username="degrade_teacher",
+        password_hash=hash_password("secure-pass-123"),
+        role="teacher",
+        approval_status="approved",
+    )
+    course = Course(name="降级容错课程", description="测试教材")
+    db.add_all([teacher, course])
+    db.flush()
+    chapter = Chapter(
+        course_id=course.id,
+        title="第一章 教材直连降级",
+        sort_order=1,
+        content="本章节包含完整的教材正文依据，用于在外部 Embedding 网络波动时保底构建备课证据包。",
+    )
+    now = utc_now()
+    news = NewsItem(
+        title="降级测试时政案例",
+        summary="确保向量检索失败时仍保留时政证据卡与教材正文依据。",
+        source_name="中国新闻网时政",
+        source_url="https://c.example/rss",
+        article_url="https://c.example/degrade",
+        published_time=now - timedelta(hours=1),
+        fetched_time=now,
+    )
+    db.add_all([chapter, news])
+    db.flush()
+    doc = KnowledgeDocument(
+        course_id=course.id,
+        chapter_id=chapter.id,
+        source_type="pdf",
+        original_filename="textbook.pdf",
+        stored_path="/tmp/textbook.pdf",
+        vector_collection="ideology_course_kb",
+        source_title="测试教材原文",
+        material_type="textbook",
+        status="ready",
+        review_status="published",
+    )
+    db.add(doc)
+    db.commit()
+
+    def broken_retrieve(*_args, **_kwargs):
+        raise ConnectionError("Connection error.")
+
+    monkeypatch.setattr("app.services.ai_service.retrieve_layered", broken_retrieve)
+    headers = {"Authorization": f"Bearer {create_access_token(str(teacher.id))}"}
+    resp = client.post(
+        "/api/v1/agent/runs",
+        headers=headers,
+        json={
+            "agent_type": "teacher_lesson_prep",
+            "course_id": course.id,
+            "chapter_id": chapter.id,
+            "input": {"news_item_ids": [news.id]},
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["status"] == "waiting_confirmation"
+    types = {item["material_type"] for item in data["evidence_snapshot"]}
+    assert "current_affairs" in types
+    assert "textbook" in types

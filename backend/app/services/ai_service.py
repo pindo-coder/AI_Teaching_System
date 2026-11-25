@@ -499,13 +499,25 @@ class AiService:
         chapter_contents = {item.id: (item.content or "").strip() for item in chapters}
         retrieved_chunks = []
         if not chapter_only and any(layer_document_ids.values()):
-            retrieved_chunks = retrieve_layered(
-                f"{' '.join(item.title for item in chapters)} {retrieval_question or payload.question}",
-                layer_document_ids=layer_document_ids,
-                chapter_id=chapter.id,
-                chapter_ids=selected_chapter_ids,
-                top_k=8 if len(chapters) > 1 else 6,
-            )
+            try:
+                retrieved_chunks = retrieve_layered(
+                    f"{' '.join(item.title for item in chapters)} {retrieval_question or payload.question}",
+                    layer_document_ids=layer_document_ids,
+                    chapter_id=chapter.id,
+                    chapter_ids=selected_chapter_ids,
+                    top_k=8 if len(chapters) > 1 else 6,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "rag_layered_retrieval_degraded course_id=%s chapter_ids=%s reason=%s",
+                    course.id,
+                    selected_chapter_ids,
+                    exc,
+                )
+                if not any(chapter_contents.values()):
+                    raise RuntimeError(
+                        f"知识库向量检索暂时不可用（请检查 Embedding 接口网络或代理设置）：{exc}"
+                    ) from exc
         if not any(chapter_contents.values()) and any(layer_document_ids.values()) and not retrieved_chunks:
             return AiAssistData(
                 answer="所选专题没有可用的教材原文或知识库片段，暂时无法生成有依据的内容。",

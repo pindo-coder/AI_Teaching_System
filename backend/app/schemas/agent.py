@@ -28,6 +28,18 @@ class LessonPrepInput(BaseModel):
     output_types: list[Literal["outline", "lesson_plan", "ppt"]] = Field(
         default_factory=lambda: ["outline"]
     )
+    news_item_ids: list[int] = Field(default_factory=list, max_length=3)
+
+    @field_validator("news_item_ids")
+    @classmethod
+    def normalize_news_item_ids(cls, value: list[int]) -> list[int]:
+        deduped: list[int] = []
+        for item_id in value:
+            if item_id < 1:
+                raise ValueError("关联时政 ID 必须为正整数")
+            if item_id not in deduped:
+                deduped.append(item_id)
+        return deduped
 
 
 class AgentRunCreate(BaseModel):

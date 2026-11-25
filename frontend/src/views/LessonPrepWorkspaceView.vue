@@ -14,7 +14,9 @@ import {
   type AgentArtifact,
 } from '@/api/agents'
 import { courseApi } from '@/api/courses'
+import { newsApi, type NewsItem } from '@/api/news'
 import { teachingClassApi, type TeachingClass } from '@/api/teachingClasses'
+import { consumeLessonPrepNewsHandoff } from '@/utils/newsTeachingHandoff'
 import EvidenceCard from '@/components/ui/EvidenceCard.vue'
 import PptSlidePreview from '@/components/PptSlidePreview.vue'
 import StatusChip from '@/components/ui/StatusChip.vue'
@@ -47,6 +49,7 @@ const learningStage = ref<LearningStage>('preview')
 const studentLevel = ref('本科生')
 const completionCondition = ref('教材阅读')
 const teachingGoal = ref('')
+const attachedNewsItems = ref<NewsItem[]>([])
 const currentRun = ref<AgentRun | null>(null)
 const activeStage = ref(1)
 const capabilities = ref<AgentCapabilities>({
@@ -276,6 +279,17 @@ async function applyRun(run: AgentRun) {
     studentLevel.value = String(run.input_data.student_level || '本科生')
     completionCondition.value = String(run.input_data.completion_condition || '教材阅读')
     teachingGoal.value = String(run.input_data.teaching_goal || '')
+    const savedNewsIds = Array.isArray(run.input_data.news_item_ids)
+      ? run.input_data.news_item_ids.map(Number).filter((id) => Number.isFinite(id) && id > 0)
+      : []
+    if (savedNewsIds.length) {
+      const loaded = await Promise.all(
+        savedNewsIds.map((id) => newsApi.detail(id).then((res) => res.data.data).catch(() => null)),
+      )
+      attachedNewsItems.value = loaded.filter((item): item is NewsItem => Boolean(item))
+    } else {
+      attachedNewsItems.value = []
+    }
     if (run.input_data.ppt_preferences) {
       const savedPreferences = run.input_data.ppt_preferences as Partial<PptPreferences>
       pptPreferences.value = { ...pptPreferences.value, ...savedPreferences, title: savedPreferences.title || '' }
@@ -375,6 +389,10 @@ function refreshVisibleProgress() {
   if (!document.hidden) progressMonitor.refresh()
 }
 
+function removeAttachedNews(newsId: number) {
+  attachedNewsItems.value = attachedNewsItems.value.filter((item) => item.id !== newsId)
+}
+
 async function startAgent() {
   if (!selectedCourseId.value || !selectedChapterId.value) {
     ElMessage.warning('请先选择课程与教材专题')
@@ -394,6 +412,7 @@ async function startAgent() {
         completion_condition: completionCondition.value.trim() || null,
         teaching_goal: teachingGoal.value.trim() || null,
         output_types: ['outline'],
+        news_item_ids: attachedNewsItems.value.map((item) => item.id),
       },
     })
     currentRun.value = response.data.data
@@ -755,16 +774,59 @@ onMounted(async () => {
     capabilities.value = capabilityResponse.data.data
     if (!capabilities.value.ppt_multimodal_available) pptPreferences.value.include_visuals = false
     const requestedRunId = Number(route.query.run_id)
-    const latest = runResponse.data.data.find((item) => item.id === requestedRunId)
-      || runResponse.data.data.find((item) => item.agent_type === 'teacher_lesson_prep')
-      || null
-    if (latest) await applyRun(latest)
-    else if (courses.value[0]?.id) {
-      selectedCourseId.value = courses.value[0].id
-      await loadCourse(courses.value[0].id)
-    }
-    if (Number.isFinite(requestedRunId) && requestedRunId > 0 && latest?.id !== requestedRunId) {
-      await openRunFromRoute()
+    const requestedNewsId = Number(route.query.news_id)
+    const newsHandoff = !Number.isFinite(requestedRunId) || requestedRunId < 1
+      ? consumeLessonPrepNewsHandoff()
+      : null
+    if (newsHandoff) {
+      hydratingRun.value = true
+      try {
+        currentRun.value = null
+        activeStage.value = 1
+        attachedNewsItems.value = [newsHandoff.newsItem]
+        const courseId = courses.value.some((item) => item.id === newsHandoff.courseId)
+          ? newsHandoff.courseId
+          : courses.value[0]?.id
+        selectedCourseId.value = courseId
+        if (courseId) await loadCourse(courseId, newsHandoff.chapterId)
+        selectedTeachingClassId.value = newsHandoff.teachingClassId && eligibleTeachingClasses.value.some((c) => c.id === newsHandoff.teachingClassId)
+          ? newsHandoff.teachingClassId
+          : eligibleTeachingClasses.value[0]?.id
+        teachingGoal.value = newsHandoff.teachingGoal
+        ElMessage.success('已载入时政备课素材，确认参数后即可构建包含该时政的证据包')
+      } finally {
+        hydratingRun.value = false
+      }
+    } else if ((!Number.isFinite(requestedRunId) || requestedRunId < 1) && Number.isFinite(requestedNewsId) && requestedNewsId > 0) {
+      hydratingRun.value = true
+      try {
+        const newsItem = (await newsApi.detail(requestedNewsId)).data.data
+        currentRun.value = null
+        activeStage.value = 1
+        attachedNewsItems.value = [newsItem]
+        if (courses.value[0]?.id) {
+          selectedCourseId.value = courses.value[0].id
+          await loadCourse(courses.value[0].id)
+        }
+        selectedTeachingClassId.value = eligibleTeachingClasses.value[0]?.id
+        teachingGoal.value = `结合时政热点“${newsItem.title}”开展案例剖析与课堂思辨。`
+      } catch {
+        // 时政记录不存在时回退到默认最新任务
+      } finally {
+        hydratingRun.value = false
+      }
+    } else {
+      const latest = runResponse.data.data.find((item) => item.id === requestedRunId)
+        || runResponse.data.data.find((item) => item.agent_type === 'teacher_lesson_prep')
+        || null
+      if (latest) await applyRun(latest)
+      else if (courses.value[0]?.id) {
+        selectedCourseId.value = courses.value[0].id
+        await loadCourse(courses.value[0].id)
+      }
+      if (Number.isFinite(requestedRunId) && requestedRunId > 0 && latest?.id !== requestedRunId) {
+        await openRunFromRoute()
+      }
     }
   } finally {
     loading.value = false
@@ -956,6 +1018,19 @@ onBeforeUnmount(() => {
                 />
               </el-form-item>
             </div>
+            <el-form-item v-if="attachedNewsItems.length">
+              <template #label><span class="prep-field-label">已关联时政备课素材</span></template>
+              <div class="attached-news-list">
+                <div v-for="news in attachedNewsItems" :key="news.id" class="attached-news-item">
+                  <div class="attached-news-body">
+                    <el-tag size="small" type="danger" effect="light">时政热点</el-tag>
+                    <strong>{{ news.title }}</strong>
+                    <span>{{ news.source_name }} · 构建后将作为真实证据卡进入证据快照</span>
+                  </div>
+                  <el-button text type="danger" size="small" :disabled="isExecuting" @click="removeAttachedNews(news.id)">移除</el-button>
+                </div>
+              </div>
+            </el-form-item>
             <el-form-item>
               <template #label><span class="prep-field-label">任务要求 <i>*</i></span></template>
               <el-input v-model="teachingGoal" type="textarea" :rows="4" :disabled="isExecuting" placeholder="说明学习重点和具体要求，例如：围绕本专题梳理核心概念并准备课堂讨论。" />
@@ -984,8 +1059,8 @@ onBeforeUnmount(() => {
             :title="`[资料${index + 1}] ${item.source_title}`"
             :source="item.publisher || item.evidence_type"
             :published-date="item.published_date"
-            :authority="item.material_type === 'central'"
-            :status-label="item.material_type === 'textbook' ? '教材' : undefined"
+            :authority="item.material_type === 'central' || item.material_type === 'current_affairs'"
+            :status-label="item.material_type === 'textbook' ? '教材' : item.material_type === 'current_affairs' ? '时政热点' : undefined"
             :source-url="item.source_url"
             :excerpt="`${item.position} · ${item.excerpt}`"
           />
@@ -1822,6 +1897,11 @@ onBeforeUnmount(() => {
 .dialog-form { margin-top: var(--space-4); }
 .dialog-form input[type="file"] { display: block; width: 100%; padding: var(--space-3); background: var(--surface-muted); border: 1px dashed var(--line); border-radius: var(--radius-input); }
 .dialog-form small { display: block; margin-top: var(--space-2); color: var(--ink-400); }
+.attached-news-list { display: grid; gap: 8px; width: 100%; }
+.attached-news-item { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; background: #fff7f5; border: 1px solid #f7d6cf; border-left: 3px solid var(--authority-red); border-radius: 10px; }
+.attached-news-body { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; font-size: 13px; color: var(--ink-700); }
+.attached-news-body strong { color: var(--ink-900); }
+.attached-news-body span { font-size: 12px; color: var(--ink-500); }
 @media (max-width: 767px) {
   .artifact-overview { padding: 12px 14px; }
   .version-switcher { grid-template-columns: minmax(0, 1fr); gap: 6px; }

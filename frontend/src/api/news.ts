@@ -45,8 +45,30 @@ export interface NewsSummaryStreamHandlers {
   onSources: () => void
 }
 
+export type NewsClassroomActivityType = 'judgment' | 'qa' | 'group'
+
+export interface NewsDebateSourceCitation {
+  news_id: number
+  title: string
+  source_name: string
+  published_time: string
+  article_url: string
+}
+
+export interface NewsDebateDraftData {
+  activity_type: NewsClassroomActivityType
+  question: string
+  options: string[]
+  suggested_minutes: number
+  teaching_guide: string[]
+  textbook_position: string
+  source_citation: NewsDebateSourceCitation
+  model: string
+}
+
 export const newsApi = {
   list: () => http.get<ApiResponse<NewsItem[]>>('/current-affairs'),
+  detail: (newsId: number) => http.get<ApiResponse<NewsItem>>(`/current-affairs/${newsId}`),
   search: (filters: { q?: string; sources?: string[]; days?: number | null; sort?: 'latest' | 'relevance'; page?: number; pageSize?: number }) => {
     const params = new URLSearchParams()
     if (filters.q) params.set('q', filters.q)
@@ -60,6 +82,11 @@ export const newsApi = {
   refresh: () => http.post<ApiResponse<NewsItem[]>>('/current-affairs/refresh'),
   textbookRelations: (newsId: number, courseId: number, options: { signal?: AbortSignal } = {}) =>
     http.get<ApiResponse<TextbookRelationItem[]>>(`/current-affairs/${newsId}/textbook-relations`, { params: { course_id: courseId }, signal: options.signal }),
+  classroomDebateDraft: (
+    newsId: number,
+    payload: { course_id: number; chapter_id: number; activity_type: NewsClassroomActivityType },
+  ) =>
+    http.post<ApiResponse<NewsDebateDraftData>>(`/current-affairs/${newsId}/classroom-debate-draft`, payload, { timeout: 90_000 }),
   async summaryStream(newsId: number, handlers: NewsSummaryStreamHandlers, options: { signal?: AbortSignal } = {}) {
     await streamSseJson(`/current-affairs/${newsId}/ai-summary/stream`, (event, data) => {
       if (event === 'meta') handlers.onMeta(data as Parameters<NewsSummaryStreamHandlers['onMeta']>[0])

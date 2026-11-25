@@ -4,11 +4,19 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_current_user
+from app.api.dependencies import get_current_user, require_roles
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.common import ApiResponse
-from app.schemas.news import NewsItemRead, NewsSearchData, NewsStudyNoteSave, NewsStudyNoteSaveResult, TextbookRelationItem
+from app.schemas.news import (
+    NewsDebateDraftData,
+    NewsDebateDraftRequest,
+    NewsItemRead,
+    NewsSearchData,
+    NewsStudyNoteSave,
+    NewsStudyNoteSaveResult,
+    TextbookRelationItem,
+)
 from app.services.news_service import NewsService
 from app.core.config import settings
 
@@ -53,10 +61,31 @@ def search_news(
     return ApiResponse(data=NewsSearchData(**result))
 
 
+@router.get("/{news_id}", response_model=ApiResponse[NewsItemRead])
+def get_news_item(
+    news_id: int,
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> ApiResponse[NewsItemRead]:
+    item = NewsService(db).require_news(news_id)
+    return ApiResponse(data=NewsItemRead.model_validate(item))
+
+
 @router.get("/{news_id}/textbook-relations", response_model=ApiResponse[list[TextbookRelationItem]])
 def textbook_relations(news_id: int, course_id: int = Query(gt=0),
                        _: User = Depends(get_current_user), db: Session = Depends(get_db)) -> ApiResponse[list[TextbookRelationItem]]:
     return ApiResponse(data=NewsService(db).textbook_relations(news_id, course_id))
+
+
+@router.post("/{news_id}/classroom-debate-draft", response_model=ApiResponse[NewsDebateDraftData])
+def generate_classroom_debate_draft(
+    news_id: int,
+    payload: NewsDebateDraftRequest,
+    _: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[NewsDebateDraftData]:
+    data = NewsService(db).generate_classroom_debate_draft(news_id, payload)
+    return ApiResponse(message="课堂辨析草稿已生成，请教师核验修改后再发布", data=NewsDebateDraftData(**data))
 
 
 @router.post("/{news_id}/ai-summary/stream")

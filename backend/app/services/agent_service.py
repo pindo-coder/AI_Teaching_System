@@ -28,8 +28,10 @@ from app.services.llm_compat import clean_model_text
 from app.models.agent_run import AgentRun, AgentStep
 from app.models.chapter import Chapter
 from app.models.course import Course
+from app.models.news_item import NewsItem
 from app.models.teaching_class import TeachingClass, TeachingClassTeacher
 from app.models.user import User
+from app.core.time import to_business_time
 from app.schemas.agent import (
     AgentArtifactRequest,
     AgentRunCreate,
@@ -39,8 +41,9 @@ from app.schemas.agent import (
     PptImageRevisionRequest,
     PptPreferences,
 )
-from app.schemas.ai import AiAssistData, AiAssistRequest
+from app.schemas.ai import AiAssistData, AiAssistRequest, AiSource
 from app.services.ai_service import AiService
+from app.services.news_service import _published_time_utc
 from app.services.ai_operation_service import AiProviderConfigService, build_chat_model
 from app.services.presentation_artifact_service import PresentationArtifactService
 from app.services.presentation_template_service import PresentationTemplateService
@@ -475,8 +478,62 @@ class AgentService:
                     raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权使用该教学班")
         return course, chapter
 
+    def _resolve_news_evidence(
+        self,
+        *,
+        course_id: int,
+        chapter_id: int,
+        news_item_ids: list[int],
+    ) -> tuple[list[AiSource], str]:
+        if not news_item_ids:
+            return [], ""
+        rows = self.db.scalars(select(NewsItem).where(NewsItem.id.in_(news_item_ids))).all()
+        by_id = {row.id: row for row in rows}
+        missing = [item_id for item_id in news_item_ids if item_id not in by_id]
+        if missing:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="关联的时政材料不存在")
+        sources: list[AiSource] = []
+        context_lines: list[str] = []
+        for item_id in news_item_ids:
+            item = by_id[item_id]
+            pub_utc = _published_time_utc(item)
+            published_date = to_business_time(pub_utc).strftime("%Y-%m-%d") if pub_utc else None
+            summary_text = (item.summary or "原始摘要未提供，请以原文链接核对具体事实。").strip()[:600]
+            sources.append(
+                AiSource(
+                    source_type="current_affairs",
+                    source_title=item.title.strip(),
+                    course_id=course_id,
+                    chapter_id=chapter_id,
+                    excerpt=summary_text,
+                    position="时政热点拓展案例",
+                    evidence_type="时政热点案例",
+                    material_type="current_affairs",
+                    publisher=item.source_name.strip(),
+                    published_date=published_date,
+                    source_url=item.article_url.strip(),
+                )
+            )
+            context_lines.append(
+                f"- 标题：{item.title.strip()}（来源：{item.source_name.strip()}"
+                f"{f'，{published_date}' if published_date else ''}）\n"
+                f"  摘要：{summary_text}\n"
+                f"  原文：{item.article_url.strip()}"
+            )
+        context_block = (
+            "\n\n【教师手动引入的时政热点案例（用于课程导入、案例剖析或课堂思辨；"
+            "仅可使用以下真实事实与出处，不得编造未提供的数据或政策细节）】\n"
+            + "\n".join(context_lines)
+        )
+        return sources, context_block
+
     def create(self, payload: AgentRunCreate, *, retry_of: int | None = None) -> AgentRunData:
         course, chapter = self._validate_context(payload)
+        news_sources, news_context_block = self._resolve_news_evidence(
+            course_id=course.id,
+            chapter_id=chapter.id,
+            news_item_ids=payload.input.news_item_ids,
+        )
         input_data = payload.input.model_dump()
         run = AgentRun(
             created_by=self.user.id,
@@ -529,13 +586,17 @@ class AgentService:
             if isinstance(prepared, AiAssistData):
                 raise ValueError(prepared.answer)
             variables, sources, _ = prepared
-            run.evidence_snapshot = [item.model_dump(mode="json") for item in sources]
-            run.context_snapshot = variables["chapter_content"]
+            combined_sources = [*news_sources, *sources]
+            run.evidence_snapshot = [item.model_dump(mode="json") for item in combined_sources]
+            run.context_snapshot = (variables["chapter_content"] or "") + news_context_block
             run.status = "waiting_confirmation"
             run.current_step = 1
             steps[1].status = "completed"
             steps[1].finished_time = _now()
-            steps[1].output_data = {"evidence_count": len(sources)}
+            steps[1].output_data = {
+                "evidence_count": len(combined_sources),
+                "news_evidence_count": len(news_sources),
+            }
         except Exception as exc:
             run.status = "failed"
             run.error_message = str(exc)
