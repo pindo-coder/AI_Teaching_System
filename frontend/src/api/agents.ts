@@ -369,6 +369,19 @@ export const agentApi = {
     http.post<ApiResponse<CoursewareImpactDraft>>(`/agent/runs/${id}/courseware-impact/draft`, payload, {
       timeout: 90_000,
     }),
+  applyCoursewareImpact: (id: number, payload: {
+    change_id: number
+    slide_index: number
+    expected_revision_id: string
+    title: string
+    takeaway: string
+    bullets: string[]
+    speaker_notes?: string
+    confirmed: true
+  }) =>
+    http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/courseware-impact/apply`, payload, {
+      timeout: 180_000,
+    }),
   revisePptSlide: (
     id: number,
     slideIndex: number,

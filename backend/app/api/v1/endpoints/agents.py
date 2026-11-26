@@ -20,6 +20,7 @@ from app.schemas.agent import (
     AgentRunCreate,
     AgentRunData,
     AgentCapabilities,
+    CoursewareImpactApplyRequest,
     CoursewareImpactDraftRequest,
     LessonPublicationData,
     LessonPublishRequest,
@@ -201,6 +202,17 @@ def create_courseware_impact_draft(
         message="已生成待教师核验的修改草稿；未写入数据库或课件",
         data=data,
     )
+
+
+@router.post("/runs/{run_id}/courseware-impact/apply", response_model=ApiResponse[AgentRunData])
+def apply_courseware_impact(
+    run_id: int,
+    payload: CoursewareImpactApplyRequest,
+    user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[AgentRunData]:
+    data = AgentService(db, user).apply_courseware_impact(run_id, payload)
+    return ApiResponse(message="已保存为课件新版本，上一版本已保留；未发布", data=data)
 
 
 @router.post("/runs/{run_id}/confirm", response_model=ApiResponse[AgentRunData])

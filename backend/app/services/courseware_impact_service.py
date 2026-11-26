@@ -26,6 +26,14 @@ def _resolve_evidence_index(ref: object, total: int) -> int | None:
 
 
 def _source_matches_change(source: dict, change: "PolicyChange") -> bool:
+    # A source already carrying the change's NEW excerpt is the updated
+    # evidence, even when it shares the old URL/document: not an old match.
+    if isinstance(source, dict):
+        excerpt = (source.get("excerpt") or "").strip()
+        new_excerpt = (getattr(change, "new_excerpt", None) or "").strip()
+        old_excerpt = (getattr(change, "old_excerpt", None) or "").strip()
+        if excerpt and excerpt == new_excerpt and excerpt != old_excerpt:
+            return False
     old_document_id = getattr(change, "old_document_id", None)
     source_document_id = source.get("document_id") if isinstance(source, dict) else None
 
