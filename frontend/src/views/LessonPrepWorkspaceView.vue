@@ -12,6 +12,8 @@ import {
   type PptVersion,
   type PptVersionPreview,
   type AgentArtifact,
+  type CoursewareImpact,
+  type CoursewareImpactRecord,
 } from '@/api/agents'
 import { courseApi } from '@/api/courses'
 import { newsApi, type NewsItem } from '@/api/news'
@@ -103,6 +105,15 @@ const versionError = ref('')
 let versionRequest = 0
 let versionController: AbortController | undefined
 const versionCache = new Map<string, PptVersionPreview>()
+const impactRecord = ref<CoursewareImpactRecord | null>(null)
+const impactLoading = ref(false)
+const impactError = ref('')
+const impactQueried = ref(false)
+const impactDraft = ref<{ text: string; needsReview: boolean; slideNumber: number; slideTitle: string } | null>(null)
+const impactDraftLoadingKey = ref('')
+const impactDraftError = ref('')
+let impactRequest = 0
+let impactDraftRequest = 0
 const hydratingRun = ref(false)
 const imageDialogVisible = ref(false)
 const imageSlideIndex = ref(0)
@@ -654,6 +665,97 @@ function versionFailure(error: unknown, fallback: string) {
   return typeof detail === 'string' ? detail : fallback
 }
 
+function impactKey(item: CoursewareImpact) {
+  return `${item.change_id}-${item.slide_index}`
+}
+
+function safeSourceUrl(value: string | null | undefined) {
+  if (!value) return ''
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : ''
+  } catch {
+    return ''
+  }
+}
+
+function resetCoursewareImpact() {
+  impactRequest++
+  impactDraftRequest++
+  impactRecord.value = null
+  impactQueried.value = false
+  impactLoading.value = false
+  impactError.value = ''
+  impactDraft.value = null
+  impactDraftLoadingKey.value = ''
+  impactDraftError.value = ''
+}
+
+async function queryCoursewareImpact() {
+  if (!currentRun.value || !artifactBundle.value?.ppt || isBrowsingHistory.value
+    || impactLoading.value || impactDraftLoadingKey.value) return
+  const request = ++impactRequest
+  const runId = currentRun.value.id
+  const revision = artifactBundle.value?.ppt?.revision_id || ''
+  const versionId = selectedVersionId.value
+  impactLoading.value = true
+  impactQueried.value = true
+  impactError.value = ''
+  impactRecord.value = null
+  impactDraft.value = null
+  impactDraftLoadingKey.value = ''
+  impactDraftError.value = ''
+  try {
+    const response = await agentApi.coursewareImpact(runId)
+    if (request !== impactRequest || currentRun.value?.id !== runId
+      || selectedVersionId.value !== versionId
+      || (artifactBundle.value?.ppt?.revision_id || '') !== revision) return
+    const record = response.data.data.record
+    if ((record.revision_id || '') !== revision) {
+      impactError.value = '课件版本已变化，请刷新页面后重新查询。'
+      return
+    }
+    impactRecord.value = record
+  } catch (error) {
+    if (request === impactRequest) impactError.value = versionFailure(error, '资料更新影响查询失败，请稍后重试')
+  } finally {
+    if (request === impactRequest) impactLoading.value = false
+  }
+}
+
+async function generateImpactDraft(item: CoursewareImpact) {
+  const record = impactRecord.value
+  const expectedRevision = record?.revision_id
+  if (!currentRun.value || !expectedRevision || isBrowsingHistory.value
+    || impactLoading.value || impactDraftLoadingKey.value) return
+  const runId = currentRun.value.id
+  const request = ++impactDraftRequest
+  const key = impactKey(item)
+  impactDraftLoadingKey.value = key
+  impactDraftError.value = ''
+  impactDraft.value = null
+  try {
+    const response = await agentApi.draftCoursewareImpact(runId, {
+      change_id: item.change_id,
+      slide_index: item.slide_index,
+      expected_revision_id: expectedRevision,
+    })
+    if (request !== impactDraftRequest || currentRun.value?.id !== runId
+      || (artifactBundle.value?.ppt?.revision_id || '') !== expectedRevision) return
+    impactRecord.value = response.data.data.record
+    impactDraft.value = {
+      text: response.data.data.draft_text,
+      needsReview: response.data.data.needs_teacher_review,
+      slideNumber: item.slide_number,
+      slideTitle: item.slide_title || '未命名页',
+    }
+  } catch (error) {
+    if (request === impactDraftRequest) impactDraftError.value = versionFailure(error, '草稿生成失败，请稍后重试；课件未被修改')
+  } finally {
+    if (request === impactDraftRequest) impactDraftLoadingKey.value = ''
+  }
+}
+
 async function loadVersionPreview() {
   const request = ++versionRequest
   versionController?.abort()
@@ -860,7 +962,12 @@ watch([
 }, { flush: 'sync' })
 watch(() => pptPreferences.value.slide_count, (value) => setSlideCount(value || 10))
 watch(() => route.query.run_id, () => { void openRunFromRoute() })
-watch(selectedVersionId, () => { void loadVersionPreview() })
+watch(selectedVersionId, () => {
+  void loadVersionPreview()
+  resetCoursewareImpact()
+})
+watch(() => currentRun.value?.id, () => resetCoursewareImpact())
+watch(() => artifactBundle.value?.ppt?.revision_id, () => resetCoursewareImpact())
 watch(() => currentRun.value?.id, () => {
   selectedVersionId.value = ''
   versionCache.clear()
@@ -1378,6 +1485,82 @@ onBeforeUnmount(() => {
             <div v-if="versionLoading" class="version-loading" v-loading="true" aria-busy="true">正在切换课件预览…</div>
             <UiEmptyState v-else-if="versionError" title="历史版本读取失败" description="可重试，或返回当前版本继续使用。当前课件未被修改。" />
             <template v-else-if="displayedPpt">
+            <section
+              v-if="artifactBundle?.ppt && !isBrowsingHistory && !isHistoricalArtifact('ppt')"
+              class="impact-panel"
+              aria-label="资料更新影响"
+            >
+              <div class="impact-heading">
+                <div>
+                  <strong>资料更新影响</strong>
+                  <small v-if="!impactQueried">核对已确认并同步的资料变更。</small>
+                  <small v-else-if="impactRecord?.impacts.length && !impactRecord.revision_id">生成修订草稿需要可校验的课件版本。</small>
+                </div>
+                <el-button
+                  size="small"
+                  :loading="impactLoading"
+                  :disabled="acting || isExecuting || Boolean(impactDraftLoadingKey)"
+                  @click="queryCoursewareImpact"
+                >
+                  {{ impactQueried ? '重新查询' : '查询影响' }}
+                </el-button>
+              </div>
+              <p v-if="impactError" class="impact-error" role="alert">{{ impactError }}</p>
+              <template v-else-if="impactRecord">
+                <p v-if="impactRecord.status === 'unavailable'" class="impact-state">
+                  旧课件缺少可靠的页级资料引用，暂无法计算资料更新影响；请重新生成课件后再查询。
+                </p>
+                <p v-else-if="!impactRecord.impacts.length" class="impact-state">
+                  当前没有已确认并同步的资料变化影响这份课件。
+                </p>
+                <div v-else class="impact-list">
+                  <article v-for="item in impactRecord.impacts" :key="impactKey(item)" class="impact-item">
+                    <div class="impact-item-heading">
+                      <strong>第 {{ item.slide_number }} 页 · {{ item.slide_title || '未命名页' }}</strong>
+                    </div>
+                    <dl class="impact-excerpts">
+                      <div>
+                        <dt>旧版原文</dt>
+                        <dd>{{ item.old_excerpt || '原资料未提供可对照原文' }}</dd>
+                      </div>
+                      <div>
+                        <dt>新版原文</dt>
+                        <dd>{{ item.new_excerpt || '新资料未提供可对照原文' }}</dd>
+                      </div>
+                    </dl>
+                    <div class="impact-sources">
+                      <a v-if="safeSourceUrl(item.old_source_url)" :href="safeSourceUrl(item.old_source_url)"
+                        target="_blank" rel="noopener noreferrer">查看原来源</a>
+                      <a v-if="safeSourceUrl(item.new_source_url)" :href="safeSourceUrl(item.new_source_url)"
+                        target="_blank" rel="noopener noreferrer">查看新来源</a>
+                      <span v-if="!safeSourceUrl(item.old_source_url) && !safeSourceUrl(item.new_source_url)">暂无可用来源链接</span>
+                    </div>
+                    <el-tooltip :disabled="Boolean(impactRecord?.revision_id)" content="当前课件未绑定可校验版本，暂不能生成草稿" placement="top">
+                      <span class="impact-draft-action">
+                        <el-button
+                          size="small"
+                          type="primary"
+                          plain
+                          :disabled="!impactRecord?.revision_id || acting || isExecuting || Boolean(impactDraftLoadingKey)"
+                          :loading="impactDraftLoadingKey === impactKey(item)"
+                          @click="generateImpactDraft(item)"
+                        >
+                          生成修订草稿
+                        </el-button>
+                      </span>
+                    </el-tooltip>
+                  </article>
+                </div>
+                <div v-if="impactDraft" class="impact-draft" role="status">
+                  <div class="impact-draft-heading">
+                    <strong>修订草稿 · 第 {{ impactDraft.slideNumber }} 页《{{ impactDraft.slideTitle }}》</strong>
+                    <span v-if="impactDraft.needsReview">待教师核验 · 未修改课件</span>
+                  </div>
+                  <p class="impact-draft-text">{{ impactDraft.text }}</p>
+                </div>
+                <p v-if="impactDraftError" class="impact-error" role="alert">{{ impactDraftError }}</p>
+              </template>
+            </section>
             <section v-if="pptQuality && (!pptQuality.passed || pptQuality.issues.length)" class="ppt-quality" role="status">
               <div class="quality-heading">
                 <strong>课件有待核验项</strong>
@@ -1837,6 +2020,29 @@ onBeforeUnmount(() => {
 .artifact-file-footer :deep(.el-button) { flex: none; margin-left: auto; }
 .artifact-preview-tabs { margin-top: var(--space-5); }
 .multimodal-status { margin-bottom: var(--space-4); }
+.impact-panel { display: grid; gap: 10px; margin-bottom: var(--space-4); padding: 12px 14px; background: #f4f8fd; border: 1px solid #cfe0f3; border-radius: var(--radius-card); }
+.impact-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px 16px; }
+.impact-heading strong { display: block; color: #26466b; font-size: 13px; line-height: 1.5; }
+.impact-heading small { display: block; margin-top: 3px; color: #5d7188; font-size: 12px; line-height: 1.5; }
+.impact-heading :deep(.el-button) { flex: none; }
+.impact-state { margin: 0; padding: 10px 12px; color: #53677d; background: rgb(255 255 255 / 76%); border-radius: var(--radius-input); font-size: 12px; line-height: 1.6; }
+.impact-error { margin: 0; padding: 8px 10px; color: #b33d45; background: #fff3f4; border-radius: var(--radius-input); font-size: 12px; line-height: 1.5; }
+.impact-list { display: grid; gap: 10px; }
+.impact-item { display: grid; gap: 8px; padding: 10px 12px; background: rgb(255 255 255 / 82%); border: 1px solid var(--line); border-radius: var(--radius-input); }
+.impact-item-heading strong { color: #26466b; font-size: 13px; line-height: 1.5; }
+.impact-excerpts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.impact-excerpts div { padding: 8px 10px; background: #f7f9fc; border-radius: var(--radius-input); }
+.impact-excerpts dt { margin-bottom: 4px; color: #7b8ca0; font-size: 11px; }
+.impact-excerpts dd { margin: 0; color: #33495e; font-size: 12px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.impact-sources { display: flex; flex-wrap: wrap; gap: 4px 14px; color: #7b8ca0; font-size: 12px; }
+.impact-sources a { color: #1f5fa8; text-decoration: underline; }
+.impact-draft-action { display: inline-flex; justify-self: start; }
+.impact-draft { display: grid; gap: 6px; padding: 10px 12px; color: #5b3a10; background: #fff9ea; border: 1px solid #efd9a4; border-radius: var(--radius-input); }
+.impact-draft-heading { display: flex; align-items: baseline; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; }
+.impact-draft-heading strong { font-size: 13px; line-height: 1.5; }
+.impact-draft-heading span { color: #9a6a18; font-size: 11px; }
+.impact-draft-text { margin: 0; color: #5b4a2e; font-size: 12px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+.impact-draft small { color: #8a7448; font-size: 11px; line-height: 1.5; }
 .ppt-quality { display: grid; gap: 6px; margin-bottom: 12px; padding: 10px 12px; background: #fff8ee; border: 1px solid #edd3a7; border-radius: var(--radius-input); }
 .quality-heading { justify-content: flex-start; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; }
 .quality-heading strong { color: #855514; font-size: 13px; line-height: 1.5; }

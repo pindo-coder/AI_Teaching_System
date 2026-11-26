@@ -120,6 +120,12 @@ class PptVersionRestoreRequest(BaseModel):
     expected_revision: str | None = Field(default=None, max_length=80)
 
 
+class CoursewareImpactDraftRequest(BaseModel):
+    change_id: int = Field(ge=1)
+    slide_index: int = Field(ge=0)
+    expected_revision_id: str = Field(min_length=1, max_length=80)
+
+
 class PresentationTemplateData(BaseModel):
     id: int
     owner_id: int
