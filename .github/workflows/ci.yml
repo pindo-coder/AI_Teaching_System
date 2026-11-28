@@ -32,6 +32,9 @@ jobs:
       - name: Run Ruff static checks
         working-directory: backend
         run: ruff check app tests
+      - name: Install pinned PPT Master runtime
+        working-directory: backend
+        run: python scripts/install_ppt_master.py
       - name: Run backend test suite
         working-directory: backend
         # 原生 PPT LibreOffice 渲染集成测试由 presentation-workflow.yml 专项覆盖。
