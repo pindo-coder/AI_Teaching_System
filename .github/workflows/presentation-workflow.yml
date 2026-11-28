@@ -53,6 +53,7 @@ jobs:
       AI_MOCK_MODE: 'true'
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONPATH: .
+      PPT_RENDER_ISOLATION: process
       PPT_MYSQL_TEST_URL: mysql+pymysql://ppt_ci:disposable-ci-password@127.0.0.1:3306/ppt_workflow_ci?charset=utf8mb4
     steps:
       - uses: actions/checkout@v4

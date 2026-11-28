@@ -316,7 +316,7 @@ class AgentService:
         current_path = AgentRun.output_data["artifacts"]["ppt"]["storage_path"].as_string()
         values = {key: getattr(run, key) for key in (
             "output_data", "input_data", "status", "current_step", "cancel_requested",
-            "error_message", "finished_time", "prompt_version",
+            "error_message", "finished_time", "prompt_version", "evidence_snapshot",
         )}
         with self.db.no_autoflush:
             result = self.db.execute(update(AgentRun).where(
@@ -830,6 +830,91 @@ class AgentService:
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"本页重新生成失败：{exc}",
             ) from exc
+        self._commit_artifact_mutation(run, previous_path)
+        return self.serialize(self.db, run)
+
+    def apply_courseware_impact(self, run_id: int, payload) -> AgentRunData:
+        """Save teacher-edited text for one impacted page as a new PPT revision.
+
+        No model call and no publication. Any failure leaves the run untouched.
+        """
+        from pydantic import ValidationError
+
+        from app.models.authority_discovery import PolicyChange
+        from app.schemas.presentation import PptPage
+        from app.services.courseware_impact_service import (
+            _source_matches_change, analyze_run_courseware_impact,
+        )
+
+        run = self._get_owned(run_id)
+        if run.created_by != self.user.id:
+            raise HTTPException(status_code=403, detail="只有课件所有者可以保存新版本")
+        if run.status in {"queued", "running"}:
+            raise HTTPException(status_code=409, detail="当前任务仍在执行")
+        previous_path = self._ppt_path(run)
+        result = analyze_run_courseware_impact(self.db, run)
+        if result.get("status") == "unavailable":
+            raise HTTPException(status_code=404, detail="当前课件没有可核验的资料依据")
+        if result.get("revision_id") != payload.expected_revision_id:
+            raise HTTPException(status_code=409, detail="课件版本已变化，请刷新后重试")
+        impact = next((item for item in result.get("impacts") or []
+                       if item.get("change_id") == payload.change_id
+                       and item.get("slide_index") == payload.slide_index), None)
+        change = self.db.get(PolicyChange, payload.change_id)
+        if impact is None or change is None:
+            raise HTTPException(status_code=404, detail="未找到该变更在当前课件页面中的影响")
+        if not change.new_source_url:
+            raise HTTPException(status_code=409, detail="新资料缺少可核验出处，不能保存新版本")
+        ppt_data = json.loads(json.dumps(
+            ((run.output_data or {}).get("artifact_bundle") or {}).get("ppt"), ensure_ascii=False))
+        if ppt_data.get("pipeline_version") != "ppt-master-svg-v2":
+            raise HTTPException(status_code=409, detail="旧版课件继续支持下载；请重新生成新版后再保存")
+        old_page = ppt_data["slides"][payload.slide_index]
+        evidence = json.loads(json.dumps(run.evidence_snapshot or [], ensure_ascii=False))
+        # Append (never reorder) so every other page's 资料N index stays valid.
+        # Same-URL updates are common: reuse only an entry that already holds the
+        # NEW excerpt, never an old excerpt that merely shares the URL.
+        new_index = next((i for i, item in enumerate(evidence)
+                          if isinstance(item, dict) and item.get("source_url") == change.new_source_url
+                          and (item.get("excerpt") or "").strip() == (change.new_excerpt or "").strip()), None)
+        if new_index is None:
+            evidence.append(AiSource(
+                source_type="policy", source_title=change.new_source_title or "资料更新",
+                course_id=run.course_id, chapter_id=run.chapter_id, excerpt=change.new_excerpt,
+                position="已确认资料更新", evidence_type="权威资料更新", material_type="central",
+                source_url=change.new_source_url,
+            ).model_dump(mode="json"))
+            new_index = len(evidence) - 1
+        old_refs = [ref for ref in old_page.get("evidence_refs") or []
+                    if not (ref.removeprefix("资料").isdigit() and 0 < int(ref.removeprefix("资料")) <= len(evidence)
+                            and _source_matches_change(evidence[int(ref.removeprefix("资料")) - 1], change))]
+        refs = [*old_refs, f"资料{new_index + 1}"]
+        fields = {key: value for key, value in old_page.items() if key in PptPage.model_fields}
+        fields.update(title=payload.title, takeaway=payload.takeaway, bullets=payload.bullets,
+                      evidence_refs=list(dict.fromkeys(refs)))
+        if payload.speaker_notes:
+            fields["speaker_notes"] = payload.speaker_notes
+        try:
+            candidate = PptPage.model_validate(fields).model_dump()
+        except ValidationError as exc:
+            raise HTTPException(status_code=400, detail="页面文字不符合要求（长度、条数或资料编号标记）") from exc
+        if all(candidate[key] == old_page.get(key) for key in ("title", "takeaway", "bullets", "speaker_notes")):
+            raise HTTPException(status_code=400, detail="页面文字没有变化，未生成新版本")
+        try:
+            artifact, revised = PptWorkflowService(self.db, self.user.id, run.id).revise(
+                ppt_data, payload.slide_index,
+                PptSlideRevisionRequest(instruction="教师审阅资料更新", mode="content"),
+                evidence, page_override=candidate,
+            )
+        except HTTPException:
+            raise
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=f"新文字无法放入现有版面：{exc}") from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"保存新版本失败：{exc}") from exc
+        self._archive_ppt_version(run, f"资料更新：修改第 {payload.slide_index + 1} 页前")
+        self._save_updated_ppt(run, revised, artifact)
+        run.evidence_snapshot = evidence
         self._commit_artifact_mutation(run, previous_path)
         return self.serialize(self.db, run)
 

@@ -310,6 +310,29 @@ export interface LessonPublication {
   created_time: string
 }
 
+export interface CoursewareImpact {
+  slide_index: number
+  slide_number: number
+  slide_title: string | null
+  change_id: number
+  old_excerpt: string | null
+  new_excerpt: string | null
+  old_source_url: string | null
+  new_source_url: string | null
+}
+
+export interface CoursewareImpactRecord {
+  revision_id: string | null
+  status: 'ready' | 'unavailable'
+  impacts: CoursewareImpact[]
+}
+
+export interface CoursewareImpactDraft {
+  record: CoursewareImpactRecord
+  draft_text: string
+  needs_teacher_review: boolean
+}
+
 export const agentApi = {
   pptSlidePreview: (id: number, slideIndex: number, versionId?: string, expectedRevision?: string, signal?: AbortSignal) =>
     http.get<Blob>(`/agent/runs/${id}/ppt/slides/${slideIndex}/preview`, {
@@ -335,6 +358,29 @@ export const agentApi = {
       output_types: outputTypes,
       ppt_preferences: outputTypes.includes('ppt') ? pptPreferences : undefined,
       resume,
+    }),
+  coursewareImpact: (id: number) =>
+    http.get<ApiResponse<{ record: CoursewareImpactRecord }>>(`/agent/runs/${id}/courseware-impact`),
+  draftCoursewareImpact: (id: number, payload: {
+    change_id: number
+    slide_index: number
+    expected_revision_id: string
+  }) =>
+    http.post<ApiResponse<CoursewareImpactDraft>>(`/agent/runs/${id}/courseware-impact/draft`, payload, {
+      timeout: 90_000,
+    }),
+  applyCoursewareImpact: (id: number, payload: {
+    change_id: number
+    slide_index: number
+    expected_revision_id: string
+    title: string
+    takeaway: string
+    bullets: string[]
+    speaker_notes?: string
+    confirmed: true
+  }) =>
+    http.post<ApiResponse<AgentRun>>(`/agent/runs/${id}/courseware-impact/apply`, payload, {
+      timeout: 180_000,
     }),
   revisePptSlide: (
     id: number,

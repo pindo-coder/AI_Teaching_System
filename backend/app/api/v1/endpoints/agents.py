@@ -20,6 +20,8 @@ from app.schemas.agent import (
     AgentRunCreate,
     AgentRunData,
     AgentCapabilities,
+    CoursewareImpactApplyRequest,
+    CoursewareImpactDraftRequest,
     LessonPublicationData,
     LessonPublishRequest,
     PptSlideRevisionRequest,
@@ -33,6 +35,10 @@ from app.services.agent_service import (
     execute_lesson_artifacts,
     execute_lesson_outline,
     execute_ppt_image_revision,
+)
+from app.services.courseware_impact_service import (
+    analyze_run_courseware_impact,
+    draft_courseware_impact,
 )
 from app.services.ai_operation_service import AiProviderConfigService
 from app.services.presentation_template_service import PresentationTemplateService
@@ -158,6 +164,55 @@ def get_run(
     db: Session = Depends(get_db),
 ) -> ApiResponse[AgentRunData]:
     return ApiResponse(data=AgentService(db, user).get(run_id))
+
+
+@router.get("/runs/{run_id}/courseware-impact", response_model=ApiResponse[dict])
+def get_courseware_impact(
+    run_id: int,
+    user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    run = AgentService(db, user)._get_owned(run_id)
+    return ApiResponse(
+        message="课件影响范围已按当前已核验证据重新计算",
+        data={"record": analyze_run_courseware_impact(db, run)},
+    )
+
+
+@router.post(
+    "/runs/{run_id}/courseware-impact/draft",
+    response_model=ApiResponse[dict],
+)
+def create_courseware_impact_draft(
+    run_id: int,
+    payload: CoursewareImpactDraftRequest,
+    user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[dict]:
+    run = AgentService(db, user)._get_owned(run_id)
+    data = draft_courseware_impact(
+        db,
+        run,
+        change_id=payload.change_id,
+        slide_index=payload.slide_index,
+        expected_revision_id=payload.expected_revision_id,
+        user_id=user.id,
+    )
+    return ApiResponse(
+        message="已生成待教师核验的修改草稿；未写入数据库或课件",
+        data=data,
+    )
+
+
+@router.post("/runs/{run_id}/courseware-impact/apply", response_model=ApiResponse[AgentRunData])
+def apply_courseware_impact(
+    run_id: int,
+    payload: CoursewareImpactApplyRequest,
+    user: User = Depends(require_roles("teacher", "admin")),
+    db: Session = Depends(get_db),
+) -> ApiResponse[AgentRunData]:
+    data = AgentService(db, user).apply_courseware_impact(run_id, payload)
+    return ApiResponse(message="已保存为课件新版本，上一版本已保留；未发布", data=data)
 
 
 @router.post("/runs/{run_id}/confirm", response_model=ApiResponse[AgentRunData])

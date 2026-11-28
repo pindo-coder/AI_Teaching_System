@@ -381,7 +381,9 @@ class PptWorkflowService:
             _PPT_JOB_GATE.release()
 
     def revise(self, original: dict, index: int, request: PptSlideRevisionRequest,
-               evidence: list[dict]) -> tuple[dict, dict]:
+               evidence: list[dict], *, page_override: dict | None = None) -> tuple[dict, dict]:
+        # page_override: teacher-reviewed PptPage fields (already validated by the
+        # caller). It replaces the model call; SVG binding/export are unchanged.
         if original.get("pipeline_version") != "ppt-master-svg-v2":
             raise ValueError("旧版课件只支持下载，请重新生成新版后进行单页修改")
         if not _PPT_JOB_GATE.acquire(blocking=False):
@@ -392,7 +394,9 @@ class PptWorkflowService:
             old_page = data["slides"][index]
             page = deepcopy(old_page)
             preferences = PptPreferences.model_validate(data["preferences"])
-            if request.mode != "design":
+            if page_override is not None:
+                page = deepcopy(page_override)
+            elif request.mode != "design":
                 error = ""
                 for attempt in range(settings.ppt_page_repair_attempts + 1):
                     self._checkpoint("revising", index, len(data["slides"]))
